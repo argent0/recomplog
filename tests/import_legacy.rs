@@ -581,3 +581,217 @@ fn legacy_import_nutrition_domain() {
     assert_eq!(purchases2, 1);
     assert_eq!(consumptions2, 1);
 }
+
+/// Real repslog DBs have no `finished_at` on workouts — import must still succeed.
+fn build_repslog_no_finished_at(path: &Path) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        r#"
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE exercises (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            category TEXT NOT NULL,
+            muscle_groups TEXT,
+            equipment TEXT,
+            description TEXT,
+            is_custom INTEGER DEFAULT 0,
+            created_at TEXT,
+            load_type TEXT NOT NULL DEFAULT 'external'
+        );
+        CREATE TABLE workouts (
+            id INTEGER PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            workout_type TEXT,
+            notes TEXT,
+            overall_feeling INTEGER,
+            duration_minutes INTEGER,
+            created_at TEXT
+        );
+        CREATE TABLE workout_exercises (
+            id INTEGER PRIMARY KEY,
+            workout_id INTEGER NOT NULL REFERENCES workouts(id) ON DELETE CASCADE,
+            exercise_id INTEGER NOT NULL REFERENCES exercises(id),
+            "order" INTEGER NOT NULL,
+            notes TEXT,
+            goal_reps INTEGER
+        );
+        CREATE TABLE exercise_sets (
+            id INTEGER PRIMARY KEY,
+            workout_exercise_id INTEGER NOT NULL REFERENCES workout_exercises(id) ON DELETE CASCADE,
+            set_number INTEGER NOT NULL,
+            reps INTEGER,
+            weight_kg REAL,
+            phase TEXT NOT NULL DEFAULT 'working',
+            created_at TEXT
+        );
+        INSERT INTO exercises (id, name, category, load_type, created_at)
+        VALUES (1, 'bench press', 'strength', 'external', '2026-07-01 00:00:00');
+        INSERT INTO workouts (id, started_at, workout_type, notes, created_at)
+        VALUES (1, '2026-07-01 18:00:00', 'push', 'solid', '2026-07-01 18:00:00');
+        INSERT INTO workout_exercises (id, workout_id, exercise_id, "order")
+        VALUES (1, 1, 1, 1);
+        INSERT INTO exercise_sets (id, workout_exercise_id, set_number, reps, weight_kg, phase, created_at)
+        VALUES (1, 1, 1, 5, 100.0, 'full', '2026-07-01 18:00:00');
+        "#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn legacy_import_repslog_without_finished_at() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("repslog_real.db");
+    let dst = dir.path().join("target.db");
+    let src_s = src.display().to_string();
+    let db_s = dst.display().to_string();
+    build_repslog_no_finished_at(&src);
+    init_target(&db_s);
+
+    let out = bin()
+        .args([
+            "--db",
+            &db_s,
+            "--json",
+            "import",
+            "legacy",
+            "--from-db",
+            &src_s,
+            "--domain",
+            "workout",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["success"], true);
+    let n = &v["counts"]["workout"];
+    // exercises may be 0 when name already exists from seed — remapped by name.
+    assert_eq!(n["workouts"], 1);
+    assert_eq!(n["workout_exercises"], 1);
+    assert_eq!(n["sets"], 1);
+
+    let target = Connection::open(&dst).unwrap();
+    let finished: Option<String> = target
+        .query_row("SELECT finished_at FROM workouts WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(finished.is_none());
+    let reps: i64 = target
+        .query_row("SELECT reps FROM exercise_sets WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(reps, 5);
+    // Name remap: source exercise id 1 ("bench press") must not attach to seed id 1 ("pushups").
+    let ename: String = target
+        .query_row(
+            "SELECT e.name FROM workout_exercises we
+             JOIN exercises e ON e.id = we.exercise_id
+             WHERE we.id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ename.to_lowercase(), "bench press");
+}
+
+/// Purchases with store_id require stores to be imported first (FK).
+fn build_nutlog_with_store(path: &Path) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE products (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE nutrients (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            unit TEXT NOT NULL,
+            recommended_intake REAL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE stores (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE purchases (
+            id INTEGER PRIMARY KEY,
+            product_id INTEGER NOT NULL,
+            quantity REAL NOT NULL,
+            price_cents INTEGER,
+            store_id INTEGER,
+            purchased_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE consumptions (
+            id INTEGER PRIMARY KEY,
+            product_id INTEGER NOT NULL,
+            quantity REAL NOT NULL,
+            unit TEXT,
+            consumed_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO products (id, name, created_at, updated_at)
+        VALUES (1, 'Chicken', '2026-07-01 08:00:00', '2026-07-01 08:00:00');
+        INSERT INTO stores (id, name, created_at)
+        VALUES (1, 'Local Market', '2026-07-01 08:00:00');
+        INSERT INTO purchases (id, product_id, quantity, price_cents, store_id, purchased_at, created_at)
+        VALUES (1, 1, 1.0, 999, 1, '2026-07-01 09:00:00', '2026-07-01 09:00:00');
+        INSERT INTO consumptions (id, product_id, quantity, unit, consumed_at, created_at)
+        VALUES (1, 1, 200.0, 'g', '2026-07-01 12:00:00', '2026-07-01 12:00:00');
+        "#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn legacy_import_nutrition_with_store_fk() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("nutlog_store.db");
+    let dst = dir.path().join("target.db");
+    let src_s = src.display().to_string();
+    let db_s = dst.display().to_string();
+    build_nutlog_with_store(&src);
+    init_target(&db_s);
+
+    let out = bin()
+        .args([
+            "--db",
+            &db_s,
+            "--json",
+            "import",
+            "legacy",
+            "--from-db",
+            &src_s,
+            "--domain",
+            "nutrition",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["success"], true);
+    assert_eq!(v["counts"]["nutrition"]["purchases"], 1);
+
+    let target = Connection::open(&dst).unwrap();
+    let store: String = target
+        .query_row("SELECT name FROM stores WHERE id = 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(store, "Local Market");
+    let sid: i64 = target
+        .query_row("SELECT store_id FROM purchases WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(sid, 1);
+}

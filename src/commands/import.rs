@@ -549,6 +549,48 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             );
         }
     }
+
+    // stores must be loaded before purchases (purchases.store_id FK)
+    if let Ok(mut stmt) = src.prepare("SELECT id, name, created_at FROM stores") {
+        for row in stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (id, name, ca) = row?;
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO stores (id, name, created_at) VALUES (?1,?2,?3)",
+                params![id, name, ca],
+            );
+        }
+    }
+    if let Ok(mut stmt) = src.prepare("SELECT id, name, created_at FROM store_tags") {
+        for row in stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (id, name, ca) = row?;
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO store_tags (id, name, created_at) VALUES (?1,?2,?3)",
+                params![id, name, ca],
+            );
+        }
+    }
+    if let Ok(mut stmt) = src.prepare("SELECT store_id, tag_id FROM store_tag_associations") {
+        for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+            let (sid, tid) = row?;
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO store_tag_associations (store_id, tag_id) VALUES (?1,?2)",
+                params![sid, tid],
+            );
+        }
+    }
+
     {
         let mut stmt = src.prepare(
             "SELECT id, product_id, quantity, price_cents, store_id, purchased_at, created_at FROM purchases",
@@ -593,22 +635,6 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
         }
     }
 
-    // stores
-    if let Ok(mut stmt) = src.prepare("SELECT id, name, created_at FROM stores") {
-        for row in stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })? {
-            let (id, name, ca) = row?;
-            let _ = tx.execute(
-                "INSERT OR IGNORE INTO stores (id, name, created_at) VALUES (?1,?2,?3)",
-                params![id, name, ca],
-            );
-        }
-    }
     // micronutrients
     if let Ok(mut stmt) =
         src.prepare("SELECT product_id, nutrient_id, amount, unit FROM product_micronutrients")
@@ -812,6 +838,40 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
     Ok(serde_json::json!({"measurements": measurements, "sleep": sleeps}))
 }
 
+/// Preferred columns for parent workout tables. Copied when present on both DBs.
+/// Real repslog DBs omit `finished_at` (recomplog-only); older ones may omit `load_type` / `goal_reps`.
+const EXERCISE_COLUMNS: &[&str] = &[
+    "id",
+    "name",
+    "category",
+    "muscle_groups",
+    "equipment",
+    "load_type",
+    "description",
+    "is_custom",
+    "created_at",
+];
+
+const WORKOUT_COLUMNS: &[&str] = &[
+    "id",
+    "started_at",
+    "finished_at",
+    "workout_type",
+    "notes",
+    "overall_feeling",
+    "duration_minutes",
+    "created_at",
+];
+
+const WORKOUT_EXERCISE_COLUMNS: &[&str] = &[
+    "id",
+    "workout_id",
+    "exercise_id",
+    "order",
+    "notes",
+    "goal_reps",
+];
+
 /// Preferred `exercise_sets` columns (baseline + cardio/provenance). Copied when present on both DBs.
 const EXERCISE_SET_COLUMNS: &[&str] = &[
     "id",
@@ -874,10 +934,6 @@ const ACTIVITY_TRACKPOINT_COLUMNS: &[&str] = &[
 
 fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value> {
     let tx = dst.transaction()?;
-    let mut exercises = 0i64;
-    let mut workouts = 0i64;
-    let mut we = 0i64;
-    let mut sets = 0i64;
     let mut sets_with_zones = 0i64;
     let mut sets_with_laps = 0i64;
     let mut activity_imports = 0i64;
@@ -885,78 +941,27 @@ fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Va
     let mut imports_skipped = 0i64;
     let mut trackpoints_skipped = 0i64;
 
-    if let Ok(mut stmt) = src.prepare(
-        "SELECT id, name, category, muscle_groups, equipment, load_type, description, is_custom, created_at FROM exercises",
-    ) {
-        for row in stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, String>(5).unwrap_or_else(|_| "weight".into()),
-                r.get::<_, Option<String>>(6)?,
-                r.get::<_, Option<i64>>(7)?,
-                r.get::<_, String>(8).unwrap_or_default(),
-            ))
-        })? {
-            let (id, name, cat, mg, eq, lt, desc, custom, ca) = row?;
-            exercises += tx.execute(
-                "INSERT OR IGNORE INTO exercises (id, name, category, muscle_groups, equipment, load_type, description, is_custom, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                params![id, name, cat, mg, eq, lt, desc, custom, ca],
-            )? as i64;
-        }
-    }
-
-    if let Ok(mut stmt) = src.prepare(
-        "SELECT id, started_at, finished_at, workout_type, notes, overall_feeling, duration_minutes, created_at FROM workouts",
-    ) {
-        for row in stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, Option<i64>>(5)?,
-                r.get::<_, Option<i64>>(6)?,
-                r.get::<_, String>(7).unwrap_or_default(),
-            ))
-        })? {
-            let (id, started, finished, wtype, notes, feeling, dur, ca) = row?;
-            workouts += tx.execute(
-                "INSERT OR IGNORE INTO workouts (id, started_at, finished_at, workout_type, notes, overall_feeling, duration_minutes, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![id, started, finished, wtype, notes, feeling, dur, ca],
-            )? as i64;
-        }
-    }
-
-    if let Ok(mut stmt) = src.prepare(
-        r#"SELECT id, workout_id, exercise_id, "order", notes, goal_reps FROM workout_exercises"#,
-    ) {
-        for row in stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, Option<i64>>(5)?,
-            ))
-        })? {
-            let (id, wid, eid, order, notes, goal) = row?;
-            we += tx.execute(
-                r#"INSERT OR IGNORE INTO workout_exercises (id, workout_id, exercise_id, "order", notes, goal_reps)
-                 VALUES (?1,?2,?3,?4,?5,?6)"#,
-                params![id, wid, eid, order, notes, goal],
-            )? as i64;
-        }
-    }
+    // Exercises: match by name when target already has seeds / prior data; remap FKs.
+    let (exercises, exercise_id_map) = if table_exists(src, "exercises") {
+        copy_exercises_with_remap(src, &tx)?
+    } else {
+        (0, std::collections::HashMap::new())
+    };
+    // Workouts: column intersection so real repslog (no finished_at) works.
+    let workouts = if table_exists(src, "workouts") {
+        copy_rows_by_columns(src, &tx, "workouts", WORKOUT_COLUMNS)?
+    } else {
+        0
+    };
+    let we = if table_exists(src, "workout_exercises") {
+        copy_workout_exercises(src, &tx, &exercise_id_map)?
+    } else {
+        0
+    };
 
     // exercise_sets — intersection of preferred columns present on both source and target
+    let mut sets = 0i64;
+    let mut weight_zero_to_null = 0i64;
     if table_exists(src, "exercise_sets") {
         let cols = intersect_columns(
             EXERCISE_SET_COLUMNS,
@@ -966,7 +971,8 @@ fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Va
         if !cols.is_empty() {
             let zones_idx = cols.iter().position(|c| c == "heart_rate_zones");
             let laps_idx = cols.iter().position(|c| c == "laps");
-            let col_list = cols.join(", ");
+            let weight_idx = cols.iter().position(|c| c == "weight_kg");
+            let col_list = sql_column_list(&cols);
             let placeholders = (1..=cols.len())
                 .map(|i| format!("?{i}"))
                 .collect::<Vec<_>>()
@@ -978,10 +984,22 @@ fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Va
             let mut insert = tx.prepare(&insert_sql)?;
             let mut rows = select.query([])?;
             while let Some(row) = rows.next()? {
-                let values = row_values(row, cols.len())?;
+                let mut values = row_values(row, cols.len())?;
+                // Legacy bodyweight sets often store weight_kg=0 meaning "unloaded".
+                // recomplog treats 0 as invalid (min 0.001); NULL is the correct sentinel.
+                let mut normalized_zero_weight = false;
+                if let Some(wi) = weight_idx {
+                    if value_is_zero_number(&values[wi]) {
+                        values[wi] = Value::Null;
+                        normalized_zero_weight = true;
+                    }
+                }
                 let n = insert.execute(params_from_iter(values.iter()))? as i64;
                 sets += n;
                 if n > 0 {
+                    if normalized_zero_weight {
+                        weight_zero_to_null += 1;
+                    }
                     if zones_idx.is_some_and(|i| !matches!(values[i], Value::Null)) {
                         sets_with_zones += 1;
                     }
@@ -1002,7 +1020,7 @@ fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Va
         );
         if let Some(wid_idx) = cols.iter().position(|c| c == "workout_id") {
             let parent_ids = load_id_set(&tx, "workouts")?;
-            let col_list = cols.join(", ");
+            let col_list = sql_column_list(&cols);
             let placeholders = (1..=cols.len())
                 .map(|i| format!("?{i}"))
                 .collect::<Vec<_>>()
@@ -1035,7 +1053,7 @@ fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Va
         );
         if let Some(sid_idx) = cols.iter().position(|c| c == "exercise_set_id") {
             let parent_ids = load_id_set(&tx, "exercise_sets")?;
-            let col_list = cols.join(", ");
+            let col_list = sql_column_list(&cols);
             let placeholders = (1..=cols.len())
                 .map(|i| format!("?{i}"))
                 .collect::<Vec<_>>()
@@ -1069,9 +1087,194 @@ fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Va
         "activity_trackpoints": activity_trackpoints,
         "sets_with_zones": sets_with_zones,
         "sets_with_laps": sets_with_laps,
+        "weight_zero_to_null": weight_zero_to_null,
         "imports_skipped": imports_skipped,
         "trackpoints_skipped": trackpoints_skipped,
     }))
+}
+
+/// Quote SQL identifiers that are reserved words (e.g. `order`).
+fn sql_ident(col: &str) -> String {
+    if col.eq_ignore_ascii_case("order") {
+        format!("\"{col}\"")
+    } else {
+        col.to_string()
+    }
+}
+
+fn sql_column_list(cols: &[String]) -> String {
+    cols.iter()
+        .map(|c| sql_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Copy all rows of `table` using the intersection of `preferred` columns present on both DBs.
+fn copy_rows_by_columns(
+    src: &Connection,
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    preferred: &[&str],
+) -> Result<i64> {
+    let cols = intersect_columns(
+        preferred,
+        &table_columns(src, table)?,
+        &table_columns(tx, table)?,
+    );
+    if cols.is_empty() {
+        return Ok(0);
+    }
+    let col_list = sql_column_list(&cols);
+    let placeholders = (1..=cols.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let select_sql = format!("SELECT {col_list} FROM {table} ORDER BY id");
+    let insert_sql = format!("INSERT OR IGNORE INTO {table} ({col_list}) VALUES ({placeholders})");
+    let mut select = src.prepare(&select_sql)?;
+    let mut insert = tx.prepare(&insert_sql)?;
+    let mut rows = select.query([])?;
+    let mut n = 0i64;
+    while let Some(row) = rows.next()? {
+        let values = row_values(row, cols.len())?;
+        n += insert.execute(params_from_iter(values.iter()))? as i64;
+    }
+    Ok(n)
+}
+
+/// Import exercises, preserving source IDs when free, otherwise remapping by name or new auto IDs.
+/// Returns (newly_inserted_count, source_id → target_id).
+fn copy_exercises_with_remap(
+    src: &Connection,
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<(i64, std::collections::HashMap<i64, i64>)> {
+    use std::collections::HashMap;
+
+    let src_cols = table_columns(src, "exercises")?;
+    let dst_cols = table_columns(tx, "exercises")?;
+    let cols = intersect_columns(EXERCISE_COLUMNS, &src_cols, &dst_cols);
+    if cols.is_empty() || !cols.iter().any(|c| c == "id") || !cols.iter().any(|c| c == "name") {
+        return Ok((0, HashMap::new()));
+    }
+    let id_idx = cols.iter().position(|c| c == "id").unwrap();
+    let name_idx = cols.iter().position(|c| c == "name").unwrap();
+    let col_list = sql_column_list(&cols);
+    let select_sql = format!("SELECT {col_list} FROM exercises ORDER BY id");
+    let mut select = src.prepare(&select_sql)?;
+    let mut rows = select.query([])?;
+
+    let mut map = HashMap::new();
+    let mut inserted = 0i64;
+
+    while let Some(row) = rows.next()? {
+        let values = row_values(row, cols.len())?;
+        let src_id = value_as_i64(&values[id_idx])
+            .ok_or_else(|| anyhow!("exercise row missing integer id during legacy import"))?;
+        let name = match &values[name_idx] {
+            Value::Text(s) => s.clone(),
+            other => {
+                return Err(anyhow!("exercise id {src_id} has non-text name: {other:?}"));
+            }
+        };
+
+        // Prefer existing exercise with same name (handles seeded catalogs).
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM exercises WHERE name = ?1 COLLATE NOCASE",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(tid) = existing {
+            map.insert(src_id, tid);
+            continue;
+        }
+
+        let id_taken: bool = tx
+            .query_row(
+                "SELECT 1 FROM exercises WHERE id = ?1",
+                params![src_id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+
+        if id_taken {
+            // Keep source fields but allocate a new primary key.
+            let cols_no_id: Vec<String> = cols.iter().filter(|c| *c != "id").cloned().collect();
+            let vals_no_id: Vec<Value> = cols
+                .iter()
+                .zip(values.iter())
+                .filter(|(c, _)| *c != "id")
+                .map(|(_, v)| v.clone())
+                .collect();
+            let col_list_ni = sql_column_list(&cols_no_id);
+            let ph = (1..=cols_no_id.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            tx.execute(
+                &format!("INSERT INTO exercises ({col_list_ni}) VALUES ({ph})"),
+                params_from_iter(vals_no_id.iter()),
+            )?;
+            let new_id = tx.last_insert_rowid();
+            map.insert(src_id, new_id);
+            inserted += 1;
+        } else {
+            let ph = (1..=cols.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            tx.execute(
+                &format!("INSERT INTO exercises ({col_list}) VALUES ({ph})"),
+                params_from_iter(values.iter()),
+            )?;
+            map.insert(src_id, src_id);
+            inserted += 1;
+        }
+    }
+
+    Ok((inserted, map))
+}
+
+/// Copy workout_exercises, remapping exercise_id through `exercise_id_map`.
+fn copy_workout_exercises(
+    src: &Connection,
+    tx: &rusqlite::Transaction<'_>,
+    exercise_id_map: &std::collections::HashMap<i64, i64>,
+) -> Result<i64> {
+    let cols = intersect_columns(
+        WORKOUT_EXERCISE_COLUMNS,
+        &table_columns(src, "workout_exercises")?,
+        &table_columns(tx, "workout_exercises")?,
+    );
+    if cols.is_empty() {
+        return Ok(0);
+    }
+    let eid_idx = cols.iter().position(|c| c == "exercise_id");
+    let col_list = sql_column_list(&cols);
+    let placeholders = (1..=cols.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let select_sql = format!("SELECT {col_list} FROM workout_exercises ORDER BY id");
+    let insert_sql =
+        format!("INSERT OR IGNORE INTO workout_exercises ({col_list}) VALUES ({placeholders})");
+    let mut select = src.prepare(&select_sql)?;
+    let mut insert = tx.prepare(&insert_sql)?;
+    let mut rows = select.query([])?;
+    let mut n = 0i64;
+    while let Some(row) = rows.next()? {
+        let mut values = row_values(row, cols.len())?;
+        if let Some(ei) = eid_idx {
+            if let Some(src_eid) = value_as_i64(&values[ei]) {
+                let target_eid = exercise_id_map.get(&src_eid).copied().unwrap_or(src_eid);
+                values[ei] = Value::Integer(target_eid);
+            }
+        }
+        n += insert.execute(params_from_iter(values.iter()))? as i64;
+    }
+    Ok(n)
 }
 
 fn table_columns(conn: &Connection, table: &str) -> Result<HashSet<String>> {
@@ -1110,6 +1313,15 @@ fn value_as_i64(v: &Value) -> Option<i64> {
         Value::Real(f) => Some(*f as i64),
         Value::Text(s) => s.parse().ok(),
         _ => None,
+    }
+}
+
+fn value_is_zero_number(v: &Value) -> bool {
+    match v {
+        Value::Integer(0) => true,
+        Value::Real(f) if *f == 0.0 => true,
+        Value::Text(s) => matches!(s.trim(), "0" | "0.0" | "0.00"),
+        _ => false,
     }
 }
 
