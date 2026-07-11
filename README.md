@@ -82,6 +82,7 @@ recomplog nutrition product list --json
 recomplog nutrition consumption create --product 1 --quantity 0.8 --date today
 
 # Reports
+recomplog report brief --days 7
 recomplog report html --days 14 --name dashboard.html
 recomplog --json report nutrition summary --days 7
 recomplog report body --days 30
@@ -102,7 +103,7 @@ recomplog config generate
 recomplog workout    # sessions, exercises, sets, stats
 recomplog body       # measurement, sleep, profile
 recomplog nutrition  # product, purchase, consumption, nutrient, store, tags
-recomplog report     # nutrition, body, sleep, summary, html
+recomplog report     # brief, nutrition, body, sleep, summary, html
 recomplog import     # fit | legacy
 recomplog config     # show | generate | path
 recomplog check      # audit against sanity limits

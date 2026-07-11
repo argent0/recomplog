@@ -18,7 +18,7 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
    - Training: `workout create|list|show|delete`, `workout exercise ...`, `workout set add|add-cardio|delete`
    - Body: `body measurement ...`, `body sleep ...`, `body profile ...`
    - Nutrition: `nutrition product|purchase|consumption|nutrient ...`
-   - Cross-cutting: `report`, `import`, `config`, `check`
+   - Cross-cutting: `report` (including `report brief`), `import`, `config`, `check`
 3. **Always** support `--json` for data-returning commands.
 4. Run `cargo fmt && cargo clippy -- -D warnings && cargo test` before finishing changes.
 5. Use the provided `clippy.toml` and `rustfmt.toml`.
@@ -88,6 +88,7 @@ recomplog --json workout set add --workout 1 --exercise "bench press" --reps 5 -
 recomplog --json workout set add-cluster --workout 1 --exercise "bench press" --reps "10,5,5" --weight 100 --phase full --rir "0,0,1" --effective-reps "6,4,3" --rest 15
 recomplog import fit activity.fit --exercise running
 recomplog import legacy --from-db ../bodylog/bodylog.db --dry-run
+recomplog --json report brief --days 7
 recomplog report html --days 14 --name dashboard.html
 ```
 

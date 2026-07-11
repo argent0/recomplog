@@ -230,6 +230,70 @@ pub struct ProductSpending {
     pub purchase_count: i64,
 }
 
+// ---------- Brief report (multi-section daily dump) ----------
+
+/// One consumption line in `report brief` (matches consumption list JSON).
+#[derive(Serialize, Debug, Clone)]
+pub struct BriefConsumption {
+    pub id: i64,
+    pub product_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_name: Option<String>,
+    pub quantity: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    pub consumed_at: String,
+}
+
+/// Compact workout row for brief report sections.
+#[derive(Serialize, Debug, Clone)]
+pub struct BriefWorkout {
+    pub id: i64,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workout_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overall_feeling: Option<i64>,
+}
+
+/// Aggregate training stats for a period (HTML overview parity).
+#[derive(Serialize, Debug, Clone)]
+pub struct WorkoutPeriodOverview {
+    pub period: Period,
+    pub workout_count: i64,
+    pub days_trained: i64,
+    pub set_count: i64,
+    pub total_volume: f64,
+    /// Workouts in this period (newest first).
+    pub workouts: Vec<BriefWorkout>,
+}
+
+/// Today + previous lookback for training in `report brief`.
+#[derive(Serialize, Debug, Clone)]
+pub struct BriefWorkouts {
+    pub today: Vec<BriefWorkout>,
+    /// Overview of the N calendar days before today (same N as `--days`).
+    pub previous: WorkoutPeriodOverview,
+}
+
+/// Combined multi-section brief: today logs + N-day lookback lists.
+#[derive(Serialize, Debug)]
+pub struct BriefReport {
+    /// Lookback window for nutrition / measurements / sleep (includes today).
+    pub period: Period,
+    pub consumption_today: Vec<BriefConsumption>,
+    pub nutrition_daily: NutritionDailyReport,
+    pub measurements: Vec<Measurement>,
+    pub sleep: Vec<Sleep>,
+    pub workouts: BriefWorkouts,
+}
+
 /// User-level profile / settings (singleton). Managed via `recomplog config ...`.
 #[derive(Serialize, Debug, Clone)]
 pub struct UserProfile {

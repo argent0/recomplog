@@ -6,14 +6,15 @@ use crate::cli::{
 use crate::config::SanityLimits;
 use crate::db;
 use crate::models::{
-    DailyNutritionEntry, MacroTotals, MicroTotal, NutritionDailyReport, NutritionReport, Period,
-    ProductSpending, SpendingReport, StoreSpending,
+    BriefConsumption, BriefReport, BriefWorkout, BriefWorkouts, DailyNutritionEntry, MacroTotals,
+    Measurement, MicroTotal, NutritionDailyReport, NutritionReport, Period, ProductSpending, Sleep,
+    SpendingReport, StoreSpending, WorkoutPeriodOverview,
 };
 use crate::repository::BodyRepository;
-use crate::utils::{parse_date_to_ymd, print_json, print_table};
+use crate::utils::{format_minutes, parse_date_to_ymd, print_json, print_table};
 use anyhow::{anyhow, Result};
-use chrono::{Local, NaiveDate};
-use rusqlite::Connection;
+use chrono::{Duration, Local, NaiveDate};
+use rusqlite::{params, Connection};
 use std::collections::{BTreeMap, HashMap};
 
 pub fn handle(
@@ -48,6 +49,7 @@ pub fn handle(
             )
             .map_err(Into::into)
         }
+        ReportAction::Brief { days } => handle_brief(days, db_override, json),
         ReportAction::Nutrition { action } => handle_nutrition_report(action, db_override, json),
         ReportAction::Html {
             days,
@@ -55,6 +57,389 @@ pub fn handle(
             name,
         } => super::report_html::handle_html(days, &output_dir, &name, db_override, json, quiet),
     }
+}
+
+// ---------- Brief report (multi-section daily dump) ----------
+
+fn handle_brief(days: u32, db_override: Option<&str>, json: bool) -> Result<()> {
+    if days == 0 {
+        return Err(anyhow!("--days must be >= 1"));
+    }
+
+    let today = Local::now().date_naive();
+    let today_s = today.format("%Y-%m-%d").to_string();
+    let since_date = today - Duration::days(i64::from(days) - 1);
+    let since_s = since_date.format("%Y-%m-%d").to_string();
+
+    let period = Period {
+        since: Some(since_s.clone()),
+        until: Some(today_s.clone()),
+        days: Some(days),
+    };
+
+    // Previous N calendar days before today (same N as --days).
+    let prev_until = today - Duration::days(1);
+    let prev_since = today - Duration::days(i64::from(days));
+    let prev_since_s = prev_since.format("%Y-%m-%d").to_string();
+    let prev_until_s = prev_until.format("%Y-%m-%d").to_string();
+    let prev_period = Period {
+        since: Some(prev_since_s.clone()),
+        until: Some(prev_until_s.clone()),
+        days: Some(days),
+    };
+
+    let conn = db::open_db(db_override)?;
+
+    let consumption_today = fetch_brief_consumptions(&conn, &today_s)?;
+    let nutrition_daily = build_nutrition_daily_report(
+        &conn,
+        &NutritionPeriodArgs {
+            since: None,
+            until: None,
+            days: Some(days),
+        },
+        NutritionReportValue::Macronutrients,
+    )?;
+    let workouts_today = fetch_brief_workouts_on_day(&conn, &today_s)?;
+    let previous_workouts = fetch_brief_workouts_in_range(&conn, &prev_since_s, &prev_until_s)?;
+    let previous_overview = fetch_workout_period_overview(&conn, prev_period, previous_workouts)?;
+
+    let repo = BodyRepository::new(conn);
+    let measurements = repo
+        .list_measurements(Some(&since_s), Some(&today_s))
+        .map_err(|e| anyhow!("{e}"))?;
+    let sleep = repo
+        .list_sleeps(Some(&since_s), Some(&today_s))
+        .map_err(|e| anyhow!("{e}"))?;
+
+    let report = BriefReport {
+        period,
+        consumption_today,
+        nutrition_daily,
+        measurements,
+        sleep,
+        workouts: BriefWorkouts {
+            today: workouts_today,
+            previous: previous_overview,
+        },
+    };
+
+    if json {
+        print_json(&report);
+    } else {
+        print_brief_human(&report, days);
+    }
+    Ok(())
+}
+
+fn build_nutrition_daily_report(
+    conn: &Connection,
+    period: &NutritionPeriodArgs,
+    value: NutritionReportValue,
+) -> Result<NutritionDailyReport> {
+    let resolved = resolve_nutrition_report_period(period)?;
+    let rows = fetch_nutrition_consumptions(conn, &resolved)?;
+    let days = build_daily_entries(&rows, resolved.fill_range, value)?;
+    Ok(NutritionDailyReport {
+        period: resolved.period,
+        value: value.label().to_string(),
+        days,
+    })
+}
+
+fn fetch_brief_consumptions(conn: &Connection, today_ymd: &str) -> Result<Vec<BriefConsumption>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.product_id, p.name, c.quantity, c.unit, c.consumed_at
+         FROM consumptions c
+         LEFT JOIN products p ON p.id = c.product_id
+         WHERE date(c.consumed_at) = date(?1)
+         ORDER BY c.consumed_at DESC
+         LIMIT 100",
+    )?;
+    let rows = stmt
+        .query_map(params![today_ymd], |r| {
+            Ok(BriefConsumption {
+                id: r.get(0)?,
+                product_id: r.get(1)?,
+                product_name: r.get(2)?,
+                quantity: r.get(3)?,
+                unit: r.get(4)?,
+                consumed_at: r.get(5)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn map_brief_workout(r: &rusqlite::Row<'_>) -> rusqlite::Result<BriefWorkout> {
+    Ok(BriefWorkout {
+        id: r.get(0)?,
+        started_at: r.get(1)?,
+        finished_at: r.get(2)?,
+        workout_type: r.get(3)?,
+        notes: r.get(4)?,
+        duration_minutes: r.get(5)?,
+        overall_feeling: r.get(6)?,
+    })
+}
+
+fn fetch_brief_workouts_on_day(conn: &Connection, day_ymd: &str) -> Result<Vec<BriefWorkout>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, started_at, finished_at, workout_type, notes, duration_minutes, overall_feeling
+         FROM workouts
+         WHERE date(started_at, 'localtime') = date(?1)
+         ORDER BY started_at DESC",
+    )?;
+    let rows = stmt
+        .query_map(params![day_ymd], map_brief_workout)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn fetch_brief_workouts_in_range(
+    conn: &Connection,
+    since_ymd: &str,
+    until_ymd: &str,
+) -> Result<Vec<BriefWorkout>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, started_at, finished_at, workout_type, notes, duration_minutes, overall_feeling
+         FROM workouts
+         WHERE date(started_at, 'localtime') >= date(?1)
+           AND date(started_at, 'localtime') <= date(?2)
+         ORDER BY started_at DESC",
+    )?;
+    let rows = stmt
+        .query_map(params![since_ymd, until_ymd], map_brief_workout)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn fetch_workout_period_overview(
+    conn: &Connection,
+    period: Period,
+    workouts: Vec<BriefWorkout>,
+) -> Result<WorkoutPeriodOverview> {
+    let since = period.since.as_deref().unwrap_or("");
+    let until = period.until.as_deref().unwrap_or("");
+
+    let (workout_count, days_trained): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*) AS workout_count,
+                COUNT(DISTINCT date(started_at, 'localtime')) AS days_trained
+         FROM workouts
+         WHERE date(started_at, 'localtime') >= date(?1)
+           AND date(started_at, 'localtime') <= date(?2)",
+        params![since, until],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    let (total_volume, set_count): (f64, i64) = conn.query_row(
+        "SELECT COALESCE(SUM(CASE
+                 WHEN s.weight_kg IS NULL OR s.reps IS NULL THEN 0.0
+                 WHEN e.load_type = 'body_mass'
+                   THEN (s.weight_kg + COALESCE(s.external_load_kg, 0)) * s.reps
+                 ELSE s.weight_kg * s.reps
+               END), 0) AS total_volume,
+               COUNT(s.id) AS set_count
+         FROM exercise_sets s
+         JOIN workout_exercises we ON s.workout_exercise_id = we.id
+         JOIN exercises e ON we.exercise_id = e.id
+         JOIN workouts w ON we.workout_id = w.id
+         WHERE date(w.started_at, 'localtime') >= date(?1)
+           AND date(w.started_at, 'localtime') <= date(?2)",
+        params![since, until],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    Ok(WorkoutPeriodOverview {
+        period,
+        workout_count,
+        days_trained,
+        set_count,
+        total_volume,
+        workouts,
+    })
+}
+
+fn print_brief_human(report: &BriefReport, days: u32) {
+    println!("=== Consumption (today) ===");
+    if report.consumption_today.is_empty() {
+        println!("(no consumptions)");
+    } else {
+        for c in &report.consumption_today {
+            let name = c.product_name.as_deref().unwrap_or("?");
+            println!("{}: {} qty={} on {}", c.id, name, c.quantity, c.consumed_at);
+        }
+    }
+
+    println!();
+    println!("=== Nutrition by day (macronutrients, last {days} days) ===");
+    print_nutrition_daily_table(&report.nutrition_daily);
+
+    println!();
+    println!("=== Measurements (last {days} days) ===");
+    print_measurements_table(&report.measurements);
+
+    println!();
+    println!("=== Sleep (last {days} days) ===");
+    print_sleep_table(&report.sleep);
+
+    println!();
+    println!("=== Workouts (today) ===");
+    print_workouts_table(&report.workouts.today);
+
+    println!();
+    let prev = &report.workouts.previous;
+    let prev_since = prev.period.since.as_deref().unwrap_or("?");
+    let prev_until = prev.period.until.as_deref().unwrap_or("?");
+    println!("=== Workouts overview (previous {days} days: {prev_since} → {prev_until}) ===");
+    if prev.workout_count == 0 {
+        println!("(no workouts)");
+    } else {
+        println!(
+            "Sessions: {} | Days trained: {} | Sets: {} | Volume: {:.0}",
+            prev.workout_count, prev.days_trained, prev.set_count, prev.total_volume
+        );
+        print_workouts_table(&prev.workouts);
+    }
+}
+
+fn print_nutrition_daily_table(report: &NutritionDailyReport) {
+    if report.days.is_empty() {
+        println!("(no days)");
+        return;
+    }
+    let table_rows: Vec<Vec<String>> = report
+        .days
+        .iter()
+        .map(|day| {
+            vec![
+                day.date.clone(),
+                fmt_opt_f64(day.totals.energy_kcal),
+                fmt_opt_f64(day.totals.protein_g),
+                fmt_opt_f64(day.totals.carbohydrates_g),
+                fmt_opt_f64(day.totals.fat_g),
+                fmt_opt_f64(day.totals.fiber_g),
+                fmt_opt_f64(day.totals.sugars_g),
+                day.total_consumed_items.to_string(),
+            ]
+        })
+        .collect();
+    print_table(
+        vec![
+            "Date",
+            "Energy (kcal)",
+            "Protein (g)",
+            "Carbs (g)",
+            "Fat (g)",
+            "Fiber (g)",
+            "Sugars (g)",
+            "Items",
+        ],
+        table_rows,
+    );
+}
+
+fn print_measurements_table(measurements: &[Measurement]) {
+    if measurements.is_empty() {
+        println!("(no measurements)");
+        return;
+    }
+    let rows: Vec<Vec<String>> = measurements
+        .iter()
+        .map(|m| {
+            vec![
+                m.id.to_string(),
+                m.date.clone(),
+                brief_opt_f64(m.weight_kg),
+                brief_opt_f64(m.body_fat_pct),
+                brief_opt_f64(m.skeletal_muscle_pct),
+                brief_opt_i64(m.visceral_fat_level),
+                brief_opt_f64(m.bmi),
+                brief_opt_i64(m.resting_metabolism_kcal),
+            ]
+        })
+        .collect();
+    print_table(
+        vec![
+            "ID",
+            "Date",
+            "Weight (kg)",
+            "Body Fat %",
+            "Muscle %",
+            "Visceral",
+            "BMI",
+            "RMR (kcal)",
+        ],
+        rows,
+    );
+}
+
+fn print_sleep_table(sleeps: &[Sleep]) {
+    if sleeps.is_empty() {
+        println!("(no sleep entries)");
+        return;
+    }
+    let rows: Vec<Vec<String>> = sleeps
+        .iter()
+        .map(|s| {
+            vec![
+                s.id.to_string(),
+                s.date.clone(),
+                s.bedtime.clone().unwrap_or_default(),
+                s.wake_time.clone().unwrap_or_default(),
+                s.total_sleep_minutes
+                    .map(format_minutes)
+                    .unwrap_or_default(),
+                s.sleep_efficiency_pct
+                    .map(|v| format!("{:.1}", v))
+                    .unwrap_or_default(),
+                brief_opt_i64(s.sleep_score),
+                brief_opt_i64(s.subjective_quality),
+            ]
+        })
+        .collect();
+    print_table(
+        vec![
+            "ID",
+            "Date",
+            "Bedtime",
+            "Wake",
+            "Total Sleep",
+            "Eff%",
+            "Score",
+            "Quality",
+        ],
+        rows,
+    );
+}
+
+fn print_workouts_table(workouts: &[BriefWorkout]) {
+    if workouts.is_empty() {
+        println!("(no workouts)");
+        return;
+    }
+    let table_rows: Vec<Vec<String>> = workouts
+        .iter()
+        .map(|w| {
+            vec![
+                w.id.to_string(),
+                w.started_at.clone(),
+                w.workout_type.clone().unwrap_or_default(),
+                w.duration_minutes
+                    .map(|d| d.to_string())
+                    .unwrap_or_default(),
+            ]
+        })
+        .collect();
+    print_table(vec!["id", "started", "type", "min"], table_rows);
+}
+
+fn brief_opt_f64(v: Option<f64>) -> String {
+    v.map(|x| format!("{:.1}", x)).unwrap_or_default()
+}
+
+fn brief_opt_i64(v: Option<i64>) -> String {
+    v.map(|x| x.to_string()).unwrap_or_default()
 }
 
 // ---------- Nutrition reports (nutlog parity) ----------
@@ -409,14 +794,7 @@ fn nutrition_list(
     value: NutritionReportValue,
     json: bool,
 ) -> Result<()> {
-    let resolved = resolve_nutrition_report_period(period)?;
-    let rows = fetch_nutrition_consumptions(conn, &resolved)?;
-    let days = build_daily_entries(&rows, resolved.fill_range, value)?;
-    let report = NutritionDailyReport {
-        period: resolved.period,
-        value: value.label().to_string(),
-        days,
-    };
+    let report = build_nutrition_daily_report(conn, period, value)?;
 
     if json {
         print_json(&report);
@@ -424,35 +802,7 @@ fn nutrition_list(
         println!("Nutrition by day ({}): (no days)", report.value);
     } else if value == NutritionReportValue::Macronutrients {
         println!("Nutrition by day ({})", report.value);
-        let table_rows: Vec<Vec<String>> = report
-            .days
-            .iter()
-            .map(|day| {
-                vec![
-                    day.date.clone(),
-                    fmt_opt_f64(day.totals.energy_kcal),
-                    fmt_opt_f64(day.totals.protein_g),
-                    fmt_opt_f64(day.totals.carbohydrates_g),
-                    fmt_opt_f64(day.totals.fat_g),
-                    fmt_opt_f64(day.totals.fiber_g),
-                    fmt_opt_f64(day.totals.sugars_g),
-                    day.total_consumed_items.to_string(),
-                ]
-            })
-            .collect();
-        print_table(
-            vec![
-                "Date",
-                "Energy (kcal)",
-                "Protein (g)",
-                "Carbs (g)",
-                "Fat (g)",
-                "Fiber (g)",
-                "Sugars (g)",
-                "Items",
-            ],
-            table_rows,
-        );
+        print_nutrition_daily_table(&report);
     } else {
         println!("Nutrition by day ({})", report.value);
         let value_header = match value {

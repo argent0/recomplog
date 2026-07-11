@@ -1042,6 +1042,17 @@ pub enum ReportAction {
     Sleep(ReportRangeArgs),
     /// Combined recomposition dashboard data (JSON for agents).
     Summary(SummaryArgs),
+    /// Multi-section terminal brief: today consumption + workouts, then N-day
+    /// nutrition / body / sleep / previous workouts overview.
+    ///
+    /// Replaces the multi-tool shell habit of listing consumption, nutrition,
+    /// measurements, and sleep in one shot.
+    Brief {
+        /// Lookback for nutrition, measurements, sleep, and previous workouts.
+        /// Today's consumption and today's workouts always use the current local day.
+        #[arg(short, long, default_value_t = 7)]
+        days: u32,
+    },
     /// Generate a self-contained mobile-friendly HTML dashboard report.
     Html {
         #[arg(short, long, default_value = "7")]
