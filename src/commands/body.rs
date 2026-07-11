@@ -6,13 +6,14 @@ use crate::cli::{
 use crate::config::SanityLimits;
 use crate::error::{RecomplogError, Result};
 use crate::models::{
-    Measurement, MeasurementPoint, MetricReport, MetricStats, Period, Sleep, SleepAverages,
-    SleepExtreme, SleepExtremes, SleepReport, SleepSummary, Success, SummaryReport,
+    HeartRateZones, Lap, Measurement, MeasurementPoint, MetricReport, MetricStats, Period, Sleep,
+    SleepAverages, SleepExtreme, SleepExtremes, SleepReport, SleepSummary, Success, SummaryReport,
 };
+use crate::repository::body::SetAuditRow;
 use crate::repository::BodyRepository as Repository;
 use crate::sanity::{
-    check_deltas, validate_absolute, validate_sleep_absolute, PreviousMetrics, ProposedMetrics,
-    ProposedSleepMetrics, SanityWarning,
+    check_deltas, collect_set_metric_errors, validate_absolute, validate_sleep_absolute,
+    PreviousMetrics, ProposedMetrics, ProposedSetMetrics, ProposedSleepMetrics, SanityWarning,
 };
 use crate::utils::{format_local, parse_date_to_ymd, resolve_date_range};
 use crate::utils::{format_minutes, parse_duration_to_minutes, print_table};
@@ -134,7 +135,7 @@ fn emit_sanity_warnings(warnings: &[SanityWarning]) {
 /// One finding from `recomplog check`.
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckViolation {
-    /// "measurement" or "sleep".
+    /// "measurement", "sleep", or "set".
     pub entity: String,
     /// "absolute" (hard limit) or "delta" (variation; measurements only).
     pub kind: String,
@@ -152,6 +153,9 @@ pub struct CheckViolation {
     pub allowed_delta: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub days_gap: Option<i64>,
+    /// Exercise name for set violations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exercise: Option<String>,
 }
 
 /// Report returned by `recomplog check` (JSON and human summary source).
@@ -161,8 +165,10 @@ pub struct CheckReport {
     pub ok: bool,
     pub measurement_count: i64,
     pub sleep_count: i64,
+    /// Number of exercise sets scanned in the date window.
+    pub set_count: i64,
     /// Whether measurement variation checks were run (`--variations`).
-    /// Sleep is absolute-only; this flag does not apply to sleep rows.
+    /// Sleep and sets are absolute-only; this flag does not apply to them.
     pub checked_variations: bool,
     pub hard_violation_count: i64,
     pub variation_violation_count: i64,
@@ -250,6 +256,61 @@ fn sleep_field_value(s: &Sleep, field: &str) -> Option<f64> {
     }
 }
 
+/// Map a stored set row into write-path proposed metrics.
+/// Invalid heart_rate_zones / laps JSON is skipped so numeric outliers still surface.
+fn proposed_from_set_row(row: &SetAuditRow) -> ProposedSetMetrics {
+    let heart_rate_zones = row
+        .heart_rate_zones
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<HeartRateZones>(s).ok());
+    let laps = row
+        .laps
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<Vec<Lap>>(s).ok());
+    ProposedSetMetrics {
+        reps: row.reps,
+        weight_kg: row.weight_kg,
+        external_load_kg: row.external_load_kg,
+        distance_km: row.distance_km,
+        duration_seconds: row.duration_seconds,
+        rpe: row.rpe,
+        rir: row.rir,
+        effective_reps: row.effective_reps,
+        rest_seconds: row.rest_seconds,
+        avg_heart_rate_bpm: row.avg_heart_rate_bpm,
+        max_heart_rate_bpm: row.max_heart_rate_bpm,
+        avg_pace_min_per_km: row.avg_pace_min_per_km,
+        calories_burned: row.calories_burned,
+        avg_cadence_spm: row.avg_cadence_spm,
+        total_ascent_m: row.total_ascent_m,
+        total_descent_m: row.total_descent_m,
+        heart_rate_zones,
+        laps,
+    }
+}
+
+fn set_field_value(row: &SetAuditRow, field: &str) -> Option<f64> {
+    match field {
+        "reps" => row.reps.map(|v| v as f64),
+        "weight_kg" => row.weight_kg,
+        "external_load_kg" => row.external_load_kg,
+        "distance_km" => row.distance_km,
+        "duration_seconds" => row.duration_seconds.map(|v| v as f64),
+        "rpe" => row.rpe,
+        "rir" => row.rir,
+        "effective_reps" => row.effective_reps.map(|v| v as f64),
+        "rest_seconds" => row.rest_seconds.map(|v| v as f64),
+        "avg_heart_rate_bpm" => row.avg_heart_rate_bpm,
+        "max_heart_rate_bpm" => row.max_heart_rate_bpm,
+        "avg_pace_min_per_km" => row.avg_pace_min_per_km,
+        "calories_burned" => row.calories_burned.map(|v| v as f64),
+        "avg_cadence_spm" => row.avg_cadence_spm,
+        "total_ascent_m" => row.total_ascent_m,
+        "total_descent_m" => row.total_descent_m,
+        _ => None,
+    }
+}
+
 /// Parse absolute-range error messages like `weight_kg 825 is outside allowed range 20–300`
 /// into a field name when possible.
 fn field_from_absolute_message(msg: &str) -> String {
@@ -295,6 +356,7 @@ pub fn handle_check(
                     previous_date: None,
                     allowed_delta: None,
                     days_gap: None,
+                    exercise: None,
                 });
             }
         }
@@ -314,6 +376,7 @@ pub fn handle_check(
                     previous_date: w.previous_date,
                     allowed_delta: w.allowed_delta,
                     days_gap: w.days_gap,
+                    exercise: None,
                 });
             }
         }
@@ -340,8 +403,34 @@ pub fn handle_check(
                     previous_date: None,
                     allowed_delta: None,
                     days_gap: None,
+                    exercise: None,
                 });
             }
+        }
+    }
+
+    // Exercise sets: absolute limits only (no variation checks by design).
+    // Date window is the parent workout session day, not set created_at.
+    let sets = repo.list_exercise_sets_for_check(since.as_deref(), until.as_deref())?;
+    for row in &sets {
+        let proposed = proposed_from_set_row(row);
+        let msgs = collect_set_metric_errors(&proposed, &limits.workout);
+        for msg in msgs {
+            let field = field_from_absolute_message(&msg);
+            violations.push(CheckViolation {
+                entity: "set".to_string(),
+                kind: "absolute".to_string(),
+                id: row.id,
+                date: row.workout_date.clone(),
+                field: field.clone(),
+                message: msg,
+                value: set_field_value(row, &field),
+                previous_value: None,
+                previous_date: None,
+                allowed_delta: None,
+                days_gap: None,
+                exercise: Some(row.exercise_name.clone()),
+            });
         }
     }
 
@@ -351,6 +440,7 @@ pub fn handle_check(
         ok: violations.is_empty(),
         measurement_count: measurements.len() as i64,
         sleep_count: sleeps.len() as i64,
+        set_count: sets.len() as i64,
         checked_variations: args.variations,
         hard_violation_count,
         variation_violation_count,
@@ -381,11 +471,12 @@ pub fn handle_check(
 
 fn print_check_human(report: &CheckReport) {
     println!(
-        "Checked {} measurement(s) and {} sleep entr(y/ies).{}",
+        "Checked {} measurement(s), {} sleep entr(y/ies), and {} set(s).{}",
         report.measurement_count,
         report.sleep_count,
+        report.set_count,
         if report.checked_variations {
-            " (measurement variations enabled; sleep is absolute-only)"
+            " (measurement variations enabled; sleep and sets are absolute-only)"
         } else {
             " (hard limits only; pass --variations for measurement deltas)"
         }
@@ -400,10 +491,17 @@ fn print_check_human(report: &CheckReport) {
         report.hard_violation_count, report.variation_violation_count
     );
     for v in &report.violations {
-        println!(
-            "  [{}] {} {} (id {}) {}: {}",
-            v.kind, v.entity, v.date, v.id, v.field, v.message
-        );
+        if let Some(ref ex) = v.exercise {
+            println!(
+                "  [{}] {} {} (id {}, {}) {}: {}",
+                v.kind, v.entity, v.date, v.id, ex, v.field, v.message
+            );
+        } else {
+            println!(
+                "  [{}] {} {} (id {}) {}: {}",
+                v.kind, v.entity, v.date, v.id, v.field, v.message
+            );
+        }
     }
 }
 

@@ -136,10 +136,7 @@ fn import_fit_zepp_running_e2e() {
             |r| r.get(0),
         )
         .unwrap();
-    assert!(
-        tp_count > 1000,
-        "expected many trackpoints, got {tp_count}"
-    );
+    assert!(tp_count > 1000, "expected many trackpoints, got {tp_count}");
 
     let imports: i64 = conn
         .query_row("SELECT COUNT(*) FROM activity_imports", [], |r| r.get(0))
@@ -148,14 +145,7 @@ fn import_fit_zepp_running_e2e() {
 
     // Duplicate import fails
     bin()
-        .args([
-            "--db",
-            &db_s,
-            "import",
-            "fit",
-            &fit,
-            "--no-profile-hr",
-        ])
+        .args(["--db", &db_s, "import", "fit", &fit, "--no-profile-hr"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("already imported"));

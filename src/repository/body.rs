@@ -833,4 +833,122 @@ impl Repository {
         };
         Ok(rows)
     }
+
+    // ---------- Exercise sets (for check audit) ----------
+
+    const SET_AUDIT_SELECT: &str = "
+        SELECT s.id,
+               s.reps, s.weight_kg, s.external_load_kg, s.distance_km, s.duration_seconds,
+               s.rpe, s.rir, s.effective_reps, s.rest_seconds,
+               s.avg_heart_rate_bpm, s.max_heart_rate_bpm, s.avg_pace_min_per_km,
+               s.calories_burned, s.avg_cadence_spm, s.total_ascent_m, s.total_descent_m,
+               s.heart_rate_zones, s.laps,
+               date(w.started_at), e.name
+        FROM exercise_sets s
+        JOIN workout_exercises we ON we.id = s.workout_exercise_id
+        JOIN workouts w ON w.id = we.workout_id
+        JOIN exercises e ON e.id = we.exercise_id
+    ";
+
+    fn row_to_set_audit(row: &Row) -> rusqlite::Result<SetAuditRow> {
+        Ok(SetAuditRow {
+            id: row.get(0)?,
+            reps: row.get(1)?,
+            weight_kg: row.get(2)?,
+            external_load_kg: row.get(3)?,
+            distance_km: row.get(4)?,
+            duration_seconds: row.get(5)?,
+            rpe: row.get(6)?,
+            rir: row.get(7)?,
+            effective_reps: row.get(8)?,
+            rest_seconds: row.get(9)?,
+            avg_heart_rate_bpm: row.get(10)?,
+            max_heart_rate_bpm: row.get(11)?,
+            avg_pace_min_per_km: row.get(12)?,
+            calories_burned: row.get(13)?,
+            avg_cadence_spm: row.get(14)?,
+            total_ascent_m: row.get(15)?,
+            total_descent_m: row.get(16)?,
+            heart_rate_zones: row.get(17)?,
+            laps: row.get(18)?,
+            workout_date: row.get(19)?,
+            exercise_name: row.get(20)?,
+        })
+    }
+
+    /// List exercise sets whose workout session day falls in [since, until] (inclusive),
+    /// or all sets if bounds are None. Ordered by workout date then set id.
+    pub fn list_exercise_sets_for_check(
+        &self,
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> Result<Vec<SetAuditRow>> {
+        let base = Self::SET_AUDIT_SELECT;
+        let rows = match (since, until) {
+            (None, None) => {
+                let sql = format!("{} ORDER BY date(w.started_at), s.id", base);
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map([], Self::row_to_set_audit)?;
+                rows.filter_map(|r| r.ok()).collect()
+            }
+            (Some(s), None) => {
+                let sql = format!(
+                    "{} WHERE date(w.started_at) >= ?1 ORDER BY date(w.started_at), s.id",
+                    base
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map([s], Self::row_to_set_audit)?;
+                rows.filter_map(|r| r.ok()).collect()
+            }
+            (None, Some(u)) => {
+                let sql = format!(
+                    "{} WHERE date(w.started_at) <= ?1 ORDER BY date(w.started_at), s.id",
+                    base
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map([u], Self::row_to_set_audit)?;
+                rows.filter_map(|r| r.ok()).collect()
+            }
+            (Some(s), Some(u)) => {
+                let sql = format!(
+                    "{} WHERE date(w.started_at) >= ?1 AND date(w.started_at) <= ?2 \
+                     ORDER BY date(w.started_at), s.id",
+                    base
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
+                let rows = stmt.query_map([s, u], Self::row_to_set_audit)?;
+                rows.filter_map(|r| r.ok()).collect()
+            }
+        };
+        Ok(rows)
+    }
+}
+
+/// One exercise set row for historical `check` audit (joined to workout date + exercise name).
+#[derive(Debug, Clone)]
+pub struct SetAuditRow {
+    pub id: i64,
+    pub reps: Option<i32>,
+    pub weight_kg: Option<f64>,
+    pub external_load_kg: Option<f64>,
+    pub distance_km: Option<f64>,
+    pub duration_seconds: Option<i32>,
+    pub rpe: Option<f64>,
+    pub rir: Option<f64>,
+    pub effective_reps: Option<i32>,
+    pub rest_seconds: Option<i32>,
+    pub avg_heart_rate_bpm: Option<f64>,
+    pub max_heart_rate_bpm: Option<f64>,
+    pub avg_pace_min_per_km: Option<f64>,
+    pub calories_burned: Option<i32>,
+    pub avg_cadence_spm: Option<f64>,
+    pub total_ascent_m: Option<f64>,
+    pub total_descent_m: Option<f64>,
+    /// Raw JSON from DB; parse in the check handler.
+    pub heart_rate_zones: Option<String>,
+    /// Raw JSON from DB; parse in the check handler.
+    pub laps: Option<String>,
+    /// Calendar day of the parent workout (`date(w.started_at)`).
+    pub workout_date: String,
+    pub exercise_name: String,
 }

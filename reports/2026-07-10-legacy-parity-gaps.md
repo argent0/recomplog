@@ -13,7 +13,7 @@ This report lists what is **still missing or thinner** than the source tools. It
 | Area | Rough parity | Main holes |
 |------|--------------|------------|
 | Body (measurement / sleep / profile) | High | Small polish only |
-| `check` (body + sleep) | High for body | **No workout audit** |
+| `check` (body + sleep + sets) | High | Workout set audit done (2026-07-10); variations remain body-only |
 | Nutrition CRUD + tags/stores | High | Nutrient seed; edge polish |
 | Nutrition reports | Medium | Summary, micros, spending-by, value filters |
 | Workout logging (sets) | High | dry-run, manual cadence/elevation, finished_at, strict cardio |
@@ -29,15 +29,11 @@ This report lists what is **still missing or thinner** than the source tools. It
 
 ## 1. High impact
 
-### 1.1 `check` does not audit workouts
+### 1.1 `check` does not audit workouts — **Closed 2026-07-10**
 
-**Current:** `recomplog check` scans measurements and sleep (absolute limits + optional `--variations` deltas).
+**Was:** `recomplog check` scanned measurements and sleep only.
 
-**Missing:** Bulk scan of `exercise_sets` against `[sanity.workout]` (weight, reps, HR, distance, duration, zones, etc.).
-
-**Note:** Workout limits **are** applied on set **write**. Historical/imported rows are not re-audited.
-
-**Source parity:** bodylog `check` for body; plan also called for workout domain in unified `check`.
+**Now:** Also scans `exercise_sets` against `[sanity.workout]` (absolute only; date window = workout session day). See `reports/gaps/01-check-workout-audit.md`.
 
 ---
 
@@ -198,7 +194,7 @@ These are **not** treated as parity bugs:
 | Root FIT duplicate | `Zepp20260710164935.fit` at repo root and under `tests/fixtures/` — fixtures path is canonical for tests |
 | No legacy-import E2E | No automated test with real bodylog/nutlog/repslog DB fixtures |
 | HTML tests | Only “file exists / contains Chart”; no structure/content regression |
-| `check` + workout | No test that historical set outliers surface in `check` |
+| `check` + workout | Covered by `tests/check_workout.rs` |
 | FIT zones without CLI bounds | Device zones on Zepp fixture may be null; profile-derived zones less covered |
 
 **FIT E2E that *is* present:** `tests/import_fit.rs` using `tests/fixtures/Zepp20260710164935.fit` (distance, duration, HR, trackpoints, dedup, `--force`, `--hr-zone-bounds`).
@@ -207,7 +203,7 @@ These are **not** treated as parity bugs:
 
 ## 5. Recommended close-out order
 
-1. Extend **`check`** to scan `exercise_sets` with `sanity.workout`.  
+1. ~~Extend **`check`** to scan `exercise_sets` with `sanity.workout`.~~ **Done.**  
 2. Port **`track_metrics`** into `workout show` (and optionally HTML/report).  
 3. Flesh out **nutrition reports** (summary, micros, spending-by, value filters).  
 4. Complete **legacy import** for trackpoints, `activity_imports`, zones/laps.  

@@ -406,8 +406,12 @@ pub struct ProposedSetMetrics {
     pub laps: Option<Vec<Lap>>,
 }
 
-/// Hard-fail absolute impossibilities for set metrics.
-pub fn validate_set_metrics(new: &ProposedSetMetrics, limits: &WorkoutSanityLimits) -> RResult<()> {
+/// Collect absolute-limit error messages for set metrics (one message per failure).
+/// Used by write-path validation and by `check` for historical audit.
+pub fn collect_set_metric_errors(
+    new: &ProposedSetMetrics,
+    limits: &WorkoutSanityLimits,
+) -> Vec<String> {
     let mut errors = Vec::new();
 
     check_i32_range("reps", new.reps, &limits.reps, &mut errors);
@@ -556,6 +560,12 @@ pub fn validate_set_metrics(new: &ProposedSetMetrics, limits: &WorkoutSanityLimi
         }
     }
 
+    errors
+}
+
+/// Hard-fail absolute impossibilities for set metrics.
+pub fn validate_set_metrics(new: &ProposedSetMetrics, limits: &WorkoutSanityLimits) -> RResult<()> {
+    let errors = collect_set_metric_errors(new, limits);
     if errors.is_empty() {
         Ok(())
     } else {

@@ -67,6 +67,8 @@ recomplog import fit activity.fit
 
 ```bash
 recomplog check --variations
+# Audits body measurements, sleep, and exercise sets against configured sanity limits.
+# Sets use absolute limits only (date window = workout session day).
 recomplog config generate
 recomplog init
 ```
