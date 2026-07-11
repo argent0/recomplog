@@ -7,8 +7,9 @@ use crate::models::HrZoneProfile;
 use crate::utils::print_json;
 use anyhow::{anyhow, Result};
 use chrono::Datelike;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -382,16 +383,36 @@ fn handle_legacy_import(
         }
     }
 
+    let run_all = domain_filter.is_none();
+    let want = |name: &str| {
+        run_all
+            || domain_filter
+                .map(|d| d.eq_ignore_ascii_case(name))
+                .unwrap_or(false)
+    };
+
     if dry_run {
+        let mut would_copy = serde_json::Map::new();
+        if detected.contains(&"workout") && want("workout") {
+            would_copy.insert("workout".into(), estimate_workout_counts(&src)?);
+        }
+        if detected.contains(&"body") && want("body") {
+            would_copy.insert("body".into(), estimate_body_counts(&src)?);
+        }
+        if detected.contains(&"nutrition") && want("nutrition") {
+            would_copy.insert("nutrition".into(), estimate_nutrition_counts(&src)?);
+        }
         if json {
             print_json(&serde_json::json!({
                 "source": from_path,
                 "detected": detected,
-                "dry_run": true
+                "dry_run": true,
+                "would_copy": would_copy,
             }));
         } else {
             println!("Legacy: {}", from_path);
             println!("Detected domains: {:?}", detected);
+            println!("Would copy: {}", serde_json::Value::Object(would_copy));
             println!("Dry run — nothing copied.");
         }
         return Ok(());
@@ -400,14 +421,6 @@ fn handle_legacy_import(
     let mut target = db::open_db(target_override)?;
     let mut copied = vec![];
     let mut counts = serde_json::Map::new();
-
-    let run_all = domain_filter.is_none();
-    let want = |name: &str| {
-        run_all
-            || domain_filter
-                .map(|d| d.eq_ignore_ascii_case(name))
-                .unwrap_or(false)
-    };
 
     if detected.contains(&"nutrition") && want("nutrition") {
         let n = copy_nutrition(&src, &mut target)?;
@@ -799,12 +812,78 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
     Ok(serde_json::json!({"measurements": measurements, "sleep": sleeps}))
 }
 
+/// Preferred `exercise_sets` columns (baseline + cardio/provenance). Copied when present on both DBs.
+const EXERCISE_SET_COLUMNS: &[&str] = &[
+    "id",
+    "workout_exercise_id",
+    "set_number",
+    "reps",
+    "weight_kg",
+    "external_load_kg",
+    "distance_km",
+    "duration_seconds",
+    "rpe",
+    "rir",
+    "effective_reps",
+    "cluster_id",
+    "rest_seconds",
+    "notes",
+    "side",
+    "phase",
+    "extra_metrics",
+    "avg_heart_rate_bpm",
+    "max_heart_rate_bpm",
+    "avg_pace_min_per_km",
+    "calories_burned",
+    "avg_cadence_spm",
+    "total_ascent_m",
+    "total_descent_m",
+    "date_of_birth",
+    "resting_hr_bpm",
+    "heart_rate_zones",
+    "laps",
+    "created_at",
+];
+
+const ACTIVITY_IMPORT_COLUMNS: &[&str] = &[
+    "id",
+    "workout_id",
+    "source_format",
+    "source_filename",
+    "file_sha256",
+    "device_name",
+    "manufacturer_id",
+    "product_id",
+    "fit_sport",
+    "fit_sub_sport",
+    "imported_at",
+];
+
+const ACTIVITY_TRACKPOINT_COLUMNS: &[&str] = &[
+    "id",
+    "exercise_set_id",
+    "recorded_at",
+    "latitude",
+    "longitude",
+    "altitude_m",
+    "heart_rate_bpm",
+    "cadence_spm",
+    "distance_km",
+    "speed_m_s",
+];
+
 fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value> {
     let tx = dst.transaction()?;
     let mut exercises = 0i64;
     let mut workouts = 0i64;
     let mut we = 0i64;
     let mut sets = 0i64;
+    let mut sets_with_zones = 0i64;
+    let mut sets_with_laps = 0i64;
+    let mut activity_imports = 0i64;
+    let mut activity_trackpoints = 0i64;
+    let mut imports_skipped = 0i64;
+    let mut trackpoints_skipped = 0i64;
 
     if let Ok(mut stmt) = src.prepare(
         "SELECT id, name, category, muscle_groups, equipment, load_type, description, is_custom, created_at FROM exercises",
@@ -877,41 +956,106 @@ fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Va
         }
     }
 
-    // exercise_sets - best effort on common columns
-    if let Ok(mut stmt) = src.prepare(
-        "SELECT id, workout_exercise_id, set_number, reps, weight_kg, external_load_kg, distance_km,
-                duration_seconds, rpe, rir, effective_reps, rest_seconds, notes, side, phase, created_at
-         FROM exercise_sets",
-    ) {
-        for row in stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, Option<i32>>(3)?,
-                r.get::<_, Option<f64>>(4)?,
-                r.get::<_, Option<f64>>(5)?,
-                r.get::<_, Option<f64>>(6)?,
-                r.get::<_, Option<i32>>(7)?,
-                r.get::<_, Option<f64>>(8)?,
-                r.get::<_, Option<f64>>(9)?,
-                r.get::<_, Option<i32>>(10)?,
-                r.get::<_, Option<i32>>(11)?,
-                r.get::<_, Option<String>>(12)?,
-                r.get::<_, Option<String>>(13)?,
-                r.get::<_, String>(14).unwrap_or_else(|_| "working".into()),
-                r.get::<_, String>(15).unwrap_or_default(),
-            ))
-        })? {
-            let (id, weid, sn, reps, w, el, dist, dur, rpe, rir, er, rest, notes, side, phase, ca) =
-                row?;
-            sets += tx.execute(
-                "INSERT OR IGNORE INTO exercise_sets
-                 (id, workout_exercise_id, set_number, reps, weight_kg, external_load_kg, distance_km,
-                  duration_seconds, rpe, rir, effective_reps, rest_seconds, notes, side, phase, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
-                params![id, weid, sn, reps, w, el, dist, dur, rpe, rir, er, rest, notes, side, phase, ca],
-            )? as i64;
+    // exercise_sets — intersection of preferred columns present on both source and target
+    if table_exists(src, "exercise_sets") {
+        let cols = intersect_columns(
+            EXERCISE_SET_COLUMNS,
+            &table_columns(src, "exercise_sets")?,
+            &table_columns(&tx, "exercise_sets")?,
+        );
+        if !cols.is_empty() {
+            let zones_idx = cols.iter().position(|c| c == "heart_rate_zones");
+            let laps_idx = cols.iter().position(|c| c == "laps");
+            let col_list = cols.join(", ");
+            let placeholders = (1..=cols.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let select_sql = format!("SELECT {col_list} FROM exercise_sets ORDER BY id");
+            let insert_sql =
+                format!("INSERT OR IGNORE INTO exercise_sets ({col_list}) VALUES ({placeholders})");
+            let mut select = src.prepare(&select_sql)?;
+            let mut insert = tx.prepare(&insert_sql)?;
+            let mut rows = select.query([])?;
+            while let Some(row) = rows.next()? {
+                let values = row_values(row, cols.len())?;
+                let n = insert.execute(params_from_iter(values.iter()))? as i64;
+                sets += n;
+                if n > 0 {
+                    if zones_idx.is_some_and(|i| !matches!(values[i], Value::Null)) {
+                        sets_with_zones += 1;
+                    }
+                    if laps_idx.is_some_and(|i| !matches!(values[i], Value::Null)) {
+                        sets_with_laps += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // activity_imports (after workouts; skip orphans)
+    if table_exists(src, "activity_imports") {
+        let cols = intersect_columns(
+            ACTIVITY_IMPORT_COLUMNS,
+            &table_columns(src, "activity_imports")?,
+            &table_columns(&tx, "activity_imports")?,
+        );
+        if let Some(wid_idx) = cols.iter().position(|c| c == "workout_id") {
+            let parent_ids = load_id_set(&tx, "workouts")?;
+            let col_list = cols.join(", ");
+            let placeholders = (1..=cols.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let select_sql = format!("SELECT {col_list} FROM activity_imports ORDER BY id");
+            let insert_sql = format!(
+                "INSERT OR IGNORE INTO activity_imports ({col_list}) VALUES ({placeholders})"
+            );
+            let mut select = src.prepare(&select_sql)?;
+            let mut insert = tx.prepare(&insert_sql)?;
+            let mut rows = select.query([])?;
+            while let Some(row) = rows.next()? {
+                let values = row_values(row, cols.len())?;
+                let parent = value_as_i64(&values[wid_idx]);
+                if parent.map(|id| !parent_ids.contains(&id)).unwrap_or(true) {
+                    imports_skipped += 1;
+                    continue;
+                }
+                activity_imports += insert.execute(params_from_iter(values.iter()))? as i64;
+            }
+        }
+    }
+
+    // activity_trackpoints (after sets; skip orphans)
+    if table_exists(src, "activity_trackpoints") {
+        let cols = intersect_columns(
+            ACTIVITY_TRACKPOINT_COLUMNS,
+            &table_columns(src, "activity_trackpoints")?,
+            &table_columns(&tx, "activity_trackpoints")?,
+        );
+        if let Some(sid_idx) = cols.iter().position(|c| c == "exercise_set_id") {
+            let parent_ids = load_id_set(&tx, "exercise_sets")?;
+            let col_list = cols.join(", ");
+            let placeholders = (1..=cols.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let select_sql = format!("SELECT {col_list} FROM activity_trackpoints ORDER BY id");
+            let insert_sql = format!(
+                "INSERT OR IGNORE INTO activity_trackpoints ({col_list}) VALUES ({placeholders})"
+            );
+            let mut select = src.prepare(&select_sql)?;
+            let mut insert = tx.prepare(&insert_sql)?;
+            let mut rows = select.query([])?;
+            while let Some(row) = rows.next()? {
+                let values = row_values(row, cols.len())?;
+                let parent = value_as_i64(&values[sid_idx]);
+                if parent.map(|id| !parent_ids.contains(&id)).unwrap_or(true) {
+                    trackpoints_skipped += 1;
+                    continue;
+                }
+                activity_trackpoints += insert.execute(params_from_iter(values.iter()))? as i64;
+            }
         }
     }
 
@@ -921,6 +1065,122 @@ fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Va
         "workouts": workouts,
         "workout_exercises": we,
         "sets": sets,
+        "activity_imports": activity_imports,
+        "activity_trackpoints": activity_trackpoints,
+        "sets_with_zones": sets_with_zones,
+        "sets_with_laps": sets_with_laps,
+        "imports_skipped": imports_skipped,
+        "trackpoints_skipped": trackpoints_skipped,
+    }))
+}
+
+fn table_columns(conn: &Connection, table: &str) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    let mut out = HashSet::new();
+    for n in names {
+        out.insert(n?);
+    }
+    Ok(out)
+}
+
+fn intersect_columns(
+    preferred: &[&str],
+    src: &HashSet<String>,
+    dst: &HashSet<String>,
+) -> Vec<String> {
+    preferred
+        .iter()
+        .filter(|c| src.contains(**c) && dst.contains(**c))
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+fn row_values(row: &rusqlite::Row<'_>, n: usize) -> rusqlite::Result<Vec<Value>> {
+    let mut values = Vec::with_capacity(n);
+    for i in 0..n {
+        values.push(row.get(i)?);
+    }
+    Ok(values)
+}
+
+fn value_as_i64(v: &Value) -> Option<i64> {
+    match v {
+        Value::Integer(i) => Some(*i),
+        Value::Real(f) => Some(*f as i64),
+        Value::Text(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+fn load_id_set(conn: &Connection, table: &str) -> Result<HashSet<i64>> {
+    let mut stmt = conn.prepare(&format!("SELECT id FROM {table}"))?;
+    let ids = stmt.query_map([], |r| r.get(0))?;
+    let mut out = HashSet::new();
+    for id in ids {
+        out.insert(id?);
+    }
+    Ok(out)
+}
+
+fn table_count(conn: &Connection, table: &str) -> Result<i64> {
+    if !table_exists(conn, table) {
+        return Ok(0);
+    }
+    let n: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
+    Ok(n)
+}
+
+fn estimate_workout_counts(src: &Connection) -> Result<serde_json::Value> {
+    let mut m = serde_json::Map::new();
+    m.insert(
+        "exercises".into(),
+        serde_json::json!(table_count(src, "exercises")?),
+    );
+    m.insert(
+        "workouts".into(),
+        serde_json::json!(table_count(src, "workouts")?),
+    );
+    m.insert(
+        "workout_exercises".into(),
+        serde_json::json!(table_count(src, "workout_exercises")?),
+    );
+    m.insert(
+        "sets".into(),
+        serde_json::json!(table_count(src, "exercise_sets")?),
+    );
+    if table_exists(src, "activity_imports") {
+        m.insert(
+            "activity_imports".into(),
+            serde_json::json!(table_count(src, "activity_imports")?),
+        );
+    }
+    if table_exists(src, "activity_trackpoints") {
+        m.insert(
+            "activity_trackpoints".into(),
+            serde_json::json!(table_count(src, "activity_trackpoints")?),
+        );
+    }
+    Ok(serde_json::Value::Object(m))
+}
+
+fn estimate_body_counts(src: &Connection) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "measurements": table_count(src, "measurements")?,
+        "sleep": table_count(src, if table_exists(src, "sleep_sessions") {
+            "sleep_sessions"
+        } else {
+            "sleep"
+        })?,
+    }))
+}
+
+fn estimate_nutrition_counts(src: &Connection) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "products": table_count(src, "products")?,
+        "purchases": table_count(src, "purchases")?,
+        "consumptions": table_count(src, "consumptions")?,
+        "nutrients": table_count(src, "nutrients")?,
     }))
 }
 

@@ -19,11 +19,11 @@ This report lists what is **still missing or thinner** than the source tools. It
 | Workout logging (sets) | High | dry-run, manual cadence/elevation, finished_at, strict cardio |
 | Workout analysis | Medium–low | PRs, history, progression, track_metrics on show |
 | FIT import | High (E2E) | Zone defaults; profile-path less tested |
-| Legacy import | Medium–high | Trackpoints, activity_imports, zones/laps from old DBs |
+| Legacy import | High | Provenance (trackpoints / activity_imports / zones-laps) closed 2026-07-10 |
 | HTML dashboard | Medium | Regression, sleep stages, full macros, training block |
 | Config | Medium–high | Nested `[sanity.measurements]` layout / docs |
 
-**Bottom line:** CRUD and FIT import are largely done. Remaining gaps are mainly **analysis and audit**, **complete legacy provenance migration**, and **report/dashboard depth**.
+**Bottom line:** CRUD, FIT import, and legacy workout provenance migration are largely done. Remaining gaps are mainly **analysis** (stats/track metrics depth), **HTML dashboard**, and **CLI polish**.
 
 ---
 
@@ -115,17 +115,11 @@ Agents that depended on repslog stats need rework or lose capability.
 
 ---
 
-### 2.2 Legacy import incomplete for workout provenance
+### 2.2 Legacy import incomplete for workout provenance — **Closed 2026-07-10**
 
-**In good shape:** body measurements/sleep; nutrition products/purchases/consumptions/tags/micros/stores; workout skeleton (exercises → workouts → workout_exercises → sets).
+**Was:** workout skeleton only; dropped trackpoints, `activity_imports`, cardio set fields (zones/laps).
 
-**Typically missing on legacy workout import:**
-
-- `activity_imports` (file SHA / device / FIT metadata)  
-- `activity_trackpoints`  
-- Source `heart_rate_zones` / `laps` columns on sets  
-
-Migrating an old repslog DB can drop GPS/HR samples and import idempotency keys.
+**Now:** `copy_workout` copies preferred set columns by source∩target intersection (cardio scalars, `heart_rate_zones`, `laps`), then `activity_imports` and `activity_trackpoints` (orphan parents skipped). Dry-run reports `would_copy` counts including provenance tables. See `reports/gaps/04-legacy-import-provenance.md` and `tests/import_legacy.rs`.
 
 ---
 
@@ -200,7 +194,7 @@ These are **not** treated as parity bugs:
 1. ~~Extend **`check`** to scan `exercise_sets` with `sanity.workout`.~~ **Done.**  
 2. Port **`track_metrics`** into `workout show` (and optionally HTML/report).  
 3. ~~Flesh out **nutrition reports** (summary, micros, spending-by, value filters).~~ **Done.**  
-4. Complete **legacy import** for trackpoints, `activity_imports`, zones/laps.  
+4. ~~Complete **legacy import** for trackpoints, `activity_imports`, zones/laps.~~ **Done.**
 5. Expand **stats** (`prs` / `history` / `weight` progression / summary).  
 6. Deepen **HTML** (regression, sleep stages, remaining macros).  
 7. CLI polish: **`--dry-run`**, set update for JSON fields, manual cadence/ascent, `finished_at`.  

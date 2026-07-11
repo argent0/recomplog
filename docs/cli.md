@@ -73,8 +73,14 @@ Nutrition report date flags: `--days N` cannot be combined with `--since` / `--u
 ```bash
 recomplog import legacy --from-db ~/.local/share/bodylog/bodylog.db --dry-run
 recomplog import legacy --from-db ../old-nutlog.db
+recomplog import legacy --from-db ../old-repslog.db --domain workout
 recomplog import fit activity.fit
 ```
+
+Legacy **workout** import copies the full set skeleton plus, when present in the source DB:
+`activity_imports` (FIT SHA / device metadata), `activity_trackpoints`, and cardio set
+fields including `heart_rate_zones` / `laps`. Dry-run reports per-table `would_copy`
+counts (including provenance tables). Re-runs are idempotent via `INSERT OR IGNORE`.
 
 ### Other top-level
 
@@ -96,11 +102,11 @@ All commands accept:
 
 ## Legacy Import Domains
 
-- `workout`
+- `workout` — exercises, workouts, sets (cardio scalars + zones/laps), optional `activity_imports` / `activity_trackpoints`
 - `body`
 - `nutrition`
 
-The importer auto-detects based on tables present in the source database.
+The importer auto-detects based on tables present in the source database. Source columns that are missing on older schemas are skipped; missing provenance tables are no-ops.
 
 ## Notes for Agents
 
