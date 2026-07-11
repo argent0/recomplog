@@ -165,6 +165,41 @@ fn import_fit_zepp_running_e2e() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"success\": true"));
+
+    // workout show attaches compute-on-read track_metrics from trackpoints
+    let show = bin()
+        .args(["--db", &db_s, "--json", "workout", "show", "1"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let show_v: serde_json::Value = serde_json::from_slice(&show).unwrap();
+    let tm = &show_v["exercises"][0]["sets"][0]["track_metrics"];
+    assert!(
+        tm.is_object(),
+        "expected track_metrics object after FIT import, got {tm:?}"
+    );
+    let sample_count = tm["sample_count"].as_u64().unwrap_or(0);
+    assert!(
+        sample_count > 1000,
+        "sample_count should match fixture scale, got {sample_count}"
+    );
+    assert!(tm["moving_seconds"].as_u64().unwrap_or(0) > 0);
+    assert!(tm["elapsed_seconds"].as_u64().unwrap_or(0) > 0);
+    let splits = tm["synthetic_km_splits"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+    assert!(
+        splits >= 7,
+        "expected ~8 km splits for ~8 km run, got {splits}"
+    );
+    let efforts = tm["best_efforts"].as_array().cloned().unwrap_or_default();
+    assert!(
+        efforts.iter().any(|e| e["label"] == "1 km"),
+        "expected 1 km best effort: {efforts:?}"
+    );
 }
 
 #[test]

@@ -5,9 +5,10 @@ use crate::cli::{ExerciseAction, SetAction, WorkoutAction};
 use crate::config::WorkoutSanityLimits;
 use crate::db;
 use crate::load_type;
-use crate::models::{Exercise, HeartRateZones, Laps, Success};
+use crate::models::{Exercise, HeartRateZones, Laps, Success, Trackpoint};
 use crate::phase;
 use crate::sanity::{self, ProposedSetMetrics};
+use crate::track_metrics::{compute, compute_with_zones, TrackMetrics, ZoneRecomputeContext};
 use crate::utils::{
     parse_flexible_datetime, print_error_json, print_json, print_table, quiet_print,
 };
@@ -225,6 +226,95 @@ pub fn handle(
     }
 }
 
+fn activity_date_prefix(started_at: &str) -> String {
+    started_at.get(..10).unwrap_or(started_at).to_string()
+}
+
+fn list_trackpoints(conn: &Connection, exercise_set_id: i64) -> Result<Vec<Trackpoint>> {
+    let mut stmt = conn.prepare(
+        "SELECT recorded_at, latitude, longitude, altitude_m, heart_rate_bpm,
+                cadence_spm, distance_km, speed_m_s
+         FROM activity_trackpoints
+         WHERE exercise_set_id = ?1
+         ORDER BY recorded_at, id",
+    )?;
+    let rows = stmt
+        .query_map([exercise_set_id], |r| {
+            Ok(Trackpoint {
+                recorded_at: r.get(0)?,
+                latitude: r.get(1)?,
+                longitude: r.get(2)?,
+                altitude_m: r.get(3)?,
+                heart_rate_bpm: r.get(4)?,
+                cadence_spm: r.get(5)?,
+                distance_km: r.get(6)?,
+                speed_m_s: r.get(7)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn track_metrics_for_set(
+    conn: &Connection,
+    set_id: i64,
+    distance_km: Option<f64>,
+    date_of_birth: Option<String>,
+    resting_hr_bpm: Option<f64>,
+    activity_date: &str,
+) -> Result<Option<TrackMetrics>> {
+    let points = list_trackpoints(conn, set_id)?;
+    if points.is_empty() {
+        return Ok(None);
+    }
+    if date_of_birth.is_none() && resting_hr_bpm.is_none() {
+        return Ok(compute(&points, distance_km));
+    }
+    let ctx = ZoneRecomputeContext {
+        date_of_birth,
+        resting_hr_bpm,
+        activity_date: Some(activity_date.to_string()),
+    };
+    Ok(compute_with_zones(&points, distance_km, &ctx))
+}
+
+fn format_secs_compact(secs: u32) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+fn format_pace_min_per_km(pace: f64) -> String {
+    if !pace.is_finite() || pace <= 0.0 {
+        return "--".into();
+    }
+    let total_secs = (pace * 60.0).round() as i64;
+    let m = total_secs / 60;
+    let s = total_secs % 60;
+    format!("{m}:{s:02}/km")
+}
+
+fn print_track_metrics_oneline(m: &TrackMetrics) {
+    let mut parts = vec![format!("{} samples", m.sample_count)];
+    parts.push(format!(
+        "moving {} (stopped {})",
+        format_secs_compact(m.moving_seconds),
+        format_secs_compact(m.stopped_seconds)
+    ));
+    if let Some(p) = m.moving_pace_min_per_km {
+        parts.push(format!("pace ~{}", format_pace_min_per_km(p)));
+    }
+    if let Some(a) = m.ascent_m {
+        parts.push(format!("↑{a:.0}m"));
+    }
+    println!("       track: {}", parts.join(" · "));
+}
+
 fn show_workout(db_override: Option<&str>, id: i64, json: bool) -> Result<()> {
     let conn = db::open_db(db_override)?;
     let row = conn
@@ -251,6 +341,8 @@ fn show_workout(db_override: Option<&str>, id: i64, json: bool) -> Result<()> {
         }
         return Err(anyhow!("workout not found"));
     };
+    let started_at = w["started_at"].as_str().unwrap_or("").to_string();
+    let activity_date = activity_date_prefix(&started_at);
     let mut stmt = conn.prepare(
         r#"SELECT we.id, e.name, we."order", we.notes, e.load_type
            FROM workout_exercises we
@@ -272,7 +364,7 @@ fn show_workout(db_override: Option<&str>, id: i64, json: bool) -> Result<()> {
         .collect();
     let mut ex_json = Vec::new();
     for (we_id, name, order, notes, load_type) in exercises {
-        let sets = list_sets_json(&conn, we_id)?;
+        let sets = list_sets_json(&conn, we_id, &activity_date)?;
         ex_json.push(serde_json::json!({
             "workout_exercise_id": we_id,
             "name": name,
@@ -302,50 +394,75 @@ fn show_workout(db_override: Option<&str>, id: i64, json: bool) -> Result<()> {
                     "     set {}: reps={:?} weight={:?} phase={}",
                     s["set_number"], s["reps"], s["weight_kg"], s["phase"]
                 );
+                if let Some(tm_val) = s.get("track_metrics") {
+                    if let Ok(tm) = serde_json::from_value::<TrackMetrics>(tm_val.clone()) {
+                        print_track_metrics_oneline(&tm);
+                    }
+                }
             }
         }
     }
     Ok(())
 }
 
-fn list_sets_json(conn: &Connection, we_id: i64) -> Result<Vec<serde_json::Value>> {
+fn list_sets_json(
+    conn: &Connection,
+    we_id: i64,
+    activity_date: &str,
+) -> Result<Vec<serde_json::Value>> {
     let mut sstmt = conn.prepare(
         "SELECT id, set_number, reps, weight_kg, external_load_kg, distance_km, duration_seconds,
                 rpe, rir, effective_reps, cluster_id, rest_seconds, notes, side, phase,
                 avg_heart_rate_bpm, max_heart_rate_bpm, avg_pace_min_per_km, calories_burned,
-                heart_rate_zones, laps
+                heart_rate_zones, laps, date_of_birth, resting_hr_bpm
          FROM exercise_sets WHERE workout_exercise_id = ?1 ORDER BY set_number",
     )?;
-    let sets = sstmt
-        .query_map([we_id], |r| {
-            let zones: Option<String> = r.get(19)?;
-            let laps: Option<String> = r.get(20)?;
-            Ok(serde_json::json!({
-                "id": r.get::<_, i64>(0)?,
-                "set_number": r.get::<_, i64>(1)?,
-                "reps": r.get::<_, Option<i32>>(2)?,
-                "weight_kg": r.get::<_, Option<f64>>(3)?,
-                "external_load_kg": r.get::<_, Option<f64>>(4)?,
-                "distance_km": r.get::<_, Option<f64>>(5)?,
-                "duration_seconds": r.get::<_, Option<i32>>(6)?,
-                "rpe": r.get::<_, Option<f64>>(7)?,
-                "rir": r.get::<_, Option<f64>>(8)?,
-                "effective_reps": r.get::<_, Option<i32>>(9)?,
-                "cluster_id": r.get::<_, Option<i64>>(10)?,
-                "rest_seconds": r.get::<_, Option<i32>>(11)?,
-                "notes": r.get::<_, Option<String>>(12)?,
-                "side": r.get::<_, Option<String>>(13)?,
-                "phase": r.get::<_, String>(14)?,
-                "avg_heart_rate_bpm": r.get::<_, Option<f64>>(15)?,
-                "max_heart_rate_bpm": r.get::<_, Option<f64>>(16)?,
-                "avg_pace_min_per_km": r.get::<_, Option<f64>>(17)?,
-                "calories_burned": r.get::<_, Option<i32>>(18)?,
-                "heart_rate_zones": zones.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
-                "laps": laps.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
-            }))
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
+    let mut sets = Vec::new();
+    let mut rows = sstmt.query([we_id])?;
+    while let Some(r) = rows.next()? {
+        let set_id: i64 = r.get(0)?;
+        let distance_km: Option<f64> = r.get(5)?;
+        let zones: Option<String> = r.get(19)?;
+        let laps: Option<String> = r.get(20)?;
+        let date_of_birth: Option<String> = r.get(21)?;
+        let resting_hr_bpm: Option<f64> = r.get(22)?;
+        let mut set_json = serde_json::json!({
+            "id": set_id,
+            "set_number": r.get::<_, i64>(1)?,
+            "reps": r.get::<_, Option<i32>>(2)?,
+            "weight_kg": r.get::<_, Option<f64>>(3)?,
+            "external_load_kg": r.get::<_, Option<f64>>(4)?,
+            "distance_km": distance_km,
+            "duration_seconds": r.get::<_, Option<i32>>(6)?,
+            "rpe": r.get::<_, Option<f64>>(7)?,
+            "rir": r.get::<_, Option<f64>>(8)?,
+            "effective_reps": r.get::<_, Option<i32>>(9)?,
+            "cluster_id": r.get::<_, Option<i64>>(10)?,
+            "rest_seconds": r.get::<_, Option<i32>>(11)?,
+            "notes": r.get::<_, Option<String>>(12)?,
+            "side": r.get::<_, Option<String>>(13)?,
+            "phase": r.get::<_, String>(14)?,
+            "avg_heart_rate_bpm": r.get::<_, Option<f64>>(15)?,
+            "max_heart_rate_bpm": r.get::<_, Option<f64>>(16)?,
+            "avg_pace_min_per_km": r.get::<_, Option<f64>>(17)?,
+            "calories_burned": r.get::<_, Option<i32>>(18)?,
+            "heart_rate_zones": zones.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
+            "laps": laps.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
+        });
+        if let Some(tm) = track_metrics_for_set(
+            conn,
+            set_id,
+            distance_km,
+            date_of_birth,
+            resting_hr_bpm,
+            activity_date,
+        )? {
+            if let Some(obj) = set_json.as_object_mut() {
+                obj.insert("track_metrics".to_string(), serde_json::to_value(&tm)?);
+            }
+        }
+        sets.push(set_json);
+    }
     Ok(sets)
 }
 
@@ -1090,7 +1207,18 @@ fn handle_set(
         }
         SetAction::List { workout_exercise } => {
             let conn = db::open_db(db_override)?;
-            let sets = list_sets_json(&conn, workout_exercise)?;
+            let activity_date: String = conn
+                .query_row(
+                    r#"SELECT w.started_at FROM workouts w
+                       JOIN workout_exercises we ON we.workout_id = w.id
+                       WHERE we.id = ?1"#,
+                    [workout_exercise],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|s| activity_date_prefix(&s))
+                .unwrap_or_default();
+            let sets = list_sets_json(&conn, workout_exercise, &activity_date)?;
             if json {
                 print_json(&sets);
             } else {
@@ -1099,6 +1227,11 @@ fn handle_set(
                         "{}: set {} reps={:?} weight={:?}",
                         s["id"], s["set_number"], s["reps"], s["weight_kg"]
                     );
+                    if let Some(tm_val) = s.get("track_metrics") {
+                        if let Ok(tm) = serde_json::from_value::<TrackMetrics>(tm_val.clone()) {
+                            print_track_metrics_oneline(&tm);
+                        }
+                    }
                 }
             }
             Ok(())

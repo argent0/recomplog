@@ -5,11 +5,13 @@ mod config;
 mod db;
 mod error;
 mod fit;
+mod hr_zones;
 mod load_type;
 mod models;
 mod phase;
 mod repository;
 mod sanity;
+mod track_metrics;
 mod utils;
 
 use anyhow::Result;
