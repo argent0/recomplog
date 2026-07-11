@@ -20,10 +20,10 @@ This report lists what is **still missing or thinner** than the source tools. It
 | Workout analysis | Medium–low | PRs, history, progression, track_metrics on show |
 | FIT import | High (E2E) | Zone defaults; profile-path less tested |
 | Legacy import | High | Provenance (trackpoints / activity_imports / zones-laps) closed 2026-07-10 |
-| HTML dashboard | Medium | Regression, sleep stages, full macros, training block |
+| HTML dashboard | High | Closed 2026-07-10 (regression, stages, macros, training cards) |
 | Config | Medium–high | Nested `[sanity.measurements]` layout / docs |
 
-**Bottom line:** CRUD, FIT import, and legacy workout provenance migration are largely done. Remaining gaps are mainly **analysis** (stats/track metrics depth), **HTML dashboard**, and **CLI polish**.
+**Bottom line:** CRUD, FIT import, HTML dashboard depth, and legacy workout provenance migration are largely done. Remaining gaps are mainly **analysis** (track metrics on show), and **CLI polish**.
 
 ---
 
@@ -68,19 +68,11 @@ See `reports/gaps/03-nutrition-reports.md`. (`--by month` remains out of scope /
 
 ---
 
-### 1.4 HTML dashboard thinner than bodydashboard
+### 1.4 HTML dashboard thinner than bodydashboard — **Closed 2026-07-10**
 
-**Current `report html`:** Chart.js page with weight, body fat, sleep minutes, kcal/protein; overview cards including latest fat/lean mass.
+**Was:** Chart.js page with weight, body fat, sleep minutes, kcal/protein; fat/lean latest cards only.
 
-**Missing vs bodydashboard:**
-
-- Linear regression + trend labels per body metric  
-- Fat mass / lean mass **time series** (not only latest cards)  
-- Sleep stages (REM / deep / light / awake), efficiency, score charts  
-- Full macro charts (fat, fiber, sugars)  
-- Stats helpers (median, confidence) from original `stats.rs`  
-- Optional training volume block  
-- Layout/CSS fidelity (explicitly lower priority if data domains exist)
+**Now:** Fat/lean time series, sleep stages + quality, full macros (protein/carbs/fat/fiber/sugars), weight/BF regression trend labels + always-present JSON `weight_trend`/`body_fat_trend`, training volume/session cards (recomplog-additive; bodydashboard has no training UI). Layout/CSS fidelity remains a non-goal. See `reports/gaps/06-html-dashboard-depth.md` and `reports/plans/06-html-dashboard-depth.md`.
 
 ---
 
@@ -181,7 +173,7 @@ These are **not** treated as parity bugs:
 | Large uncommitted tree | Parity work (workout, FIT, nutrition, fixtures) may still be uncommitted relative to last clean commit |
 | Root FIT duplicate | `Zepp20260710164935.fit` at repo root and under `tests/fixtures/` — fixtures path is canonical for tests |
 | No legacy-import E2E | No automated test with real bodylog/nutlog/repslog DB fixtures |
-| HTML tests | Only “file exists / contains Chart”; no structure/content regression |
+| HTML tests | Expanded in `tests/report_html.rs` (fat/lean, stages, macros, trends, training) |
 | `check` + workout | Covered by `tests/check_workout.rs` |
 | FIT zones without CLI bounds | Device zones on Zepp fixture may be null; profile-derived zones less covered |
 
@@ -195,8 +187,8 @@ These are **not** treated as parity bugs:
 2. Port **`track_metrics`** into `workout show` (and optionally HTML/report).  
 3. ~~Flesh out **nutrition reports** (summary, micros, spending-by, value filters).~~ **Done.**  
 4. ~~Complete **legacy import** for trackpoints, `activity_imports`, zones/laps.~~ **Done.**
-5. Expand **stats** (`prs` / `history` / `weight` progression / summary).  
-6. Deepen **HTML** (regression, sleep stages, remaining macros).  
+5. ~~Expand **stats** (`prs` / `history` / `weight` progression / summary).~~ **Done** (gap 05).  
+6. ~~Deepen **HTML** (regression, sleep stages, remaining macros).~~ **Done** (gap 06).  
 7. CLI polish: **`--dry-run`**, set update for JSON fields, manual cadence/ascent, `finished_at`.  
 8. Housekeeping: commit, single FIT fixture path, more integration tests.
 

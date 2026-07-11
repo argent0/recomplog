@@ -5,6 +5,7 @@ mod config_cmd;
 mod import;
 mod nutrition;
 mod report;
+mod report_html;
 mod workout;
 mod workout_stats;
 

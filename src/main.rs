@@ -11,6 +11,7 @@ mod models;
 mod phase;
 mod repository;
 mod sanity;
+mod stats;
 mod track_metrics;
 mod utils;
 
