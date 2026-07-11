@@ -166,18 +166,18 @@ These are **not** treated as parity bugs:
 
 ---
 
-## 4. Testing and process gaps
+## 4. Testing and process gaps — **Closed 2026-07-10** (gap 08)
 
 | Gap | Detail |
 |-----|--------|
-| Large uncommitted tree | Parity work (workout, FIT, nutrition, fixtures) may still be uncommitted relative to last clean commit |
-| Root FIT duplicate | `Zepp20260710164935.fit` at repo root and under `tests/fixtures/` — fixtures path is canonical for tests |
-| No legacy-import E2E | No automated test with real bodylog/nutlog/repslog DB fixtures |
-| HTML tests | Expanded in `tests/report_html.rs` (fat/lean, stages, macros, trends, training) |
-| `check` + workout | Covered by `tests/check_workout.rs` |
-| FIT zones without CLI bounds | Device zones on Zepp fixture may be null; profile-derived zones less covered |
+| Commit hygiene | Small commits aligned with gap IDs; working tree clean on close-out |
+| FIT fixture path | Canonical only: `tests/fixtures/Zepp20260710164935.fit` (parse unit test + E2E) |
+| Legacy-import E2E | `tests/import_legacy.rs` — body, nutrition, workout (synthetic in-test DBs) |
+| HTML tests | `tests/report_html.rs` (fat/lean, stages, macros, trends, training) |
+| `check` + workout | `tests/check_workout.rs` |
+| FIT profile zones | `import_fit_profile_hr_zones` when device zones null |
 
-**FIT E2E that *is* present:** `tests/import_fit.rs` using `tests/fixtures/Zepp20260710164935.fit` (distance, duration, HR, trackpoints, dedup, `--force`, `--hr-zone-bounds`).
+**FIT E2E:** `tests/import_fit.rs` (distance, duration, HR, trackpoints, dedup, `--force`, `--hr-zone-bounds`, profile zones).
 
 ---
 
@@ -190,7 +190,7 @@ These are **not** treated as parity bugs:
 5. ~~Expand **stats** (`prs` / `history` / `weight` progression / summary).~~ **Done** (gap 05).  
 6. ~~Deepen **HTML** (regression, sleep stages, remaining macros).~~ **Done** (gap 06).  
 7. CLI polish: **`--dry-run`**, set update for JSON fields, manual cadence/ascent, `finished_at`.  
-8. Housekeeping: commit, single FIT fixture path, more integration tests.
+8. ~~Housekeeping: commit, single FIT fixture path, more integration tests.~~ **Done** (gap 08).
 
 ---
 

@@ -245,3 +245,79 @@ fn import_fit_with_hr_zone_bounds() {
     let z: serde_json::Value = serde_json::from_str(zones.as_ref().unwrap()).unwrap();
     assert!(z.get("z1_seconds").is_some());
 }
+
+/// Zepp fixture has no device `time_in_hr_zone`; profile DOB (+ sleep HR) fills zones.
+#[test]
+fn import_fit_profile_hr_zones() {
+    let path = fixture_path();
+    assert!(path.exists());
+
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db");
+    let db_s = db.display().to_string();
+    let fit = path.display().to_string();
+
+    bin().args(["--db", &db_s, "init"]).assert().success();
+
+    bin()
+        .args([
+            "--db",
+            &db_s,
+            "--json",
+            "body",
+            "profile",
+            "set",
+            "--date-of-birth",
+            "1983-07-21",
+            "--height-cm",
+            "178",
+        ])
+        .assert()
+        .success();
+
+    // Median sleep HR in last 14 days enables Karvonen bounds.
+    bin()
+        .args([
+            "--db",
+            &db_s,
+            "--json",
+            "body",
+            "sleep",
+            "create",
+            "--date",
+            "today",
+            "--total-sleep",
+            "420",
+            "--heart-rate",
+            "52",
+        ])
+        .assert()
+        .success();
+
+    // Without --no-profile-hr and without --hr-zone-bounds.
+    bin()
+        .args(["--db", &db_s, "--json", "import", "fit", &fit])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"success\": true"));
+
+    let conn = Connection::open(&db).unwrap();
+    let (zones, dob, rhr): (Option<String>, Option<String>, Option<f64>) = conn
+        .query_row(
+            "SELECT heart_rate_zones, date_of_birth, resting_hr_bpm FROM exercise_sets WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert!(
+        zones.is_some(),
+        "expected heart_rate_zones from profile when device zones null"
+    );
+    let z: serde_json::Value = serde_json::from_str(zones.as_ref().unwrap()).unwrap();
+    assert!(z.get("z1_seconds").is_some());
+    assert_eq!(dob.as_deref(), Some("1983-07-21"));
+    assert!(
+        rhr.is_some() && (rhr.unwrap() - 52.0).abs() < 1e-6,
+        "expected resting_hr snapshot from sleep, got {rhr:?}"
+    );
+}

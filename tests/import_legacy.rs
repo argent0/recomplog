@@ -342,15 +342,9 @@ fn legacy_import_dry_run_provenance() {
     assert_eq!(tp, 0);
 }
 
-#[test]
-fn legacy_import_body_domain_still_works() {
-    let dir = TempDir::new().unwrap();
-    let src = dir.path().join("body_min.db");
-    let dst = dir.path().join("target.db");
-    let src_s = src.display().to_string();
-    let db_s = dst.display().to_string();
-
-    let conn = Connection::open(&src).unwrap();
+/// Minimal bodylog-shaped DB: one measurement + one sleep row.
+fn build_bodylog_min(path: &Path) {
+    let conn = Connection::open(path).unwrap();
     conn.execute_batch(
         r#"
         CREATE TABLE measurements (
@@ -365,13 +359,92 @@ fn legacy_import_body_domain_still_works() {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE sleep (
+            id INTEGER PRIMARY KEY,
+            date TEXT NOT NULL UNIQUE,
+            total_sleep_minutes INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         INSERT INTO measurements (id, date, weight_kg, created_at, updated_at)
         VALUES (1, '2026-07-01', 80.5, '2026-07-01 07:00:00', '2026-07-01 07:00:00');
+        INSERT INTO sleep (id, date, total_sleep_minutes, created_at, updated_at)
+        VALUES (1, '2026-07-01', 450, '2026-07-01 07:00:00', '2026-07-01 07:00:00');
         "#,
     )
     .unwrap();
-    drop(conn);
+}
 
+/// Minimal nutlog-shaped DB: product, nutrition, purchase, consumption.
+/// `nutrients` is empty but present — `copy_nutrition` requires the table.
+fn build_nutlog_min(path: &Path) {
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE products (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE nutrients (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            unit TEXT NOT NULL,
+            recommended_intake REAL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE product_nutritions (
+            product_id INTEGER PRIMARY KEY,
+            reference_quantity REAL NOT NULL,
+            reference_unit TEXT NOT NULL,
+            energy_kcal REAL,
+            protein_g REAL,
+            carbohydrates_g REAL,
+            fat_g REAL,
+            fiber_g REAL,
+            sugars_g REAL
+        );
+        CREATE TABLE purchases (
+            id INTEGER PRIMARY KEY,
+            product_id INTEGER NOT NULL,
+            quantity REAL NOT NULL,
+            price_cents INTEGER,
+            store_id INTEGER,
+            purchased_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE consumptions (
+            id INTEGER PRIMARY KEY,
+            product_id INTEGER NOT NULL,
+            quantity REAL NOT NULL,
+            unit TEXT,
+            consumed_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO products (id, name, created_at, updated_at)
+        VALUES (1, 'Oats', '2026-07-01 08:00:00', '2026-07-01 08:00:00');
+        INSERT INTO product_nutritions (
+            product_id, reference_quantity, reference_unit,
+            energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g
+        ) VALUES (1, 100.0, 'g', 389.0, 17.0, 66.0, 7.0, 11.0, 1.0);
+        INSERT INTO purchases (id, product_id, quantity, price_cents, store_id, purchased_at, created_at)
+        VALUES (1, 1, 500.0, 399, NULL, '2026-07-01 09:00:00', '2026-07-01 09:00:00');
+        INSERT INTO consumptions (id, product_id, quantity, unit, consumed_at, created_at)
+        VALUES (1, 1, 100.0, 'g', '2026-07-01 12:00:00', '2026-07-01 12:00:00');
+        "#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn legacy_import_body_domain_still_works() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("body_min.db");
+    let dst = dir.path().join("target.db");
+    let src_s = src.display().to_string();
+    let db_s = dst.display().to_string();
+    build_bodylog_min(&src);
     init_target(&db_s);
 
     let out = bin()
@@ -408,4 +481,103 @@ fn legacy_import_body_domain_still_works() {
         )
         .unwrap();
     assert!((w - 80.5).abs() < 1e-9);
+
+    let sleep_min: i64 = target
+        .query_row(
+            "SELECT total_sleep_minutes FROM sleep WHERE date = '2026-07-01'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(sleep_min, 450);
+}
+
+#[test]
+fn legacy_import_nutrition_domain() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("nutlog_min.db");
+    let dst = dir.path().join("target.db");
+    let src_s = src.display().to_string();
+    let db_s = dst.display().to_string();
+    build_nutlog_min(&src);
+    init_target(&db_s);
+
+    let out = bin()
+        .args([
+            "--db",
+            &db_s,
+            "--json",
+            "import",
+            "legacy",
+            "--from-db",
+            &src_s,
+            "--domain",
+            "nutrition",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["success"], true);
+    assert!(v["imported_domains"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d == "nutrition"));
+    let n = &v["counts"]["nutrition"];
+    assert_eq!(n["products"], 1);
+    assert_eq!(n["purchases"], 1);
+    assert_eq!(n["consumptions"], 1);
+
+    let target = Connection::open(&dst).unwrap();
+    let name: String = target
+        .query_row("SELECT name FROM products WHERE id = 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(name, "Oats");
+    let kcal: f64 = target
+        .query_row(
+            "SELECT energy_kcal FROM product_nutritions WHERE product_id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!((kcal - 389.0).abs() < 1e-9);
+    let purchases: i64 = target
+        .query_row("SELECT COUNT(*) FROM purchases", [], |r| r.get(0))
+        .unwrap();
+    let consumptions: i64 = target
+        .query_row("SELECT COUNT(*) FROM consumptions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(purchases, 1);
+    assert_eq!(consumptions, 1);
+
+    // Re-import is idempotent (INSERT OR IGNORE).
+    bin()
+        .args([
+            "--db",
+            &db_s,
+            "--json",
+            "import",
+            "legacy",
+            "--from-db",
+            &src_s,
+            "--domain",
+            "nutrition",
+        ])
+        .assert()
+        .success();
+    let products: i64 = target
+        .query_row("SELECT COUNT(*) FROM products", [], |r| r.get(0))
+        .unwrap();
+    let purchases2: i64 = target
+        .query_row("SELECT COUNT(*) FROM purchases", [], |r| r.get(0))
+        .unwrap();
+    let consumptions2: i64 = target
+        .query_row("SELECT COUNT(*) FROM consumptions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(products, 1);
+    assert_eq!(purchases2, 1);
+    assert_eq!(consumptions2, 1);
 }

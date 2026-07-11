@@ -430,16 +430,17 @@ mod tests {
     use std::path::PathBuf;
 
     fn sample_fit() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Zepp20260710164935.fit")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/Zepp20260710164935.fit")
     }
 
     #[test]
     fn parse_zepp_sample_run() {
         let path = sample_fit();
-        if !path.exists() {
-            eprintln!("sample FIT missing, skip");
-            return;
-        }
+        assert!(
+            path.exists(),
+            "fixture missing: {} (canonical path is tests/fixtures/)",
+            path.display()
+        );
         let act = parse_fit_path(&path).expect("parse sample");
         assert!(
             act.started_at.starts_with("2026-07-10"),
