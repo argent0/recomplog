@@ -85,8 +85,11 @@ pub enum Commands {
         action: ConfigAction,
     },
 
-    /// Audit database contents against configured sanity limits.
-    Check(CheckArgs),
+    /// Audit database contents (sanity limits) or detect missing daily logs.
+    ///
+    ///   recomplog check --variations --days 90
+    ///   recomplog check missing --days 7 --workout-days 3
+    Check(CheckCommand),
 
     /// One-time initialization and migration helpers.
     Init {
@@ -1243,6 +1246,34 @@ pub enum ConfigAction {
     Path,
 }
 
+/// Top-level `check` command: optional subcommand, else sanity-limit audit.
+#[derive(Args, Debug, Clone)]
+pub struct CheckCommand {
+    #[command(subcommand)]
+    pub action: Option<CheckAction>,
+    /// Sanity-limit audit flags (used when no subcommand is given).
+    #[command(flatten)]
+    pub audit: CheckArgs,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CheckAction {
+    /// Detect missing daily logs (measurement, sleep, nutrition) and workout inactivity.
+    Missing(CheckMissingArgs),
+}
+
+/// Args for `recomplog check missing`.
+#[derive(Args, Debug, Clone)]
+pub struct CheckMissingArgs {
+    /// Calendar days to scan for measurement / sleep / nutrition (includes today).
+    #[arg(long, default_value_t = 7)]
+    pub days: u32,
+    /// Fail if no workout session falls in this many calendar days (includes today).
+    #[arg(long = "workout-days", default_value_t = 3)]
+    pub workout_days: u32,
+}
+
+/// Args for bare `recomplog check` (sanity-limit audit).
 #[derive(Args, Debug, Clone)]
 pub struct CheckArgs {
     #[arg(long, alias = "deltas")]

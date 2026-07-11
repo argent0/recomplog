@@ -94,6 +94,7 @@ recomplog import legacy --from-db ../nutlog/nutlog.db
 
 # Sanity / config
 recomplog check --variations
+recomplog check missing --days 7 --workout-days 3
 recomplog config generate
 ```
 
@@ -106,7 +107,7 @@ recomplog nutrition  # product, purchase, consumption, nutrient, store, tags
 recomplog report     # brief, nutrition, body, sleep, summary, html
 recomplog import     # fit | legacy
 recomplog config     # show | generate | path
-recomplog check      # audit against sanity limits
+recomplog check      # sanity audit; `check missing` for logging gaps
 recomplog init       # one-time setup helpers
 ```
 

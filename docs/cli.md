@@ -106,6 +106,12 @@ counts (including provenance tables). Re-runs are idempotent via `INSERT OR IGNO
 recomplog check --variations
 # Audits body measurements, sleep, and exercise sets against configured sanity limits.
 # Sets use absolute limits only (date window = workout session day).
+
+# Completeness: missing daily logs (measurement, sleep, nutrition) over last N days
+# (includes today), plus workout inactivity over last M days.
+recomplog check missing --days 7 --workout-days 3
+recomplog --json check missing --days 7 --workout-days 3
+
 recomplog config generate
 recomplog init
 ```

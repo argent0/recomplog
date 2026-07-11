@@ -1,6 +1,7 @@
 //! Command handlers for recomplog (grouped CLI surface).
 
 pub mod body;
+mod check;
 mod config_cmd;
 mod import;
 mod nutrition;
@@ -89,11 +90,16 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             Ok(())
         }
         Commands::Import { action } => import::handle(action, db_override, json),
-        Commands::Check(args) => {
-            let conn = db::open_db(db_override)?;
-            let mut repo = BodyRepository::new(conn);
-            body::handle_check(&mut repo, args, sanity, json, quiet).map_err(Into::into)
-        }
+        Commands::Check(cmd) => match cmd.action {
+            Some(crate::cli::CheckAction::Missing(args)) => {
+                check::handle_check_missing(args, db_override, json, quiet)
+            }
+            None => {
+                let conn = db::open_db(db_override)?;
+                let mut repo = BodyRepository::new(conn);
+                body::handle_check(&mut repo, cmd.audit, sanity, json, quiet).map_err(Into::into)
+            }
+        },
         Commands::Workout { action } => {
             workout::handle(*action, db_override, &sanity.workout, json, quiet)
         }
