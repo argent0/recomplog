@@ -1,7 +1,8 @@
 //! Workout / exercise / set handlers (repslog parity under grouped CLI).
 
 use crate::bodyweight;
-use crate::cli::{ExerciseAction, SetAction, WorkoutAction};
+use crate::cli::{ExerciseAction, SetAction, WorkoutAction, WorkoutStatsAction};
+use crate::commands::workout_stats;
 use crate::config::WorkoutSanityLimits;
 use crate::db;
 use crate::load_type;
@@ -176,48 +177,34 @@ pub fn handle(
             }
             Ok(())
         }
-        WorkoutAction::Stats { days } => {
+        WorkoutAction::Stats { action, days } => {
             let conn = db::open_db(db_override)?;
-            let since = format!("-{} days", days.saturating_sub(1));
-            let mut stmt = conn.prepare(
-                "SELECT e.name,
-                        COUNT(s.id) as sets,
-                        COALESCE(SUM(s.reps), 0) as total_reps,
-                        COALESCE(SUM(CASE WHEN s.weight_kg IS NOT NULL AND s.reps IS NOT NULL
-                            THEN s.weight_kg * s.reps ELSE 0 END), 0) as volume
-                 FROM exercise_sets s
-                 JOIN workout_exercises we ON we.id = s.workout_exercise_id
-                 JOIN exercises e ON e.id = we.exercise_id
-                 JOIN workouts w ON w.id = we.workout_id
-                 WHERE date(w.started_at) >= date('now', ?1)
-                 GROUP BY e.name
-                 ORDER BY volume DESC
-                 LIMIT 50",
-            )?;
-            let rows: Vec<_> = stmt
-                .query_map([&since], |r| {
-                    Ok(serde_json::json!({
-                        "exercise": r.get::<_, String>(0)?,
-                        "sets": r.get::<_, i64>(1)?,
-                        "total_reps": r.get::<_, i64>(2)?,
-                        "volume_kg_reps": r.get::<_, f64>(3)?,
-                    }))
-                })?
-                .filter_map(|r| r.ok())
-                .collect();
-            let out = serde_json::json!({ "days": days, "by_exercise": rows });
-            if json {
-                print_json(&out);
-            } else {
-                println!("Workout volume (last {days} days):");
-                for r in &rows {
-                    println!(
-                        "  {}: sets={} reps={} volume={:.0}",
-                        r["exercise"], r["sets"], r["total_reps"], r["volume_kg_reps"]
-                    );
+            match action {
+                None => workout_stats::handle_volume(&conn, None, None, Some(days), json),
+                Some(WorkoutStatsAction::Prs { exercise }) => {
+                    workout_stats::handle_prs(&conn, exercise.as_deref(), json)
+                }
+                Some(WorkoutStatsAction::Volume {
+                    exercise,
+                    period,
+                    days: vol_days,
+                }) => workout_stats::handle_volume(
+                    &conn,
+                    exercise.as_deref(),
+                    period.as_deref(),
+                    vol_days,
+                    json,
+                ),
+                Some(WorkoutStatsAction::Summary { days }) => {
+                    workout_stats::handle_summary(&conn, days, json)
+                }
+                Some(WorkoutStatsAction::History { exercise, days }) => {
+                    workout_stats::handle_history(&conn, &exercise, days, json)
+                }
+                Some(WorkoutStatsAction::Weight { exercise }) => {
+                    workout_stats::handle_weight(&conn, &exercise, json)
                 }
             }
-            Ok(())
         }
         WorkoutAction::Exercise { action } => handle_exercise(action, db_override, json, quiet),
         WorkoutAction::Set { action } => {
@@ -634,7 +621,7 @@ fn normalize_exercise_name(name: &str) -> String {
         .to_lowercase()
 }
 
-fn resolve_exercise(conn: &Connection, exercise: &str) -> Result<Exercise> {
+pub(crate) fn resolve_exercise(conn: &Connection, exercise: &str) -> Result<Exercise> {
     if let Ok(id) = exercise.parse::<i64>() {
         return conn
             .query_row(

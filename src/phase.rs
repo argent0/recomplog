@@ -17,7 +17,6 @@ pub fn normalize_phase(value: &str) -> Result<&'static str> {
     }
 }
 
-#[allow(dead_code)]
 pub fn format_phase_label(phase: &str) -> String {
     match phase {
         ECCENTRIC => "eccentric".to_string(),

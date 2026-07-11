@@ -149,8 +149,13 @@ pub enum WorkoutAction {
     },
     /// Delete a workout (cascades exercises/sets).
     Delete { id: i64 },
-    /// Simple volume stats for recent workouts.
+    /// Workout analysis: volume, PRs, history, load progression.
+    ///
+    /// Bare `workout stats --days N` is an alias for `workout stats volume --days N`.
     Stats {
+        #[command(subcommand)]
+        action: Option<WorkoutStatsAction>,
+        /// Window in days when no subcommand is given (volume alias).
         #[arg(long, default_value_t = 30)]
         days: i64,
     },
@@ -165,6 +170,43 @@ pub enum WorkoutAction {
     Set {
         #[command(subcommand)]
         action: SetAction,
+    },
+}
+
+/// Actions under `recomplog workout stats ...`
+#[derive(Subcommand, Debug, Clone)]
+pub enum WorkoutStatsAction {
+    /// Personal records: max weight (body-mass aware) and max reps per exercise.
+    Prs {
+        #[arg(short, long)]
+        exercise: Option<String>,
+    },
+    /// Training volume (body-mass aware kg·reps + effective reps).
+    Volume {
+        #[arg(short, long)]
+        exercise: Option<String>,
+        /// Period string: `30d`, `90d`, or `1y` (mutually exclusive with `--days`).
+        #[arg(short, long)]
+        period: Option<String>,
+        #[arg(long)]
+        days: Option<i64>,
+    },
+    /// Session frequency / duration summary for a day window.
+    Summary {
+        #[arg(short, long, default_value_t = 30)]
+        days: i64,
+    },
+    /// Per-set history for an exercise across workouts in a date range.
+    History {
+        #[arg(short, long)]
+        exercise: String,
+        #[arg(short, long, default_value_t = 30)]
+        days: i64,
+    },
+    /// Load progression for an exercise (sets with recorded weight only).
+    Weight {
+        #[arg(short, long)]
+        exercise: String,
     },
 }
 

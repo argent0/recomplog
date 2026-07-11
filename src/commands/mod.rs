@@ -6,6 +6,7 @@ mod import;
 mod nutrition;
 mod report;
 mod workout;
+mod workout_stats;
 
 use crate::cli::{Cli, Commands};
 use crate::config;

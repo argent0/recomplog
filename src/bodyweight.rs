@@ -63,6 +63,7 @@ pub fn resolve_bodyweight_load(
     }
 }
 
+/// Total load for a set (body mass + external, or bar weight). Used by callers/tests.
 #[allow(dead_code)]
 pub fn total_load_kg(
     load_type: &str,
@@ -76,10 +77,40 @@ pub fn total_load_kg(
     }
 }
 
+/// Human-readable load string for tables (body-mass vs bar load).
+pub fn format_load_display(
+    load_type: &str,
+    weight_kg: Option<f64>,
+    external_load_kg: Option<f64>,
+) -> String {
+    if load_type::is_body_mass(load_type) {
+        match weight_kg {
+            Some(w) => {
+                let mut s = format!("{:.1} kg BW", w);
+                if let Some(ext) = external_load_kg {
+                    if ext.abs() > f64::EPSILON {
+                        if ext > 0.0 {
+                            s.push_str(&format!(" +{:.1} kg", ext));
+                        } else {
+                            s.push_str(&format!(" {:.1} kg assist", ext));
+                        }
+                    }
+                }
+                s
+            }
+            None => "(body weight not recorded)".to_string(),
+        }
+    } else if let Some(w) = weight_kg {
+        format!("{:.2} kg", w)
+    } else {
+        String::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::load_type::BODY_MASS;
+    use crate::load_type::{BODY_MASS, EXTERNAL};
 
     #[test]
     fn requires_weight_for_body_mass() {
@@ -92,5 +123,37 @@ mod tests {
     #[test]
     fn total_load_includes_external() {
         assert_eq!(total_load_kg(BODY_MASS, Some(80.0), Some(5.0)), Some(85.0));
+    }
+
+    #[test]
+    fn format_load_body_mass_with_external() {
+        assert_eq!(
+            format_load_display(BODY_MASS, Some(80.0), Some(5.0)),
+            "80.0 kg BW +5.0 kg"
+        );
+    }
+
+    #[test]
+    fn format_load_body_mass_assist() {
+        assert_eq!(
+            format_load_display(BODY_MASS, Some(80.0), Some(-10.0)),
+            "80.0 kg BW -10.0 kg assist"
+        );
+    }
+
+    #[test]
+    fn format_load_external_bar() {
+        assert_eq!(
+            format_load_display(EXTERNAL, Some(100.0), None),
+            "100.00 kg"
+        );
+    }
+
+    #[test]
+    fn format_load_missing_bw() {
+        assert_eq!(
+            format_load_display(BODY_MASS, None, None),
+            "(body weight not recorded)"
+        );
     }
 }

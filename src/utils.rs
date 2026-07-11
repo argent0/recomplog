@@ -10,6 +10,17 @@ use serde::Serialize;
 /// Header underline only — no outer borders, column dividers, or row separators.
 const HEADER_ONLY_PRESET: &str = "    ──              ";
 
+/// Normalize a stored datetime string for display (`YYYY-MM-DD HH:MM:SS`).
+pub fn format_datetime(s: &str) -> String {
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, DATETIME_FMT) {
+        return dt.format(DATETIME_FMT).to_string();
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return format!("{} 00:00:00", d.format("%Y-%m-%d"));
+    }
+    s.to_string()
+}
+
 /// Print a minimal human table (header + underline, no box borders).
 pub fn print_table(headers: Vec<&str>, rows: Vec<Vec<String>>) {
     if rows.is_empty() {
