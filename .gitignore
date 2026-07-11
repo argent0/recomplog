@@ -1,0 +1,39 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Keep Cargo.lock for binaries (recommended)
+# Cargo.lock
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.dll
+
+# Database files (user data - never commit)
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+/recomplog.db
+bodylog.db
+nutlog.db
+repslog.db
+
+# Temporary / reports during development
+reports/
+*.tmp
+*.log
+

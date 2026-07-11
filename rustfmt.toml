@@ -1,0 +1,30 @@
+# rustfmt.toml — Coding style for recomplog (Rust CLI)
+# Official docs: https://rust-lang.github.io/rustfmt/
+
+edition = "2021"
+
+# Line width — 100 is common for modern Rust CLIs (easy to read on terminals + LLMs)
+max_width = 100
+
+# Use the default "small heuristics" for line breaks (good balance)
+use_small_heuristics = "Default"
+
+# Import ordering (very useful for consistency)
+reorder_imports = true
+reorder_modules = true
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"
+
+# Comments and docs
+normalize_comments = true
+wrap_comments = true
+
+# Misc good defaults for CLI tools
+format_strings = false          # keep string literals readable
+format_code_in_doc_comments = true
+doc_comment_code_block_width = 100
+
+# Avoid overly aggressive changes
+newline_style = "Auto"
+remove_nested_parens = true
+use_try_shorthand = true

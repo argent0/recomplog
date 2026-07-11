@@ -1,0 +1,32 @@
+# clippy.toml — Linting rules for recomplog
+# Docs: https://rust-lang.github.io/rust-clippy/
+
+# Minimum supported Rust version (adjust as needed)
+msrv = "1.75"
+
+# Complexity
+cognitive-complexity-threshold = 25
+too-many-arguments-threshold = 7
+type-complexity-threshold = 250
+
+# Allow some pedantic lints that are noisy for CLIs
+# (uncomment if you want stricter mode later)
+# warn = ["clippy::pedantic"]
+# allow = [
+#     "clippy::module_name_repetitions",
+#     "clippy::must_use_candidate",
+#     "clippy::similar_names",
+# ]
+
+# Useful for CLI tools that use error handling heavily
+# (top level allow/warn keys can be fragile across clippy versions; we rely on code #[allow] + CI clippy -D for key ones)
+# allow = [
+#     "clippy::result_large_err",
+# ]
+# warn = [
+#     "clippy::unwrap_used",
+#     "clippy::expect_used",
+#     "clippy::panic",
+#     "clippy::print_stdout",
+#     "clippy::dbg_macro",
+# ]
