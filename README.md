@@ -2,48 +2,123 @@
 
 Unified local CLI for body recomposition tracking.
 
-Combines:
-- Workout / reps / sets / FIT tracking (from repslog)
-- Body measurements + sleep (from bodylog)
-- Nutrition / food logging + reports (from nutlog)
-- HTML dashboard reports (from bodydashboard)
+Single-user, local-first, and agent-friendly. One SQLite database for:
 
-All data in a single SQLite database. Excellent support for both humans and LLM agents via `--json`.
+- **Training** — workouts, exercises, sets (strength, cluster, cardio), FIT import
+- **Body** — measurements, sleep, profile (height / DOB / HR zones)
+- **Nutrition** — products, purchases, consumption, stores, nutrients
+- **Reports** — body/sleep/nutrition summaries, combined JSON, self-contained HTML dashboard
+
+Successor to `repslog`, `bodylog`, `nutlog`, and `bodydashboard`.
 
 ## Status
 
-Grouped CLI surface is implemented for body, nutrition, workout, reports, and legacy import.
-HTML dashboards read from the unified SQLite database. FIT import remains a stub.
+The grouped CLI is in place for body, nutrition, workout (including stats), reports, config/check, legacy DB import, and **FIT import** (Garmin/Zepp-style activities, idempotent by file hash, optional HR zones).
 
-See `AGENTS.md` and `CODING_PRACTICES.md` for contribution guidelines.
+`--json` is supported on data-returning commands. CLI `--help` is the source of truth for flags; `docs/cli.md` describes the full surface.
 
-## Quick Start
+## Install
+
+**From source** (Rust toolchain required):
+
+```bash
+cargo install --path .
+# or development builds:
+cargo build --release
+# binary: target/release/recomplog
+```
+
+**Arch Linux** (VCS package in-tree):
+
+```bash
+# from a clean checkout
+makepkg -si
+```
+
+See `PKGBUILD` for depends/makedepends and install layout.
+
+## Data locations
+
+| What   | Default path                                      |
+|--------|---------------------------------------------------|
+| DB     | `~/.local/share/recomplog/recomplog.db`           |
+| Config | `~/.config/recomplog/config.toml`                 |
+
+Override with global `--db PATH` and `--config PATH`.
+
+## Global flags
+
+Available on all commands:
+
+| Flag         | Purpose                                      |
+|--------------|----------------------------------------------|
+| `--json`     | Structured JSON (preferred for agents/scripts) |
+| `--db PATH`  | Override SQLite path                         |
+| `--config PATH` | Override config path                      |
+| `--quiet`    | Minimal human output                         |
+
+Dates accept flexible forms: `today`, `yesterday`, `2026-07-05`, `last monday`, etc.
+
+## Quick start
 
 ```bash
 # Body
 recomplog body measurement create --date today --weight-kg 80.5 --json
 recomplog body measurement list --days 14
+recomplog body sleep create --date today --total-sleep "7h 45m"
+recomplog body profile set --height-cm 178
 
 # Training
 recomplog workout create --type Push
-recomplog workout exercise list
-recomplog workout set add --workout 1 --exercise "bench press" ...
+recomplog workout exercise list --search bench
+recomplog workout set add --workout 1 --exercise "bench press" --reps 5 --weight 100 --phase full
+recomplog workout list --days 14
+recomplog workout stats volume --days 30
+recomplog workout show 1
 
 # Nutrition
 recomplog nutrition product create "Oats" --tags breakfast
 recomplog nutrition product list --json
+recomplog nutrition consumption create --product 1 --quantity 0.8 --date today
 
-# Reports (top level)
-recomplog report html --days 14
+# Reports
+recomplog report html --days 14 --name dashboard.html
+recomplog --json report nutrition summary --days 7
+recomplog report body --days 30
 
-# Migrate from old tools
-recomplog import legacy --from-db ../bodylog/bodylog.db
+# Import
+recomplog import fit activity.fit --exercise running --dry-run
+recomplog import legacy --from-db ../bodylog/bodylog.db --dry-run
 recomplog import legacy --from-db ../nutlog/nutlog.db
+
+# Sanity / config
+recomplog check --variations
+recomplog config generate
 ```
 
-See `docs/cli.md` for the full grouped command surface.
+## Command groups
+
+```
+recomplog workout    # sessions, exercises, sets, stats
+recomplog body       # measurement, sleep, profile
+recomplog nutrition  # product, purchase, consumption, nutrient, store, tags
+recomplog report     # nutrition, body, sleep, summary, html
+recomplog import     # fit | legacy
+recomplog config     # show | generate | path
+recomplog check      # audit against sanity limits
+recomplog init       # one-time setup helpers
 ```
 
-Data locations:
-- DB: `~/.local/share/recomplog/recomplog.db`
-- Config: `~/.config/recomplog/config.toml`
+Shape is generally `<group> <entity> <action>`. Full examples (clusters, cardio sets, nutrition micros, spending reports): **`docs/cli.md`**.
+
+## Develop
+
+```bash
+cargo fmt
+cargo clippy -- -D warnings
+cargo test
+```
+
+Integration tests live under `tests/`. Conventions for agents and contributors: **`AGENTS.md`**, **`CODING_PRACTICES.md`**.
+
+License: MIT (see `Cargo.toml`).
