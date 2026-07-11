@@ -23,3 +23,25 @@
 | import legacy DBs | `import legacy --from-db` | done |
 
 No top-level aliases for old names (by design).
+
+## Cardio zones / laps strictness
+
+repslog often required structured `--hr-zones` and `--laps` for cardio sets.
+recomplog accepts them as **optional** on `workout set add-cardio` (and FIT import
+fills them when present). Opt into strict validation with:
+
+```bash
+recomplog workout set add-cardio ... --require-zones-laps --hr-zones '...' --laps '...'
+```
+
+Manual cadence/elevation (`--cadence`, `--ascent`, `--descent`) map to
+`avg_cadence_spm` / `total_ascent_m` / `total_descent_m` on add and update
+(FIT import already populated these).
+
+## Dry-run on mutations
+
+`workout create|update|delete`, `workout exercise create|update`, and all
+`workout set` mutators accept `--dry-run`: resolve IDs, run sanity validation,
+return `{ "success": true, "dry_run": true, "would": { ... } }` under `--json`,
+and perform **no** DB writes (including auto-creating `workout_exercises`).
+Validation failures still exit non-zero.

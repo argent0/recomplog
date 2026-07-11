@@ -95,7 +95,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             body::handle_check(&mut repo, args, sanity, json, quiet).map_err(Into::into)
         }
         Commands::Workout { action } => {
-            workout::handle(action, db_override, &sanity.workout, json, quiet)
+            workout::handle(*action, db_override, &sanity.workout, json, quiet)
         }
         Commands::Body { action } => {
             let conn = db::open_db(db_override)?;

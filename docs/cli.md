@@ -16,6 +16,8 @@ This document describes the unified command structure.
 
 ```bash
 recomplog workout create --type Push
+recomplog workout create --type Push --started-at "2026-07-10 17:00" --finished-at "2026-07-10 18:30"
+recomplog workout update 1 --finished-at "2026-07-10 19:00"
 recomplog workout list --days 14
 recomplog workout show 42
 
@@ -23,6 +25,8 @@ recomplog workout exercise list --search bench
 recomplog workout exercise create "incline dumbbell press" --category strength --equipment dumbbell
 
 recomplog workout set add --workout 42 --exercise "bench press" --reps 5 --weight 100
+# Preview without writing (also on set/workout/exercise mutators)
+recomplog --json workout set add --workout 42 --exercise "bench press" --reps 5 --weight 100 --dry-run
 ```
 
 ### Body Composition + Sleep
@@ -121,7 +125,13 @@ The structure is intentionally regular: `<group> <entity> <action>` where possib
 recomplog workout set add-cluster --workout 1 --exercise "bench press" \
   --reps "10,5,5" --weight 100 --phase full --rir "0,0,1" --effective-reps "6,4,3" --rest 15
 recomplog workout set add-cardio --workout 1 --exercise running \
-  --distance 5 --duration 1500 --avg-heart-rate 150 --max-heart-rate 175 --pace 5 --calories 400
+  --distance 5 --duration 1500 --avg-heart-rate 150 --max-heart-rate 175 --pace 5 --calories 400 \
+  --cadence 170 --ascent 120 --descent 115 \
+  --hr-zones '{"z1_seconds":60,"z2_seconds":1200,"z3_seconds":240,"z4_seconds":0,"z5_seconds":0}'
+# Optional strict cardio (require zones + laps JSON)
+recomplog workout set add-cardio ... --require-zones-laps --hr-zones '...' --laps '...'
+# Update zones / cadence after import
+recomplog workout set update 9 --hr-zones '...' --laps '...' --cadence 172 --ascent 125
 
 # Nutrition micros + store
 recomplog nutrition store create "Local Market"

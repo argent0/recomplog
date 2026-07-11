@@ -16,6 +16,19 @@ use crate::utils::{
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
+fn emit_dry_run(json: bool, quiet: bool, would: serde_json::Value) -> Result<()> {
+    if json {
+        print_json(&serde_json::json!({
+            "success": true,
+            "dry_run": true,
+            "would": would,
+        }));
+    } else {
+        quiet_print(quiet, format!("dry-run: would {would}"));
+    }
+    Ok(())
+}
+
 pub fn handle(
     action: WorkoutAction,
     db_override: Option<&str>,
@@ -26,17 +39,36 @@ pub fn handle(
     match action {
         WorkoutAction::Create {
             started_at,
+            finished_at,
             workout_type,
             notes,
+            dry_run,
         } => {
             let conn = db::open_db(db_override)?;
             let started = match started_at {
                 Some(s) => parse_flexible_datetime(&s)?,
                 None => db::now_utc(),
             };
+            let finished = finished_at
+                .as_ref()
+                .map(|s| parse_flexible_datetime(s))
+                .transpose()?;
+            if dry_run {
+                return emit_dry_run(
+                    json,
+                    quiet,
+                    serde_json::json!({
+                        "action": "workout create",
+                        "started_at": started,
+                        "finished_at": finished,
+                        "workout_type": workout_type,
+                        "notes": notes,
+                    }),
+                );
+            }
             conn.execute(
-                "INSERT INTO workouts (started_at, workout_type, notes) VALUES (?1, ?2, ?3)",
-                params![started, workout_type, notes],
+                "INSERT INTO workouts (started_at, finished_at, workout_type, notes) VALUES (?1, ?2, ?3, ?4)",
+                params![started, finished, workout_type, notes],
             )?;
             let id = conn.last_insert_rowid();
             if json {
@@ -50,7 +82,7 @@ pub fn handle(
             let conn = db::open_db(db_override)?;
             let lim = limit.max(1);
             let mut sql = String::from(
-                "SELECT id, started_at, workout_type, notes, duration_minutes, overall_feeling
+                "SELECT id, started_at, finished_at, workout_type, notes, duration_minutes, overall_feeling
                  FROM workouts WHERE 1=1",
             );
             let mut binds: Vec<String> = vec![];
@@ -71,10 +103,11 @@ pub fn handle(
                     Ok(serde_json::json!({
                         "id": r.get::<_, i64>(0)?,
                         "started_at": r.get::<_, String>(1)?,
-                        "workout_type": r.get::<_, Option<String>>(2)?,
-                        "notes": r.get::<_, Option<String>>(3)?,
-                        "duration_minutes": r.get::<_, Option<i64>>(4)?,
-                        "overall_feeling": r.get::<_, Option<i64>>(5)?,
+                        "finished_at": r.get::<_, Option<String>>(2)?,
+                        "workout_type": r.get::<_, Option<String>>(3)?,
+                        "notes": r.get::<_, Option<String>>(4)?,
+                        "duration_minutes": r.get::<_, Option<i64>>(5)?,
+                        "overall_feeling": r.get::<_, Option<i64>>(6)?,
                     }))
                 })?
                 .filter_map(|r| r.ok())
@@ -110,6 +143,8 @@ pub fn handle(
             duration,
             feeling,
             started_at,
+            finished_at,
+            dry_run,
         } => {
             let conn = db::open_db(db_override)?;
             let exists: Option<i64> = conn
@@ -124,6 +159,10 @@ pub fn handle(
                 }
             }
             let started = started_at
+                .as_ref()
+                .map(|s| parse_flexible_datetime(s))
+                .transpose()?;
+            let finished = finished_at
                 .as_ref()
                 .map(|s| parse_flexible_datetime(s))
                 .transpose()?;
@@ -150,8 +189,23 @@ pub fn handle(
                 sets.push("started_at = ?");
                 vals.push(Box::new(v));
             }
+            if let Some(v) = finished {
+                sets.push("finished_at = ?");
+                vals.push(Box::new(v));
+            }
             if sets.is_empty() {
                 return Err(anyhow!("provide at least one field to update"));
+            }
+            if dry_run {
+                return emit_dry_run(
+                    json,
+                    quiet,
+                    serde_json::json!({
+                        "action": "workout update",
+                        "id": id,
+                        "fields": sets,
+                    }),
+                );
             }
             let sql = format!("UPDATE workouts SET {} WHERE id = ?", sets.join(", "));
             vals.push(Box::new(id));
@@ -164,12 +218,25 @@ pub fn handle(
             }
             Ok(())
         }
-        WorkoutAction::Delete { id } => {
+        WorkoutAction::Delete { id, dry_run } => {
             let conn = db::open_db(db_override)?;
-            let n = conn.execute("DELETE FROM workouts WHERE id = ?1", [id])?;
-            if n == 0 {
+            let exists: Option<i64> = conn
+                .query_row("SELECT id FROM workouts WHERE id = ?1", [id], |r| r.get(0))
+                .optional()?;
+            if exists.is_none() {
                 return Err(anyhow!("workout {id} not found"));
             }
+            if dry_run {
+                return emit_dry_run(
+                    json,
+                    quiet,
+                    serde_json::json!({
+                        "action": "workout delete",
+                        "delete_id": id,
+                    }),
+                );
+            }
+            conn.execute("DELETE FROM workouts WHERE id = ?1", [id])?;
             if json {
                 print_json(&Success::deleted(id));
             } else {
@@ -208,7 +275,7 @@ pub fn handle(
         }
         WorkoutAction::Exercise { action } => handle_exercise(action, db_override, json, quiet),
         WorkoutAction::Set { action } => {
-            handle_set(action, db_override, workout_limits, json, quiet)
+            handle_set(*action, db_override, workout_limits, json, quiet)
         }
     }
 }
@@ -401,6 +468,7 @@ fn list_sets_json(
         "SELECT id, set_number, reps, weight_kg, external_load_kg, distance_km, duration_seconds,
                 rpe, rir, effective_reps, cluster_id, rest_seconds, notes, side, phase,
                 avg_heart_rate_bpm, max_heart_rate_bpm, avg_pace_min_per_km, calories_burned,
+                avg_cadence_spm, total_ascent_m, total_descent_m,
                 heart_rate_zones, laps, date_of_birth, resting_hr_bpm
          FROM exercise_sets WHERE workout_exercise_id = ?1 ORDER BY set_number",
     )?;
@@ -409,10 +477,10 @@ fn list_sets_json(
     while let Some(r) = rows.next()? {
         let set_id: i64 = r.get(0)?;
         let distance_km: Option<f64> = r.get(5)?;
-        let zones: Option<String> = r.get(19)?;
-        let laps: Option<String> = r.get(20)?;
-        let date_of_birth: Option<String> = r.get(21)?;
-        let resting_hr_bpm: Option<f64> = r.get(22)?;
+        let zones: Option<String> = r.get(22)?;
+        let laps: Option<String> = r.get(23)?;
+        let date_of_birth: Option<String> = r.get(24)?;
+        let resting_hr_bpm: Option<f64> = r.get(25)?;
         let mut set_json = serde_json::json!({
             "id": set_id,
             "set_number": r.get::<_, i64>(1)?,
@@ -433,6 +501,9 @@ fn list_sets_json(
             "max_heart_rate_bpm": r.get::<_, Option<f64>>(16)?,
             "avg_pace_min_per_km": r.get::<_, Option<f64>>(17)?,
             "calories_burned": r.get::<_, Option<i32>>(18)?,
+            "avg_cadence_spm": r.get::<_, Option<f64>>(19)?,
+            "total_ascent_m": r.get::<_, Option<f64>>(20)?,
+            "total_descent_m": r.get::<_, Option<f64>>(21)?,
             "heart_rate_zones": zones.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
             "laps": laps.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
         });
@@ -510,6 +581,7 @@ fn handle_exercise(
             muscles,
             description,
             allow_phase_in_name,
+            dry_run,
         } => {
             let name = normalize_exercise_name(&name);
             phase::validate_exercise_name_phase(&name, allow_phase_in_name)
@@ -522,6 +594,21 @@ fn handle_exercise(
             .map_err(|e| anyhow!("{e}"))?;
             if deprecated && !quiet {
                 eprintln!("Note: equipment 'bodyweight' is deprecated; use --load-type body_mass");
+            }
+            if dry_run {
+                return emit_dry_run(
+                    json,
+                    quiet,
+                    serde_json::json!({
+                        "action": "exercise create",
+                        "name": name,
+                        "category": category,
+                        "equipment": eq,
+                        "load_type": lt,
+                        "muscle_groups": muscles,
+                        "description": description,
+                    }),
+                );
             }
             conn.execute(
                 "INSERT INTO exercises (name, category, equipment, load_type, muscle_groups, description, is_custom)
@@ -547,6 +634,7 @@ fn handle_exercise(
             load_type,
             muscles,
             description,
+            dry_run,
         } => {
             let ex = resolve_exercise(&conn, &exercise)?;
             let mut sets = vec![];
@@ -576,6 +664,18 @@ fn handle_exercise(
             }
             if sets.is_empty() {
                 return Err(anyhow!("provide at least one field to update"));
+            }
+            if dry_run {
+                return emit_dry_run(
+                    json,
+                    quiet,
+                    serde_json::json!({
+                        "action": "exercise update",
+                        "id": ex.id,
+                        "name": ex.name,
+                        "fields": sets,
+                    }),
+                );
             }
             let sql = format!("UPDATE exercises SET {} WHERE id = ?", sets.join(", "));
             vals.push(Box::new(ex.id));
@@ -656,22 +756,37 @@ fn row_to_exercise(r: &rusqlite::Row<'_>) -> rusqlite::Result<Exercise> {
     })
 }
 
+/// Result of resolving a workout_exercise link (may not create on dry-run).
+struct ResolvedWe {
+    /// Present when the row already exists, or was created (non-dry-run).
+    we_id: Option<i64>,
+    exercise: Exercise,
+    workout_id: Option<i64>,
+    would_create_workout_exercise: bool,
+}
+
 fn resolve_we_id(
     conn: &Connection,
     workout: Option<i64>,
     exercise: Option<&str>,
     workout_exercise: Option<i64>,
-) -> Result<(i64, Exercise)> {
+    dry_run: bool,
+) -> Result<ResolvedWe> {
     if let Some(we_id) = workout_exercise {
-        let (ex_id,): (i64,) = conn
+        let (ex_id, workout_id): (i64, i64) = conn
             .query_row(
-                "SELECT exercise_id FROM workout_exercises WHERE id = ?1",
+                "SELECT exercise_id, workout_id FROM workout_exercises WHERE id = ?1",
                 [we_id],
-                |r| Ok((r.get(0)?,)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(|_| anyhow!("workout_exercise {we_id} not found"))?;
         let ex = resolve_exercise(conn, &ex_id.to_string())?;
-        return Ok((we_id, ex));
+        return Ok(ResolvedWe {
+            we_id: Some(we_id),
+            exercise: ex,
+            workout_id: Some(workout_id),
+            would_create_workout_exercise: false,
+        });
     }
     let workout = workout
         .ok_or_else(|| anyhow!("provide --workout and --exercise, or --workout-exercise"))?;
@@ -683,7 +798,7 @@ fn resolve_we_id(
             r.get(0)
         })
         .map_err(|_| anyhow!("workout not found: {workout}"))?;
-    let we_id = match conn
+    match conn
         .query_row(
             "SELECT id FROM workout_exercises WHERE workout_id = ?1 AND exercise_id = ?2 LIMIT 1",
             params![workout, ex.id],
@@ -691,7 +806,18 @@ fn resolve_we_id(
         )
         .optional()?
     {
-        Some(id) => id,
+        Some(id) => Ok(ResolvedWe {
+            we_id: Some(id),
+            exercise: ex,
+            workout_id: Some(workout),
+            would_create_workout_exercise: false,
+        }),
+        None if dry_run => Ok(ResolvedWe {
+            we_id: None,
+            exercise: ex,
+            workout_id: Some(workout),
+            would_create_workout_exercise: true,
+        }),
         None => {
             let order: i64 = conn
                 .query_row(
@@ -704,10 +830,14 @@ fn resolve_we_id(
                 r#"INSERT INTO workout_exercises (workout_id, exercise_id, "order") VALUES (?1,?2,?3)"#,
                 params![workout, ex.id, order],
             )?;
-            conn.last_insert_rowid()
+            Ok(ResolvedWe {
+                we_id: Some(conn.last_insert_rowid()),
+                exercise: ex,
+                workout_id: Some(workout),
+                would_create_workout_exercise: false,
+            })
         }
-    };
-    Ok((we_id, ex))
+    }
 }
 
 fn next_set_number(conn: &Connection, we_id: i64) -> i64 {
@@ -799,6 +929,9 @@ fn insert_set(
     calories: Option<i32>,
     hr_zones: Option<&HeartRateZones>,
     laps: Option<&Laps>,
+    avg_cadence_spm: Option<f64>,
+    total_ascent_m: Option<f64>,
+    total_descent_m: Option<f64>,
     limits: &WorkoutSanityLimits,
 ) -> Result<i64> {
     let zones_json = hr_zones
@@ -824,9 +957,11 @@ fn insert_set(
         max_heart_rate_bpm: max_hr,
         avg_pace_min_per_km: pace,
         calories_burned: calories,
+        avg_cadence_spm,
+        total_ascent_m,
+        total_descent_m,
         heart_rate_zones: hr_zones.cloned(),
         laps: laps.map(|l| l.0.clone()),
-        ..Default::default()
     };
     sanity::validate_set_metrics(&proposed, limits).map_err(|e| anyhow!("{e}"))?;
 
@@ -835,8 +970,9 @@ fn insert_set(
          (workout_exercise_id, set_number, reps, weight_kg, external_load_kg,
           distance_km, duration_seconds, rpe, rir, effective_reps, cluster_id, rest_seconds,
           notes, side, phase, avg_heart_rate_bpm, max_heart_rate_bpm, avg_pace_min_per_km,
-          calories_burned, heart_rate_zones, laps)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+          calories_burned, avg_cadence_spm, total_ascent_m, total_descent_m,
+          heart_rate_zones, laps)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
         params![
             we_id,
             set_number,
@@ -857,11 +993,60 @@ fn insert_set(
             max_hr,
             pace,
             calories,
+            avg_cadence_spm,
+            total_ascent_m,
+            total_descent_m,
             zones_json,
             laps_json,
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Validate set metrics without writing (for dry-run paths).
+#[allow(clippy::too_many_arguments)]
+fn validate_set_payload(
+    reps: Option<i32>,
+    weight: Option<f64>,
+    external_load: Option<f64>,
+    distance: Option<f64>,
+    duration: Option<i32>,
+    rpe: Option<f64>,
+    rir: Option<f64>,
+    effective_reps: Option<i32>,
+    rest_seconds: Option<i32>,
+    avg_hr: Option<f64>,
+    max_hr: Option<f64>,
+    pace: Option<f64>,
+    calories: Option<i32>,
+    hr_zones: Option<&HeartRateZones>,
+    laps: Option<&Laps>,
+    avg_cadence_spm: Option<f64>,
+    total_ascent_m: Option<f64>,
+    total_descent_m: Option<f64>,
+    limits: &WorkoutSanityLimits,
+) -> Result<()> {
+    let proposed = ProposedSetMetrics {
+        reps,
+        weight_kg: weight,
+        external_load_kg: external_load,
+        distance_km: distance,
+        duration_seconds: duration,
+        rpe,
+        rir,
+        effective_reps,
+        rest_seconds,
+        avg_heart_rate_bpm: avg_hr,
+        max_heart_rate_bpm: max_hr,
+        avg_pace_min_per_km: pace,
+        calories_burned: calories,
+        avg_cadence_spm,
+        total_ascent_m,
+        total_descent_m,
+        heart_rate_zones: hr_zones.cloned(),
+        laps: laps.map(|l| l.0.clone()),
+    };
+    sanity::validate_set_metrics(&proposed, limits).map_err(|e| anyhow!("{e}"))
 }
 
 fn handle_set(
@@ -895,9 +1080,20 @@ fn handle_set(
             pace,
             calories,
             laps,
+            cadence,
+            ascent,
+            descent,
+            dry_run,
         } => {
             let conn = db::open_db(db_override)?;
-            let (we_id, ex) = resolve_we_id(&conn, workout, exercise.as_deref(), workout_exercise)?;
+            let resolved = resolve_we_id(
+                &conn,
+                workout,
+                exercise.as_deref(),
+                workout_exercise,
+                dry_run,
+            )?;
+            let ex = &resolved.exercise;
             let resolved_phase = phase::normalize_phase(&phase).map_err(|e| anyhow!("{e}"))?;
             let requires =
                 reps.is_some() || weight.is_some() || duration.is_some() || external_load.is_some();
@@ -923,7 +1119,57 @@ fn handle_set(
             }
             let zones = parse_hr_zones(hr_zones.as_deref())?;
             let laps_v = parse_laps(laps.as_deref())?;
-            let sn = next_set_number(&conn, we_id);
+            validate_set_payload(
+                reps,
+                w,
+                el,
+                distance,
+                duration,
+                rpe,
+                rir,
+                effective_reps,
+                rest_seconds,
+                avg_heart_rate,
+                max_heart_rate,
+                pace,
+                calories,
+                zones.as_ref(),
+                laps_v.as_ref(),
+                cadence,
+                ascent,
+                descent,
+                limits,
+            )?;
+            let sn = match resolved.we_id {
+                Some(we_id) => next_set_number(&conn, we_id),
+                None => 1,
+            };
+            if dry_run {
+                return emit_dry_run(
+                    json,
+                    quiet,
+                    serde_json::json!({
+                        "action": "set add",
+                        "workout_id": resolved.workout_id,
+                        "exercise": ex.name,
+                        "workout_exercise_id": resolved.we_id,
+                        "would_create_workout_exercise": resolved.would_create_workout_exercise,
+                        "set_number": sn,
+                        "reps": reps,
+                        "weight_kg": w,
+                        "external_load_kg": el,
+                        "distance_km": distance,
+                        "duration_seconds": duration,
+                        "phase": resolved_phase,
+                        "avg_cadence_spm": cadence,
+                        "total_ascent_m": ascent,
+                        "total_descent_m": descent,
+                    }),
+                );
+            }
+            let we_id = resolved
+                .we_id
+                .ok_or_else(|| anyhow!("internal error: missing workout_exercise after resolve"))?;
             let id = insert_set(
                 &conn,
                 we_id,
@@ -947,6 +1193,9 @@ fn handle_set(
                 calories,
                 zones.as_ref(),
                 laps_v.as_ref(),
+                cadence,
+                ascent,
+                descent,
                 limits,
             )?;
             if json {
@@ -968,15 +1217,91 @@ fn handle_set(
             calories,
             hr_zones,
             laps,
+            cadence,
+            ascent,
+            descent,
+            require_zones_laps,
             notes,
             phase,
+            dry_run,
         } => {
             let conn = db::open_db(db_override)?;
-            let (we_id, _) = resolve_we_id(&conn, workout, exercise.as_deref(), workout_exercise)?;
+            let resolved = resolve_we_id(
+                &conn,
+                workout,
+                exercise.as_deref(),
+                workout_exercise,
+                dry_run,
+            )?;
             let resolved_phase = phase::normalize_phase(&phase).map_err(|e| anyhow!("{e}"))?;
-            let zones = parse_hr_zones(hr_zones.as_deref())?.unwrap_or_default();
+            let zones_opt = parse_hr_zones(hr_zones.as_deref())?;
             let laps_v = parse_laps(laps.as_deref())?;
-            let sn = next_set_number(&conn, we_id);
+            if require_zones_laps {
+                if zones_opt.is_none() {
+                    return Err(anyhow!(
+                        "--require-zones-laps: provide --hr-zones JSON (zones are required)"
+                    ));
+                }
+                if laps_v.is_none() {
+                    return Err(anyhow!(
+                        "--require-zones-laps: provide --laps JSON (laps are required)"
+                    ));
+                }
+            }
+            let zones = zones_opt.unwrap_or_default();
+            validate_set_payload(
+                None,
+                None,
+                None,
+                Some(distance),
+                Some(duration),
+                None,
+                None,
+                None,
+                None,
+                Some(avg_heart_rate),
+                Some(max_heart_rate),
+                Some(pace),
+                Some(calories),
+                Some(&zones),
+                laps_v.as_ref(),
+                cadence,
+                ascent,
+                descent,
+                limits,
+            )?;
+            let sn = match resolved.we_id {
+                Some(we_id) => next_set_number(&conn, we_id),
+                None => 1,
+            };
+            if dry_run {
+                return emit_dry_run(
+                    json,
+                    quiet,
+                    serde_json::json!({
+                        "action": "set add-cardio",
+                        "workout_id": resolved.workout_id,
+                        "exercise": resolved.exercise.name,
+                        "workout_exercise_id": resolved.we_id,
+                        "would_create_workout_exercise": resolved.would_create_workout_exercise,
+                        "set_number": sn,
+                        "distance_km": distance,
+                        "duration_seconds": duration,
+                        "avg_heart_rate_bpm": avg_heart_rate,
+                        "max_heart_rate_bpm": max_heart_rate,
+                        "avg_pace_min_per_km": pace,
+                        "calories_burned": calories,
+                        "avg_cadence_spm": cadence,
+                        "total_ascent_m": ascent,
+                        "total_descent_m": descent,
+                        "heart_rate_zones": zones,
+                        "laps": laps_v.as_ref().map(|l| &l.0),
+                    }),
+                );
+            }
+            let we_id = resolved
+                .we_id
+                .ok_or_else(|| anyhow!("internal error: missing workout_exercise after resolve"))?;
             let id = insert_set(
                 &conn,
                 we_id,
@@ -1000,6 +1325,9 @@ fn handle_set(
                 Some(calories),
                 Some(&zones),
                 laps_v.as_ref(),
+                cadence,
+                ascent,
+                descent,
                 limits,
             )?;
             if json {
@@ -1027,9 +1355,17 @@ fn handle_set(
             notes,
             side,
             phase,
+            dry_run,
         } => {
             let conn = db::open_db(db_override)?;
-            let (we_id, ex) = resolve_we_id(&conn, workout, exercise.as_deref(), workout_exercise)?;
+            let resolved = resolve_we_id(
+                &conn,
+                workout,
+                exercise.as_deref(),
+                workout_exercise,
+                dry_run,
+            )?;
+            let ex = &resolved.exercise;
             let resolved_phase = phase::normalize_phase(&phase).map_err(|e| anyhow!("{e}"))?;
             let reps_list = parse_csv_i32(&reps, "reps")?;
             let rir_list = parse_csv_f64(&rir, "rir")?;
@@ -1048,6 +1384,71 @@ fn handle_set(
                 true,
             )
             .map_err(|e| anyhow!("{e}"))?;
+            // Validate each planned set before any writes
+            for (i, ((r, ri), eff)) in reps_list
+                .iter()
+                .zip(rir_list.iter())
+                .zip(eff_list.iter())
+                .enumerate()
+            {
+                let rest = if i > 0 { Some(rest_seconds) } else { None };
+                validate_set_payload(
+                    Some(*r),
+                    w,
+                    el,
+                    None,
+                    None,
+                    None,
+                    Some(*ri),
+                    Some(*eff),
+                    rest,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    limits,
+                )?;
+            }
+            if dry_run {
+                let planned: Vec<_> = reps_list
+                    .iter()
+                    .zip(rir_list.iter())
+                    .zip(eff_list.iter())
+                    .enumerate()
+                    .map(|(i, ((r, ri), eff))| {
+                        serde_json::json!({
+                            "reps": r,
+                            "rir": ri,
+                            "effective_reps": eff,
+                            "rest_seconds": if i > 0 { Some(rest_seconds) } else { None },
+                            "weight_kg": w,
+                            "external_load_kg": el,
+                            "side": side,
+                            "phase": resolved_phase,
+                        })
+                    })
+                    .collect();
+                return emit_dry_run(
+                    json,
+                    quiet,
+                    serde_json::json!({
+                        "action": "set add-cluster",
+                        "workout_id": resolved.workout_id,
+                        "exercise": ex.name,
+                        "workout_exercise_id": resolved.we_id,
+                        "would_create_workout_exercise": resolved.would_create_workout_exercise,
+                        "sets": planned,
+                    }),
+                );
+            }
+            let we_id = resolved
+                .we_id
+                .ok_or_else(|| anyhow!("internal error: missing workout_exercise after resolve"))?;
             let cluster_id = next_cluster_id(&conn);
             let mut ids = vec![];
             for (i, ((r, ri), eff)) in reps_list
@@ -1075,6 +1476,9 @@ fn handle_set(
                     notes.as_deref(),
                     side.as_deref(),
                     resolved_phase,
+                    None,
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -1114,9 +1518,17 @@ fn handle_set(
             notes,
             side,
             phase,
+            dry_run,
         } => {
             let conn = db::open_db(db_override)?;
-            let (we_id, ex) = resolve_we_id(&conn, workout, exercise.as_deref(), workout_exercise)?;
+            let resolved = resolve_we_id(
+                &conn,
+                workout,
+                exercise.as_deref(),
+                workout_exercise,
+                dry_run,
+            )?;
+            let ex = &resolved.exercise;
             let resolved_phase = phase::normalize_phase(&phase).map_err(|e| anyhow!("{e}"))?;
             let reps_list = parse_csv_i32(&reps, "reps")?;
             let rir_list = match rir {
@@ -1143,6 +1555,74 @@ fn handle_set(
                 "both" => vec!["left", "right"],
                 s => vec![s],
             };
+            for (i, ((r, ri), eff)) in reps_list
+                .iter()
+                .zip(rir_list.iter())
+                .zip(eff_list.iter())
+                .enumerate()
+            {
+                for sd in &sides {
+                    let rest = if i > 0 { rest_seconds } else { None };
+                    validate_set_payload(
+                        Some(*r),
+                        w,
+                        el,
+                        None,
+                        None,
+                        None,
+                        Some(*ri),
+                        Some(*eff),
+                        rest,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        limits,
+                    )?;
+                    let _ = sd;
+                }
+            }
+            if dry_run {
+                let mut planned = vec![];
+                for (i, ((r, ri), eff)) in reps_list
+                    .iter()
+                    .zip(rir_list.iter())
+                    .zip(eff_list.iter())
+                    .enumerate()
+                {
+                    for sd in &sides {
+                        planned.push(serde_json::json!({
+                            "reps": r,
+                            "rir": ri,
+                            "effective_reps": eff,
+                            "rest_seconds": if i > 0 { rest_seconds } else { None },
+                            "weight_kg": w,
+                            "side": sd,
+                            "phase": resolved_phase,
+                        }));
+                    }
+                }
+                return emit_dry_run(
+                    json,
+                    quiet,
+                    serde_json::json!({
+                        "action": "set add-unilateral",
+                        "workout_id": resolved.workout_id,
+                        "exercise": ex.name,
+                        "workout_exercise_id": resolved.we_id,
+                        "would_create_workout_exercise": resolved.would_create_workout_exercise,
+                        "sets": planned,
+                    }),
+                );
+            }
+            let we_id = resolved
+                .we_id
+                .ok_or_else(|| anyhow!("internal error: missing workout_exercise after resolve"))?;
             let mut ids = vec![];
             for (i, ((r, ri), eff)) in reps_list
                 .into_iter()
@@ -1170,6 +1650,9 @@ fn handle_set(
                         notes.as_deref(),
                         Some(sd),
                         resolved_phase,
+                        None,
+                        None,
+                        None,
                         None,
                         None,
                         None,
@@ -1233,10 +1716,29 @@ fn handle_set(
             duration,
             notes,
             phase,
+            dry_run,
         } => {
             let conn = db::open_db(db_override)?;
-            let (we_id, ex) = resolve_we_id(&conn, Some(workout), Some(&exercise), None)?;
+            let resolved = resolve_we_id(&conn, Some(workout), Some(&exercise), None, dry_run)?;
+            let ex = &resolved.exercise;
             if reps.is_none() && weight.is_none() && duration.is_none() {
+                if dry_run {
+                    return emit_dry_run(
+                        json,
+                        quiet,
+                        serde_json::json!({
+                            "action": "set quick",
+                            "workout_id": resolved.workout_id,
+                            "exercise": ex.name,
+                            "workout_exercise_id": resolved.we_id,
+                            "would_create_workout_exercise": resolved.would_create_workout_exercise,
+                            "set": null,
+                        }),
+                    );
+                }
+                let we_id = resolved.we_id.ok_or_else(|| {
+                    anyhow!("internal error: missing workout_exercise after resolve")
+                })?;
                 if json {
                     print_json(&serde_json::json!({
                         "success": true,
@@ -1263,7 +1765,35 @@ fn handle_set(
                 true,
             )
             .map_err(|e| anyhow!("{e}"))?;
-            let sn = next_set_number(&conn, we_id);
+            validate_set_payload(
+                reps, w, el, None, duration, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, limits,
+            )?;
+            let sn = match resolved.we_id {
+                Some(we_id) => next_set_number(&conn, we_id),
+                None => 1,
+            };
+            if dry_run {
+                return emit_dry_run(
+                    json,
+                    quiet,
+                    serde_json::json!({
+                        "action": "set quick",
+                        "workout_id": resolved.workout_id,
+                        "exercise": ex.name,
+                        "workout_exercise_id": resolved.we_id,
+                        "would_create_workout_exercise": resolved.would_create_workout_exercise,
+                        "set_number": sn,
+                        "reps": reps,
+                        "weight_kg": w,
+                        "duration_seconds": duration,
+                        "phase": ph,
+                    }),
+                );
+            }
+            let we_id = resolved
+                .we_id
+                .ok_or_else(|| anyhow!("internal error: missing workout_exercise after resolve"))?;
             let id = insert_set(
                 &conn,
                 we_id,
@@ -1281,6 +1811,9 @@ fn handle_set(
                 notes.as_deref(),
                 None,
                 ph,
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -1319,6 +1852,12 @@ fn handle_set(
             max_heart_rate,
             pace,
             calories,
+            cadence,
+            ascent,
+            descent,
+            hr_zones,
+            laps,
+            dry_run,
         } => {
             let conn = db::open_db(db_override)?;
             let exists: Option<i64> = conn
@@ -1334,6 +1873,8 @@ fn handle_set(
                 .map(|p| phase::normalize_phase(p))
                 .transpose()
                 .map_err(|e| anyhow!("{e}"))?;
+            let zones = parse_hr_zones(hr_zones.as_deref())?;
+            let laps_v = parse_laps(laps.as_deref())?;
             let proposed = ProposedSetMetrics {
                 reps,
                 weight_kg: weight,
@@ -1348,7 +1889,11 @@ fn handle_set(
                 max_heart_rate_bpm: max_heart_rate,
                 avg_pace_min_per_km: pace,
                 calories_burned: calories,
-                ..Default::default()
+                avg_cadence_spm: cadence,
+                total_ascent_m: ascent,
+                total_descent_m: descent,
+                heart_rate_zones: zones.clone(),
+                laps: laps_v.as_ref().map(|l| l.0.clone()),
             };
             // Only validate fields that were provided (zeros of absent are skipped in checks)
             sanity::validate_set_metrics(&proposed, limits).map_err(|e| anyhow!("{e}"))?;
@@ -1388,8 +1933,32 @@ fn handle_set(
             push_opt!(max_heart_rate, "max_heart_rate_bpm");
             push_opt!(pace, "avg_pace_min_per_km");
             push_opt!(calories, "calories_burned");
+            push_opt!(cadence, "avg_cadence_spm");
+            push_opt!(ascent, "total_ascent_m");
+            push_opt!(descent, "total_descent_m");
+            if let Some(z) = zones {
+                let zones_json = serde_json::to_string(&z).map_err(|e| anyhow!("{e}"))?;
+                sets.push("heart_rate_zones = ?");
+                vals.push(Box::new(zones_json));
+            }
+            if let Some(l) = laps_v {
+                let laps_json = serde_json::to_string(&l.0).map_err(|e| anyhow!("{e}"))?;
+                sets.push("laps = ?");
+                vals.push(Box::new(laps_json));
+            }
             if sets.is_empty() {
                 return Err(anyhow!("provide at least one field to update"));
+            }
+            if dry_run {
+                return emit_dry_run(
+                    json,
+                    quiet,
+                    serde_json::json!({
+                        "action": "set update",
+                        "id": id,
+                        "fields": sets,
+                    }),
+                );
             }
             let sql = format!("UPDATE exercise_sets SET {} WHERE id = ?", sets.join(", "));
             vals.push(Box::new(id));
@@ -1402,7 +1971,7 @@ fn handle_set(
             }
             Ok(())
         }
-        SetAction::Move { id, to } => {
+        SetAction::Move { id, to, dry_run } => {
             if to < 1 {
                 return Err(anyhow!("--to must be >= 1"));
             }
@@ -1421,10 +1990,35 @@ fn handle_set(
             )?;
             let target = to.min(max_n as i32) as i64;
             if target == old_num {
+                if dry_run {
+                    return emit_dry_run(
+                        json,
+                        quiet,
+                        serde_json::json!({
+                            "action": "set move",
+                            "id": id,
+                            "from": old_num,
+                            "to": target,
+                            "noop": true,
+                        }),
+                    );
+                }
                 if json {
                     print_json(&Success::ok("already at position"));
                 }
                 return Ok(());
+            }
+            if dry_run {
+                return emit_dry_run(
+                    json,
+                    quiet,
+                    serde_json::json!({
+                        "action": "set move",
+                        "id": id,
+                        "from": old_num,
+                        "to": target,
+                    }),
+                );
             }
             // Temporary set_number swap using negative range
             conn.execute(
@@ -1458,12 +2052,27 @@ fn handle_set(
             }
             Ok(())
         }
-        SetAction::Delete { id } => {
+        SetAction::Delete { id, dry_run } => {
             let conn = db::open_db(db_override)?;
-            let n = conn.execute("DELETE FROM exercise_sets WHERE id = ?1", [id])?;
-            if n == 0 {
+            let exists: Option<i64> = conn
+                .query_row("SELECT id FROM exercise_sets WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if exists.is_none() {
                 return Err(anyhow!("set {id} not found"));
             }
+            if dry_run {
+                return emit_dry_run(
+                    json,
+                    quiet,
+                    serde_json::json!({
+                        "action": "set delete",
+                        "delete_id": id,
+                    }),
+                );
+            }
+            conn.execute("DELETE FROM exercise_sets WHERE id = ?1", [id])?;
             if json {
                 print_json(&Success::deleted(id));
             } else {

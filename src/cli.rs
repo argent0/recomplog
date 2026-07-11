@@ -43,7 +43,7 @@ pub enum Commands {
     ///   recomplog workout set add ...
     Workout {
         #[command(subcommand)]
-        action: WorkoutAction,
+        action: Box<WorkoutAction>,
     },
 
     /// Body metrics and sleep (measurements, composition, rest).
@@ -118,11 +118,17 @@ pub enum WorkoutAction {
         /// Start time (YYYY-MM-DD HH:MM:SS or flexible)
         #[arg(long)]
         started_at: Option<String>,
+        /// End time (YYYY-MM-DD HH:MM:SS or flexible)
+        #[arg(long = "finished-at")]
+        finished_at: Option<String>,
         /// e.g. Push, Pull, Run, Full Body
         #[arg(long = "type")]
         workout_type: Option<String>,
         #[arg(long)]
         notes: Option<String>,
+        /// Validate and show what would be created without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// List recent workouts.
     List {
@@ -146,9 +152,20 @@ pub enum WorkoutAction {
         feeling: Option<i32>,
         #[arg(long)]
         started_at: Option<String>,
+        /// End time (YYYY-MM-DD HH:MM:SS or flexible)
+        #[arg(long = "finished-at")]
+        finished_at: Option<String>,
+        /// Validate and show what would be updated without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Delete a workout (cascades exercises/sets).
-    Delete { id: i64 },
+    Delete {
+        id: i64,
+        /// Show what would be deleted without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Workout analysis: volume, PRs, history, load progression.
     ///
     /// Bare `workout stats --days N` is an alias for `workout stats volume --days N`.
@@ -169,7 +186,7 @@ pub enum WorkoutAction {
     /// Set logging operations (under the workout group).
     Set {
         #[command(subcommand)]
-        action: SetAction,
+        action: Box<SetAction>,
     },
 }
 
@@ -234,6 +251,9 @@ pub enum ExerciseAction {
         description: Option<String>,
         #[arg(long = "allow-phase-in-name")]
         allow_phase_in_name: bool,
+        /// Validate and show what would be created without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
     Update {
         /// Exercise id or name
@@ -250,6 +270,9 @@ pub enum ExerciseAction {
         muscles: Option<String>,
         #[arg(short, long)]
         description: Option<String>,
+        /// Validate and show what would be updated without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
     Search {
         term: String,
@@ -306,6 +329,18 @@ pub enum SetAction {
         calories: Option<i32>,
         #[arg(long)]
         laps: Option<String>,
+        /// Average cadence (steps per minute)
+        #[arg(long)]
+        cadence: Option<f64>,
+        /// Total ascent in meters
+        #[arg(long)]
+        ascent: Option<f64>,
+        /// Total descent in meters
+        #[arg(long)]
+        descent: Option<f64>,
+        /// Validate and show resolved payload without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Add a cardio-focused set (distance, duration, HR, pace).
     #[command(name = "add-cardio")]
@@ -332,10 +367,25 @@ pub enum SetAction {
         hr_zones: Option<String>,
         #[arg(long)]
         laps: Option<String>,
+        /// Average cadence (steps per minute)
+        #[arg(long)]
+        cadence: Option<f64>,
+        /// Total ascent in meters
+        #[arg(long)]
+        ascent: Option<f64>,
+        /// Total descent in meters
+        #[arg(long)]
+        descent: Option<f64>,
+        /// Require --hr-zones and --laps (repslog-style strict cardio)
+        #[arg(long = "require-zones-laps")]
+        require_zones_laps: bool,
         #[arg(long)]
         notes: Option<String>,
         #[arg(long, default_value = "full")]
         phase: String,
+        /// Validate and show resolved payload without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Add a rest-pause/cluster sequence (comma-separated reps/rir/effective-reps).
     #[command(name = "add-cluster")]
@@ -369,6 +419,9 @@ pub enum SetAction {
         side: Option<String>,
         #[arg(long, default_value = "full")]
         phase: String,
+        /// Validate and show resolved payload without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Add left/right (or both) sets for unilateral work.
     #[command(name = "add-unilateral")]
@@ -400,6 +453,9 @@ pub enum SetAction {
         side: String,
         #[arg(long, default_value = "full")]
         phase: String,
+        /// Validate and show resolved payload without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// List sets for a workout_exercise id.
     List {
@@ -426,6 +482,9 @@ pub enum SetAction {
         notes: Option<String>,
         #[arg(long)]
         phase: Option<String>,
+        /// Validate and show resolved payload without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Update fields on an existing set.
     Update {
@@ -462,6 +521,22 @@ pub enum SetAction {
         pace: Option<f64>,
         #[arg(long)]
         calories: Option<i32>,
+        /// Average cadence (steps per minute)
+        #[arg(long)]
+        cadence: Option<f64>,
+        /// Total ascent in meters
+        #[arg(long)]
+        ascent: Option<f64>,
+        /// Total descent in meters
+        #[arg(long)]
+        descent: Option<f64>,
+        #[arg(long = "hr-zones")]
+        hr_zones: Option<String>,
+        #[arg(long)]
+        laps: Option<String>,
+        /// Validate and show resolved payload without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Reorder a set within its workout-exercise.
     Move {
@@ -469,9 +544,17 @@ pub enum SetAction {
         /// Target 1-based position
         #[arg(long)]
         to: i32,
+        /// Show what would be moved without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Delete a set by id.
-    Delete { id: i64 },
+    Delete {
+        id: i64,
+        /// Show what would be deleted without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Actions under `recomplog body ...`
