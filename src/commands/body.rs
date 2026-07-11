@@ -904,7 +904,11 @@ fn handle_metric_report(
     let stats = compute_stats(&values);
     let report = MetricReport {
         metric: metric_name.to_string(),
-        period: Period { since, until },
+        period: Period {
+            since,
+            until,
+            days: None,
+        },
         stats,
         series: points,
     };
@@ -1003,7 +1007,11 @@ fn handle_summary(repo: &mut Repository, args: SummaryArgs, json: bool) -> Resul
     };
 
     let report = SummaryReport {
-        period: Period { since, until },
+        period: Period {
+            since,
+            until,
+            days: None,
+        },
         weight,
         body_fat,
         skeletal_muscle,
@@ -2058,7 +2066,11 @@ fn handle_sleep_report(repo: &mut Repository, args: ReportRangeArgs, json: bool)
     };
 
     let report = SleepReport {
-        period: Period { since, until },
+        period: Period {
+            since,
+            until,
+            days: None,
+        },
         nights_logged,
         averages,
         extremes,

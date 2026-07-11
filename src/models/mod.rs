@@ -155,6 +155,79 @@ pub struct SummaryReport {
 pub struct Period {
     pub since: Option<String>,
     pub until: Option<String>,
+    /// Present when the period was specified as `--days N`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub days: Option<u32>,
+}
+
+// ---------- Nutrition report models (nutlog parity) ----------
+
+#[derive(Serialize, Debug)]
+pub struct NutritionReport {
+    pub period: Period,
+    pub total_consumed_items: i64,
+    pub totals: MacroTotals,
+    pub micronutrients: Vec<MicroTotal>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct NutritionDailyReport {
+    pub period: Period,
+    pub value: String,
+    pub days: Vec<DailyNutritionEntry>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct DailyNutritionEntry {
+    pub date: String,
+    pub total_consumed_items: i64,
+    pub totals: MacroTotals,
+}
+
+#[derive(Serialize, Debug, Default, Clone)]
+pub struct MacroTotals {
+    pub energy_kcal: Option<f64>,
+    pub protein_g: Option<f64>,
+    pub carbohydrates_g: Option<f64>,
+    pub fat_g: Option<f64>,
+    pub fiber_g: Option<f64>,
+    pub sugars_g: Option<f64>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct MicroTotal {
+    pub nutrient_id: i64,
+    pub name: String,
+    pub unit: String,
+    pub total_amount: f64,
+}
+
+#[derive(Serialize, Debug)]
+pub struct SpendingReport {
+    pub period: Period,
+    pub total_cents: i64,
+    pub total: String,
+    pub by_store: Vec<StoreSpending>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by_product: Option<Vec<ProductSpending>>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct StoreSpending {
+    pub store_id: Option<i64>,
+    pub store_name: String,
+    pub cents: i64,
+    pub amount: String,
+    pub purchase_count: i64,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ProductSpending {
+    pub product_id: i64,
+    pub product_name: String,
+    pub cents: i64,
+    pub amount: String,
+    pub purchase_count: i64,
 }
 
 /// User-level profile / settings (singleton). Managed via `recomplog config ...`.

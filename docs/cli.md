@@ -52,8 +52,21 @@ recomplog nutrition consumption create --product 12 --quantity 0.8 --date today
 ```bash
 recomplog report html --days 14 --name dashboard.html
 recomplog report body --days 30
-recomplog report nutrition list --days 7
+
+# Nutrition: period totals (macros + micronutrients)
+recomplog --json report nutrition summary --days 7
+recomplog --json report nutrition summary --since 2026-05-01 --until 2026-05-31
+
+# Nutrition: per-day rollup (--value filters a single macro; default macronutrients)
+recomplog --json report nutrition list --days 7 --value protein
+recomplog report nutrition list --value macronutrients --days 14
+
+# Spending: total + by store always; --by product adds product breakdown
+recomplog --json report nutrition spending --days 30 --by store
+recomplog --json report nutrition spending --since 2026-01-01 --by product
 ```
+
+Nutrition report date flags: `--days N` cannot be combined with `--since` / `--until`.
 
 ### Import (including legacy databases)
 

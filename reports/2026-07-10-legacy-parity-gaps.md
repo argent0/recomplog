@@ -15,7 +15,7 @@ This report lists what is **still missing or thinner** than the source tools. It
 | Body (measurement / sleep / profile) | High | Small polish only |
 | `check` (body + sleep + sets) | High | Workout set audit done (2026-07-10); variations remain body-only |
 | Nutrition CRUD + tags/stores | High | Nutrient seed; edge polish |
-| Nutrition reports | Medium | Summary, micros, spending-by, value filters |
+| Nutrition reports | High | Closed 2026-07-10 (summary, micros, spending-by, value filters) |
 | Workout logging (sets) | High | dry-run, manual cadence/elevation, finished_at, strict cardio |
 | Workout analysis | Medium–low | PRs, history, progression, track_metrics on show |
 | FIT import | High (E2E) | Zone defaults; profile-path less tested |
@@ -53,24 +53,18 @@ Data lands in SQLite; the rich workout-view analysis path is not wired.
 
 ---
 
-### 1.3 Nutrition reports — core only
+### 1.3 Nutrition reports — **Closed 2026-07-10**
 
-**Current:**
+**Was:** list as per-consumption dump; spending flat total only; no summary/micros/`--value`/`--by`.
 
-- `report nutrition list` — consumption rows + approximate scaled macros  
-- `report nutrition spending` — sum of `price_cents` over last N days  
+**Now (nutlog parity):**
 
-**Missing vs nutlog:**
+- `report nutrition summary` — full macros + micronutrient totals  
+- `report nutrition list` — per-day rollup with `--value` (macronutrients default)  
+- `report nutrition spending` — `by_store` always; `--by product` adds product breakdown; `--since`/`--until`/`--days`  
+- Strict `--days` vs `--since`/`--until` (clap conflicts)  
 
-| Feature | nutlog | recomplog |
-|---------|--------|-----------|
-| `report nutrition summary` (period aggregates) | Yes | No dedicated summary command/shape |
-| Per-day list `--value calories\|protein\|…` | Yes | Always broad macro-ish dump |
-| Micronutrient period totals | Yes | Not on report path |
-| Spending grouped by store / product / month | Yes (`--by`) | Flat total only |
-| Strict `--days` vs `--since`/`--until` mutual exclusion | Yes | Looser |
-
-Documented in `docs/legacy-parity.md` as **“done (core)”**, not full.
+See `reports/gaps/03-nutrition-reports.md`. (`--by month` remains out of scope / nutlog future.)
 
 ---
 
@@ -205,7 +199,7 @@ These are **not** treated as parity bugs:
 
 1. ~~Extend **`check`** to scan `exercise_sets` with `sanity.workout`.~~ **Done.**  
 2. Port **`track_metrics`** into `workout show` (and optionally HTML/report).  
-3. Flesh out **nutrition reports** (summary, micros, spending-by, value filters).  
+3. ~~Flesh out **nutrition reports** (summary, micros, spending-by, value filters).~~ **Done.**  
 4. Complete **legacy import** for trackpoints, `activity_imports`, zones/laps.  
 5. Expand **stats** (`prs` / `history` / `weight` progression / summary).  
 6. Deepen **HTML** (regression, sleep stages, remaining macros).  

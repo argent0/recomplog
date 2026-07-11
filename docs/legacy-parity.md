@@ -12,7 +12,7 @@
 | nutlog store * | `nutrition store *` | done |
 | nutlog store-tag * | `nutrition store-tag *` | done |
 | nutlog purchase/consumption/nutrient | `nutrition purchase/consumption/nutrient` | done |
-| nutlog report | `report nutrition *` | done (core) |
+| nutlog report | `report nutrition *` | done |
 | repslog workout * | `workout *` | done |
 | repslog exercise * | `workout exercise *` | done |
 | repslog set add/add-cardio/add-cluster/add-unilateral | `workout set …` | done |

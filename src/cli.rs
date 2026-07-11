@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// recomplog - unified CLI for body recomposition tracking.
 ///
@@ -968,21 +968,84 @@ pub struct SummaryArgs {
     pub period: Option<String>,
 }
 
+/// Date range flags shared by nutrition report subcommands.
+#[derive(Args, Debug, Clone)]
+pub struct NutritionPeriodArgs {
+    /// Start of period (inclusive). Flexible: today, yesterday, 2026-05-01, etc.
+    #[arg(long)]
+    pub since: Option<String>,
+    /// End of period (inclusive). Same flexible date formats as --since.
+    #[arg(long)]
+    pub until: Option<String>,
+    /// Last N calendar days inclusive of today. Cannot be combined with --since/--until.
+    #[arg(long, conflicts_with_all = ["since", "until"])]
+    pub days: Option<u32>,
+}
+
+/// Which macro nutrient(s) to show in per-day nutrition list output.
+#[derive(Clone, Copy, Debug, ValueEnum, Eq, PartialEq)]
+pub enum NutritionReportValue {
+    /// All tracked macros (energy, protein, carbohydrates, fat, fiber, sugars).
+    Macronutrients,
+    /// Energy only (kcal).
+    Calories,
+    /// Protein only (g).
+    Protein,
+    /// Carbohydrates only (g).
+    Carbohydrates,
+    /// Fat only (g).
+    Fat,
+    /// Fiber only (g).
+    Fiber,
+    /// Sugars only (g).
+    Sugars,
+}
+
+impl NutritionReportValue {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Macronutrients => "macronutrients",
+            Self::Calories => "calories",
+            Self::Protein => "protein",
+            Self::Carbohydrates => "carbohydrates",
+            Self::Fat => "fat",
+            Self::Fiber => "fiber",
+            Self::Sugars => "sugars",
+        }
+    }
+}
+
+/// Spending report grouping mode.
+#[derive(Clone, Copy, Debug, ValueEnum, Eq, PartialEq, Default)]
+pub enum SpendingBy {
+    /// Total only (by_store breakdown still included in JSON).
+    #[default]
+    Total,
+    /// Emphasize store breakdown (same data as total; human output identical).
+    Store,
+    /// Also break down by product.
+    Product,
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum NutritionReportAction {
-    /// Daily / period nutrition totals.
+    /// Aggregate nutrition totals for a period (macros + micronutrients).
+    Summary(NutritionPeriodArgs),
+    /// Per-day nutrition breakdown (not per consumption line).
     List {
-        #[arg(long)]
-        days: Option<u32>,
-        #[arg(long)]
-        since: Option<String>,
-        #[arg(long)]
-        until: Option<String>,
+        #[command(flatten)]
+        period: NutritionPeriodArgs,
+        /// Which macro value(s) to show per day.
+        #[arg(long, value_enum, default_value_t = NutritionReportValue::Macronutrients)]
+        value: NutritionReportValue,
     },
-    /// Spending totals over a period.
+    /// Spending totals over a period, optionally grouped by product.
     Spending {
-        #[arg(long)]
-        days: Option<u32>,
+        #[command(flatten)]
+        period: NutritionPeriodArgs,
+        /// Group by: total, store, or product (by_store always present in JSON).
+        #[arg(long, value_enum, default_value_t = SpendingBy::Total)]
+        by: SpendingBy,
     },
 }
 
