@@ -1,0 +1,306 @@
+use serde::Serialize;
+
+use crate::sanity::SanityWarning;
+use crate::utils::TimestampInfo;
+
+// Common success envelope for mutating operations when --json
+#[derive(Serialize, Debug)]
+pub struct Success {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_id: Option<i64>,
+    /// Non-fatal sanity warnings (e.g. large delta vs previous measurement).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<SanityWarning>>,
+}
+
+impl Success {
+    pub fn created(id: i64, date: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            id: Some(id),
+            date: Some(date.into()),
+            message: Some(msg.into()),
+            deleted_id: None,
+            warnings: None,
+        }
+    }
+
+    pub fn created_with_warnings(
+        id: i64,
+        date: impl Into<String>,
+        msg: impl Into<String>,
+        warnings: Vec<SanityWarning>,
+    ) -> Self {
+        let mut s = Self::created(id, date, msg);
+        if !warnings.is_empty() {
+            s.warnings = Some(warnings);
+        }
+        s
+    }
+
+    pub fn ok(msg: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            id: None,
+            date: None,
+            message: Some(msg.into()),
+            deleted_id: None,
+            warnings: None,
+        }
+    }
+    pub fn deleted(id: i64) -> Self {
+        Self {
+            success: true,
+            id: None,
+            date: None,
+            message: None,
+            deleted_id: Some(id),
+            warnings: None,
+        }
+    }
+}
+
+// Core domain model
+#[derive(Serialize, Debug, Clone)]
+pub struct Measurement {
+    pub id: i64,
+    pub date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight_kg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_fat_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skeletal_muscle_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visceral_fat_level: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bmi: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resting_metabolism_kcal: Option<i64>,
+    pub created_at: TimestampInfo,
+    pub updated_at: TimestampInfo,
+}
+
+// For reports: a point in a series
+#[derive(Serialize, Debug, Clone)]
+pub struct MeasurementPoint {
+    pub date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight_kg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_fat_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skeletal_muscle_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visceral_fat_level: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bmi: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resting_metabolism_kcal: Option<i64>,
+}
+
+// Stats for a single metric series
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct MetricStats {
+    pub count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trend: Option<String>, // "up", "down", "stable", "insufficient_data"
+}
+
+// Report for a single metric (e.g. weight)
+#[derive(Serialize, Debug)]
+pub struct MetricReport {
+    pub metric: String,
+    pub period: Period,
+    pub stats: MetricStats,
+    pub series: Vec<MeasurementPoint>,
+}
+
+// Summary report across all metrics
+#[derive(Serialize, Debug)]
+pub struct SummaryReport {
+    pub period: Period,
+    pub weight: Option<MetricStats>,
+    pub body_fat: Option<MetricStats>,
+    pub skeletal_muscle: Option<MetricStats>,
+    pub visceral_fat: Option<MetricStats>,
+    pub bmi: Option<MetricStats>,
+    pub resting_metabolism: Option<MetricStats>,
+    pub measurement_count: i64,
+    /// Sleep summary for the period (present only if sleep data exists).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleep: Option<SleepSummary>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct Period {
+    pub since: Option<String>,
+    pub until: Option<String>,
+}
+
+/// User-level profile / settings (singleton). Managed via `recomplog config ...`.
+#[derive(Serialize, Debug, Clone)]
+pub struct UserProfile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_cm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_of_birth: Option<String>, // stored as YYYY-MM-DD
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<TimestampInfo>,
+}
+
+// ---------- Sleep models (spec/02-sleep-logging.md) ----------
+
+/// A sleep session record. `date` is the wake-up date (standard sleep tracker convention).
+#[derive(Serialize, Debug, Clone)]
+pub struct Sleep {
+    pub id: i64,
+    pub date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bedtime: Option<String>, // HH:MM local
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wake_time: Option<String>, // HH:MM local
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_in_bed_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_sleep_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rem_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deep_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awake_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleep_efficiency_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleep_score: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subjective_quality: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awakenings: Option<i64>,
+    /// Average heart rate during sleep (bpm).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heart_rate_bpm: Option<f64>,
+    /// Hypopnea rate in events per hour (times/hr).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hypopnea_per_hr: Option<f64>,
+    /// Average respiratory rate (breaths per minute).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub respiratory_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    pub created_at: TimestampInfo,
+    pub updated_at: TimestampInfo,
+}
+
+/// Lightweight point for sleep series in some reports (optional future use).
+#[derive(Serialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct SleepPoint {
+    pub date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_sleep_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleep_efficiency_pct: Option<f64>,
+}
+
+/// Summary averages for sleep over a period.
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct SleepAverages {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_sleep_minutes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rem_minutes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deep_minutes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_minutes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awake_minutes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub efficiency_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heart_rate_bpm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hypopnea_per_hr: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub respiratory_rate: Option<f64>,
+}
+
+/// Extreme values (best/worst) for sleep reports.
+#[derive(Serialize, Debug, Clone)]
+pub struct SleepExtreme {
+    pub date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pct: Option<f64>,
+}
+
+/// Extremes section for sleep report.
+#[derive(Serialize, Debug, Clone)]
+pub struct SleepExtremes {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_total_sleep: Option<SleepExtreme>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worst_total_sleep: Option<SleepExtreme>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_efficiency: Option<SleepExtreme>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worst_efficiency: Option<SleepExtreme>,
+}
+
+/// Full sleep report returned by `recomplog report sleep`.
+#[derive(Serialize, Debug)]
+pub struct SleepReport {
+    pub period: Period,
+    pub nights_logged: i64,
+    pub averages: SleepAverages,
+    pub extremes: SleepExtremes,
+    /// "improving" | "declining" | "stable" | "insufficient_data" etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trend: Option<String>,
+    /// Full records for the period (newest first or as queried; agents get rich data).
+    pub nights: Vec<Sleep>,
+}
+
+/// Compact sleep summary for embedding in `report summary`.
+#[derive(Serialize, Debug, Clone)]
+pub struct SleepSummary {
+    pub nights_logged: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_total_sleep_minutes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_rem_minutes: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_efficiency_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_quality: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trend: Option<String>,
+}

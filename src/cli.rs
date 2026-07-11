@@ -131,6 +131,8 @@ pub enum WorkoutAction {
     },
     /// Show a workout with its exercises and sets.
     Show { id: i64 },
+    /// Delete a workout (cascades exercises/sets).
+    Delete { id: i64 },
 
     /// Exercise catalog operations (under the workout group).
     Exercise {
@@ -174,6 +176,7 @@ pub enum ExerciseAction {
 /// Set actions: `recomplog workout set <action>`
 #[derive(Subcommand, Debug, Clone)]
 pub enum SetAction {
+    /// Add a strength (or general) set.
     Add {
         /// Target workout id
         #[arg(long)]
@@ -185,8 +188,51 @@ pub enum SetAction {
         reps: Option<i32>,
         #[arg(long)]
         weight: Option<f64>,
-        // ... (cardio, rpe, etc. will be expanded)
+        #[arg(long = "external-load")]
+        external_load: Option<f64>,
+        #[arg(long)]
+        duration: Option<i32>,
+        #[arg(long)]
+        distance: Option<f64>,
+        #[arg(long)]
+        rpe: Option<f64>,
+        #[arg(long)]
+        rir: Option<f64>,
+        #[arg(long = "effective-reps")]
+        effective_reps: Option<i32>,
+        #[arg(long = "rest")]
+        rest_seconds: Option<i32>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long, value_parser = ["left", "right", "both"])]
+        side: Option<String>,
+        #[arg(long, default_value = "working")]
+        phase: String,
     },
+    /// Add a cardio-focused set.
+    #[command(name = "add-cardio")]
+    AddCardio {
+        #[arg(long)]
+        workout: i64,
+        #[arg(long)]
+        exercise: String,
+        #[arg(long)]
+        distance: Option<f64>,
+        #[arg(long)]
+        duration: Option<i32>,
+        #[arg(long = "avg-heart-rate")]
+        avg_heart_rate: Option<f64>,
+        #[arg(long = "max-heart-rate")]
+        max_heart_rate: Option<f64>,
+        #[arg(long)]
+        pace: Option<f64>,
+        #[arg(long)]
+        calories: Option<i32>,
+        #[arg(long)]
+        notes: Option<String>,
+    },
+    /// Delete a set by id.
+    Delete { id: i64 },
 }
 
 /// Actions under `recomplog body ...`
@@ -200,8 +246,29 @@ pub enum BodyAction {
     /// Sleep sessions.
     Sleep {
         #[command(subcommand)]
-        action: SleepAction,
+        action: Box<SleepAction>,
     },
+    /// User profile (height, date of birth) used for derived metrics.
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProfileAction {
+    /// Set or update profile fields.
+    Set(ProfileSetArgs),
+    /// Show current profile.
+    Show,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProfileSetArgs {
+    #[arg(long, value_name = "CM")]
+    pub height_cm: Option<f64>,
+    #[arg(long, value_name = "DATE")]
+    pub date_of_birth: Option<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -289,21 +356,94 @@ pub struct DeleteArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SleepAction {
-    Create {
-        #[arg(long, default_value = "today")]
-        date: String,
-        #[arg(long)]
-        total_sleep: Option<String>,
-        #[arg(long)]
-        rem: Option<String>,
-        #[arg(long)]
-        deep: Option<String>,
-        #[arg(long)]
-        light: Option<String>,
-        #[arg(long)]
-        awake: Option<String>,
-    },
+    /// Create / log a sleep entry (one per wake-up date).
+    Create(SleepCreateArgs),
+    /// List sleep entries (newest first).
     List(ListArgs),
+    /// Show a single sleep entry by id or --date.
+    Show(ShowArgs),
+    /// Update fields on an existing sleep entry.
+    Update(SleepUpdateArgs),
+    /// Delete a sleep entry.
+    Delete(DeleteArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SleepCreateArgs {
+    /// Wake-up date (local calendar day).
+    #[arg(long, default_value = "today")]
+    pub date: String,
+    #[arg(long)]
+    pub bedtime: Option<String>,
+    #[arg(long)]
+    pub wake_time: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub time_in_bed: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub total_sleep: Option<String>,
+    #[arg(long, value_name = "DURATION", alias = "rem-minutes")]
+    pub rem: Option<String>,
+    #[arg(long, value_name = "DURATION", alias = "deep-minutes")]
+    pub deep: Option<String>,
+    #[arg(long, value_name = "DURATION", alias = "light-minutes")]
+    pub light: Option<String>,
+    #[arg(long, value_name = "DURATION", alias = "awake-minutes")]
+    pub awake: Option<String>,
+    #[arg(long)]
+    pub sleep_efficiency: Option<f64>,
+    #[arg(long)]
+    pub sleep_score: Option<i64>,
+    #[arg(long)]
+    pub quality: Option<i64>,
+    #[arg(long)]
+    pub awakenings: Option<i64>,
+    #[arg(long, alias = "heart-rate-bpm")]
+    pub heart_rate: Option<f64>,
+    #[arg(long, alias = "hypopnea-per-hr")]
+    pub hypopnea: Option<f64>,
+    #[arg(long)]
+    pub respiratory_rate: Option<f64>,
+    #[arg(long)]
+    pub notes: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SleepUpdateArgs {
+    pub id: Option<i64>,
+    #[arg(long)]
+    pub date: Option<String>,
+    #[arg(long)]
+    pub bedtime: Option<String>,
+    #[arg(long)]
+    pub wake_time: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub time_in_bed: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub total_sleep: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub rem: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub deep: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub light: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub awake: Option<String>,
+    #[arg(long)]
+    pub sleep_efficiency: Option<f64>,
+    #[arg(long)]
+    pub sleep_score: Option<i64>,
+    #[arg(long)]
+    pub quality: Option<i64>,
+    #[arg(long)]
+    pub awakenings: Option<i64>,
+    #[arg(long, alias = "heart-rate-bpm")]
+    pub heart_rate: Option<f64>,
+    #[arg(long, alias = "hypopnea-per-hr")]
+    pub hypopnea: Option<f64>,
+    #[arg(long)]
+    pub respiratory_rate: Option<f64>,
+    #[arg(long)]
+    pub notes: Option<String>,
 }
 
 /// Actions under `recomplog nutrition ...`
@@ -345,7 +485,46 @@ pub enum ProductAction {
     Show {
         id: i64,
     },
-    // add more (rename, nutrition set, delete, tag) later
+    Rename {
+        id: i64,
+        new_name: String,
+    },
+    Delete {
+        id: i64,
+    },
+    /// Set macro nutrition per reference quantity.
+    #[command(name = "set")]
+    Set {
+        id: i64,
+        #[arg(long, default_value = "100")]
+        reference_quantity: f64,
+        #[arg(long, default_value = "g")]
+        reference_unit: String,
+        #[arg(long)]
+        energy_kcal: Option<f64>,
+        #[arg(long)]
+        protein_g: Option<f64>,
+        #[arg(long)]
+        carbohydrates_g: Option<f64>,
+        #[arg(long)]
+        fat_g: Option<f64>,
+        #[arg(long)]
+        fiber_g: Option<f64>,
+        #[arg(long)]
+        sugars_g: Option<f64>,
+    },
+    /// Add a tag to a product.
+    #[command(name = "tag-add")]
+    TagAdd {
+        id: i64,
+        tag: String,
+    },
+    /// Remove a tag from a product.
+    #[command(name = "tag-remove")]
+    TagRemove {
+        id: i64,
+        tag: String,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -396,14 +575,13 @@ pub enum ReportAction {
     },
     /// Body measurement trends + stats.
     Body {
-        #[arg(long)]
-        days: Option<u32>,
+        #[command(subcommand)]
+        action: BodyReportAction,
     },
+    /// Sleep trends and averages.
+    Sleep(ReportRangeArgs),
     /// Combined recomposition dashboard data (JSON for agents).
-    Summary {
-        #[arg(long)]
-        days: Option<u32>,
-    },
+    Summary(SummaryArgs),
     /// Generate a self-contained mobile-friendly HTML dashboard report.
     Html {
         #[arg(short, long, default_value = "7")]
@@ -416,8 +594,58 @@ pub enum ReportAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum BodyReportAction {
+    /// Compact summary across all key metrics.
+    Summary(SummaryArgs),
+    Weight(ReportRangeArgs),
+    #[command(name = "body-fat")]
+    BodyFat(ReportRangeArgs),
+    Muscle(ReportRangeArgs),
+    #[command(name = "visceral-fat")]
+    VisceralFat(ReportRangeArgs),
+    Bmi(ReportRangeArgs),
+    #[command(name = "resting-metabolism")]
+    RestingMetabolism(ReportRangeArgs),
+    /// Alias: same as summary for `report body --days N` style via default
+    #[command(name = "list")]
+    List(SummaryArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ReportRangeArgs {
+    #[arg(long)]
+    pub since: Option<String>,
+    #[arg(long)]
+    pub until: Option<String>,
+    #[arg(long)]
+    pub days: Option<i64>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SummaryArgs {
+    #[arg(long)]
+    pub since: Option<String>,
+    #[arg(long)]
+    pub until: Option<String>,
+    #[arg(long)]
+    pub days: Option<i64>,
+    #[arg(long)]
+    pub period: Option<String>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum NutritionReportAction {
+    /// Daily / period nutrition totals.
     List {
+        #[arg(long)]
+        days: Option<u32>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
+    },
+    /// Spending totals over a period.
+    Spending {
         #[arg(long)]
         days: Option<u32>,
     },
@@ -468,6 +696,8 @@ pub struct CheckArgs {
     pub variations: bool,
     #[arg(long)]
     pub since: Option<String>,
+    #[arg(long)]
+    pub until: Option<String>,
     #[arg(long)]
     pub days: Option<i64>,
 }

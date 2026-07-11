@@ -332,16 +332,6 @@ pub fn now_utc() -> String {
     chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-/// Parse flexible date (small useful subset).
-/// Supports: "today", "yesterday", "YYYY-MM-DD"
-pub fn parse_flexible_date(s: &str) -> Result<String> {
-    let s = s.trim().to_lowercase();
-    let today = chrono::Local::now().date_naive();
-    let date = match s.as_str() {
-        "today" => today,
-        "yesterday" => today - chrono::Duration::days(1),
-        _ => chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d")
-            .with_context(|| format!("invalid date '{}'; use today, yesterday or YYYY-MM-DD", s))?,
-    };
-    Ok(date.format("%Y-%m-%d").to_string())
-}
+/// Re-export flexible date helpers for convenience.
+#[allow(unused_imports)]
+pub use crate::utils::{parse_date_to_ymd, parse_flexible_date, parse_flexible_datetime};

@@ -12,7 +12,8 @@ All data in a single SQLite database. Excellent support for both humans and LLM 
 
 ## Status
 
-Early merge in progress. Core functionality from the four tools is being unified.
+Grouped CLI surface is implemented for body, nutrition, workout, reports, and legacy import.
+HTML dashboards read from the unified SQLite database. FIT import remains a stub.
 
 See `AGENTS.md` and `CODING_PRACTICES.md` for contribution guidelines.
 

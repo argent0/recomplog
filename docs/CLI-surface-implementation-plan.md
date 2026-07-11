@@ -1,6 +1,6 @@
 # Implementation Plan: New Grouped CLI Surface for recomplog
 
-**Status:** Skeleton implemented + initial commit. This document describes the work required to fully realize the new CLI.
+**Status:** Major phases implemented (body, nutrition, workout core, reports/HTML, legacy import). FIT import still stubbed; some advanced set modalities (cluster) and full micronutrient UI remain thinner than source tools.
 
 **Goal:** Deliver a clean, predictable, agent-friendly CLI with logical grouping while preserving (and improving upon) the behavior and power of the original four tools.
 

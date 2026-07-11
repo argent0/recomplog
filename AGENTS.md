@@ -14,10 +14,10 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
 ## How to Work as an Agent
 
 1. **Start here**: Read `AGENTS.md`, `CODING_PRACTICES.md`, `README.md`, and relevant `docs/`.
-2. Use the standard command shape: `recomplog <entity> <action> ...`
-   - Workout entities: `workout`, `exercise`, `set`
-   - Body entities: `measurement`, `sleep`
-   - Nutrition entities: `product`, `purchase`, `consumption`, `nutrient`, `product-tag`, ...
+2. Use the standard command shape: `recomplog <group> <entity> <action> ...`
+   - Training: `workout create|list|show|delete`, `workout exercise ...`, `workout set add|add-cardio|delete`
+   - Body: `body measurement ...`, `body sleep ...`, `body profile ...`
+   - Nutrition: `nutrition product|purchase|consumption|nutrient ...`
    - Cross-cutting: `report`, `import`, `config`, `check`
 3. **Always** support `--json` for data-returning commands.
 4. Run `cargo fmt && cargo clippy -- -D warnings && cargo test` before finishing changes.
@@ -80,8 +80,11 @@ cargo clippy -- -D warnings
 cargo test
 
 # Typical agent usage
-recomplog --json measurement create --date today --weight-kg 81.2
+recomplog --json body measurement create --date today --weight-kg 81.2
+recomplog --json body sleep create --date today --total-sleep "7h 45m"
+recomplog --json nutrition product create "Oats" --tags breakfast
 recomplog --json workout list --days 14
+recomplog --json workout set add --workout 1 --exercise "bench press" --reps 5 --weight 100
 recomplog import legacy --from-db ../bodylog/bodylog.db --dry-run
 recomplog report html --days 14 --name dashboard.html
 ```
