@@ -83,6 +83,12 @@ cargo test
 recomplog --json body measurement create --date today --weight-kg 81.2
 recomplog --json body sleep create --date today --total-sleep "7h 45m"
 recomplog --json nutrition product create "Oats" --tags breakfast
+# Nutrition units: g (mass), ml (volume), unit (package) — consumption must match product kind.
+# unit = whole discrete item (bar, capsule); pourables (oil, bulk) use g and log the portion only.
+recomplog --json nutrition product nutrition set 3 --reference-quantity 1 --reference-unit unit --energy-kcal 180
+recomplog --json nutrition consumption create --product 3 --quantity 1 --unit unit
+recomplog --json nutrition consumption create --product 12 --quantity 80 --unit g
+recomplog --json nutrition consumption create --product 16 --quantity 7 --unit g
 recomplog --json workout list --days 14
 recomplog --json workout set add --workout 1 --exercise "bench press" --reps 5 --weight 100 --phase full
 recomplog --json workout set add-cluster --workout 1 --exercise "bench press" --reps "10,5,5" --weight 100 --phase full --rir "0,0,1" --effective-reps "6,4,3" --rest 15

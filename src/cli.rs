@@ -848,6 +848,7 @@ pub enum ProductAction {
         id: i64,
         #[arg(long, default_value = "100")]
         reference_quantity: f64,
+        /// `g` (mass), `ml` (volume), or `unit` (package).
         #[arg(long, default_value = "g")]
         reference_unit: String,
         #[arg(long)]
@@ -879,8 +880,11 @@ pub enum ProductAction {
 pub enum ProductNutritionAction {
     Set {
         id: i64,
+        /// Amount of food the macros describe (e.g. 100 for 100 g, 1 for one package).
         #[arg(long)]
         reference_quantity: Option<f64>,
+        /// How the reference amount is measured: `g` (mass), `ml` (volume),
+        /// or `unit` (one package/item). Aliases like `bar`/`capsule` → `unit`.
         #[arg(long)]
         reference_unit: Option<String>,
         #[arg(long)]
@@ -954,8 +958,11 @@ pub enum ConsumptionAction {
     Create {
         #[arg(long)]
         product: i64,
+        /// Amount consumed, in `--unit` (defaults to the product’s reference unit).
         #[arg(long)]
         quantity: f64,
+        /// Must match the product unit kind: `g`/`ml`/`unit` (package).
+        /// Omit to use the product’s reference unit. Aliases: bar, cup, capsule → unit.
         #[arg(long)]
         unit: Option<String>,
         #[arg(long, default_value = "today")]

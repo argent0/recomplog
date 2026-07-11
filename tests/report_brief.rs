@@ -69,6 +69,8 @@ fn seed_brief_fixture(db: &str) {
             "1",
             "--quantity",
             "80",
+            "--unit",
+            "g",
             "--date",
             "today",
         ])

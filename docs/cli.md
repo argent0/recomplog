@@ -48,7 +48,20 @@ recomplog nutrition product list --json
 recomplog nutrition product search --name oats
 
 recomplog nutrition purchase create --product 12 --quantity 1 --price 4.99
-recomplog nutrition consumption create --product 12 --quantity 0.8 --date today
+
+# Product nutrition: three unit kinds only — g (mass), ml (volume), unit (package)
+# - g / ml: bulk & pourables (oil, oats, yogurt) — log the portion eaten, not the package
+# - unit: discrete whole items only (protein bar, capsule, one prepared drink)
+recomplog nutrition product nutrition set 12 --reference-quantity 100 --reference-unit g \
+  --energy-kcal 389 --protein-g 17
+recomplog nutrition product nutrition set 3 --reference-quantity 1 --reference-unit unit \
+  --energy-kcal 180 --protein-g 15
+
+# Consumption must use the same kind as the product (unit defaults to product reference)
+recomplog nutrition consumption create --product 12 --quantity 80 --unit g --date today
+recomplog nutrition consumption create --product 3 --quantity 1 --unit unit --date today
+# Oil / fats: weigh the pour (e.g. 5–15 g), never the whole bottle
+recomplog nutrition consumption create --product 16 --quantity 7 --unit g --date today
 ```
 
 ### Reports (top-level)
@@ -161,6 +174,12 @@ recomplog workout set update 9 --hr-zones '...' --laps '...' --cadence 172 --asc
 recomplog nutrition store create "Local Market"
 recomplog nutrition product nutrition set 1 --reference-quantity 100 --reference-unit g \
   --energy-kcal 59 --protein-g 10 --micronutrient Magnesium 200 mg
+# Oil / bulk fat — mass product; consumption is grams poured, not the bottle
+recomplog nutrition product nutrition set 16 --reference-quantity 100 --reference-unit g \
+  --energy-kcal 884 --fat-g 100
+# Package product (one bar / capsule / drink = 1 unit; not for pourable oils):
+recomplog nutrition product nutrition set 3 --reference-quantity 1 --reference-unit unit \
+  --energy-kcal 180 --protein-g 15
 
 # FIT
 recomplog import fit activity.fit --exercise running --dry-run

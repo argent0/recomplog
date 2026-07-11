@@ -541,6 +541,8 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             ))
         })? {
             let (pid, rq, ru, e, p, c, f, fi, su) = row?;
+            let (rq, ru) = crate::nutrition_units::validate_product_reference(rq, &ru)
+                .unwrap_or((rq, ru));
             let _ = tx.execute(
                 "INSERT OR IGNORE INTO product_nutritions
                  (product_id, reference_quantity, reference_unit, energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g)
@@ -656,6 +658,8 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
     }
 
     tx.commit()?;
+    // Align imported free-form units with g|ml|unit vocabulary.
+    db::normalize_nutrition_units_public(dst)?;
     Ok(serde_json::json!({
         "products": products,
         "nutrients": nutrients,

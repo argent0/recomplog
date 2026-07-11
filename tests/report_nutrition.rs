@@ -505,3 +505,252 @@ fn human_list_table() {
         .stdout(predicate::str::contains("Protein"))
         .stdout(predicate::str::contains("2026-07-05"));
 }
+
+/// Package products use `unit`; mass products use `g`. Mismatches are rejected.
+#[test]
+fn package_and_mass_units_are_explicit() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "create",
+            "Iron Bar",
+        ])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "create",
+            "Cappuccino",
+        ])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "create",
+            "Oats",
+        ])
+        .assert()
+        .success();
+
+    // Package: 1 unit = 180 kcal
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "nutrition",
+            "set",
+            "1",
+            "--reference-quantity",
+            "1",
+            "--reference-unit",
+            "unit",
+            "--energy-kcal",
+            "180",
+            "--protein-g",
+            "15",
+            "--carbohydrates-g",
+            "18",
+            "--fat-g",
+            "7",
+        ])
+        .assert()
+        .success();
+    // Package drink: 1 unit = 90 kcal
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "nutrition",
+            "set",
+            "2",
+            "--reference-quantity",
+            "1",
+            "--reference-unit",
+            "unit",
+            "--energy-kcal",
+            "90",
+            "--protein-g",
+            "4.5",
+            "--carbohydrates-g",
+            "9",
+            "--fat-g",
+            "4.5",
+        ])
+        .assert()
+        .success();
+    // Mass: per 100 g
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "nutrition",
+            "set",
+            "3",
+            "--reference-quantity",
+            "100",
+            "--reference-unit",
+            "g",
+            "--energy-kcal",
+            "389",
+            "--protein-g",
+            "17",
+        ])
+        .assert()
+        .success();
+
+    // bar alias → unit for package product
+    let bar = json_out(
+        &db,
+        &[
+            "nutrition",
+            "consumption",
+            "create",
+            "--product",
+            "1",
+            "--quantity",
+            "1",
+            "--unit",
+            "bar",
+            "--date",
+            "2026-07-11",
+        ],
+    );
+    assert_eq!(bar["unit"], "unit");
+    assert_eq!(bar["unit_kind"], "package");
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "consumption",
+            "create",
+            "--product",
+            "2",
+            "--quantity",
+            "1",
+            "--unit",
+            "unit",
+            "--date",
+            "2026-07-11",
+        ])
+        .assert()
+        .success();
+
+    // Mass product with grams
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "consumption",
+            "create",
+            "--product",
+            "3",
+            "--quantity",
+            "50",
+            "--unit",
+            "g",
+            "--date",
+            "2026-07-11",
+        ])
+        .assert()
+        .success();
+
+    // Reject: package unit on a mass product
+    bin()
+        .args([
+            "--db",
+            &db,
+            "nutrition",
+            "consumption",
+            "create",
+            "--product",
+            "3",
+            "--quantity",
+            "1",
+            "--unit",
+            "bar",
+            "--date",
+            "2026-07-11",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unit mismatch"));
+
+    // Reject: grams on a package product
+    bin()
+        .args([
+            "--db",
+            &db,
+            "nutrition",
+            "consumption",
+            "create",
+            "--product",
+            "1",
+            "--quantity",
+            "46",
+            "--unit",
+            "g",
+            "--date",
+            "2026-07-11",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unit mismatch"));
+
+    let show = json_out(&db, &["nutrition", "product", "show", "1"]);
+    assert_eq!(show["nutrition"]["reference_unit"], "unit");
+    assert_eq!(show["nutrition"]["unit_kind"], "package");
+    assert!(show["nutrition"]["per"]
+        .as_str()
+        .unwrap()
+        .contains("package"));
+
+    let v = json_out(
+        &db,
+        &[
+            "report",
+            "nutrition",
+            "list",
+            "--since",
+            "2026-07-11",
+            "--until",
+            "2026-07-11",
+        ],
+    );
+
+    let days = v["days"].as_array().unwrap();
+    let d = &days[0];
+    assert_eq!(d["total_consumed_items"], 3);
+    // 180 + 90 + 0.5*389 = 464.5
+    assert!((d["totals"]["energy_kcal"].as_f64().unwrap() - 464.5).abs() < 0.01);
+}

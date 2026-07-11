@@ -8,6 +8,7 @@ mod fit;
 mod hr_zones;
 mod load_type;
 mod models;
+mod nutrition_units;
 mod phase;
 mod repository;
 mod sanity;

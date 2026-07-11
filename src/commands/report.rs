@@ -295,7 +295,11 @@ fn print_brief_human(report: &BriefReport, days: u32, day_label: &str) {
     } else {
         for c in &report.consumption_today {
             let name = c.product_name.as_deref().unwrap_or("?");
-            println!("{}: {} qty={} on {}", c.id, name, c.quantity, c.consumed_at);
+            let unit = c.unit.as_deref().unwrap_or("?");
+            println!(
+                "{}: {} {} {} on {}",
+                c.id, name, c.quantity, unit, c.consumed_at
+            );
         }
     }
 
@@ -554,20 +558,12 @@ fn resolve_nutrition_report_period(args: &NutritionPeriodArgs) -> Result<Resolve
     })
 }
 
-fn scale_factor(qty: f64, ref_qty: f64) -> f64 {
-    if ref_qty > 0.0 {
-        qty / ref_qty
-    } else {
-        0.0
-    }
-}
-
 fn fetch_nutrition_consumptions(
     conn: &Connection,
     resolved: &ResolvedNutritionPeriod,
 ) -> Result<Vec<NutritionConsumptionRow>> {
     let mut sql = String::from(
-        "SELECT c.quantity, pn.reference_quantity,
+        "SELECT c.quantity, c.unit, pn.reference_quantity, pn.reference_unit,
                 pn.energy_kcal, pn.protein_g, pn.carbohydrates_g, pn.fat_g, pn.fiber_g, pn.sugars_g,
                 c.product_id, c.consumed_at
          FROM consumptions c
@@ -589,17 +585,24 @@ fn fetch_nutrition_consumptions(
     let rows = stmt
         .query_map(rusqlite::params_from_iter(bind.iter()), |r| {
             let qty: f64 = r.get(0)?;
-            let ref_q: f64 = r.get(1)?;
+            let unit: Option<String> = r.get(1)?;
+            let ref_q: f64 = r.get(2)?;
+            let ref_unit: String = r.get(3)?;
             Ok(NutritionConsumptionRow {
-                scale: scale_factor(qty, ref_q),
-                energy_kcal: r.get(2)?,
-                protein_g: r.get(3)?,
-                carbohydrates_g: r.get(4)?,
-                fat_g: r.get(5)?,
-                fiber_g: r.get(6)?,
-                sugars_g: r.get(7)?,
-                product_id: r.get(8)?,
-                consumed_at: r.get(9)?,
+                scale: crate::nutrition_units::consumption_scale(
+                    qty,
+                    ref_q,
+                    unit.as_deref(),
+                    &ref_unit,
+                ),
+                energy_kcal: r.get(4)?,
+                protein_g: r.get(5)?,
+                carbohydrates_g: r.get(6)?,
+                fat_g: r.get(7)?,
+                fiber_g: r.get(8)?,
+                sugars_g: r.get(9)?,
+                product_id: r.get(10)?,
+                consumed_at: r.get(11)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;

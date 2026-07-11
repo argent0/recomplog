@@ -1,0 +1,11 @@
+-- Nutrition units: explicit mass (g), volume (ml), package (unit).
+-- Applied in Rust (PRAGMA user_version 3–4):
+--   v3: normalize aliases; convert pure package logs / products
+--   v4: promote whole-package mass/volume products (N×ref only) → unit
+--
+-- Product reference_unit and consumption unit are stored as:
+--   g    — continuous mass
+--   ml   — continuous volume
+--   unit — one package / item / labeled serving
+--
+-- Consumptions must use the same unit kind as the product.

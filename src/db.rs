@@ -44,7 +44,7 @@ pub fn open_db(override_path: Option<&str>) -> Result<Connection> {
 }
 
 /// Current schema version. Bump when adding a new migration block.
-const CURRENT_VERSION: i32 = 2;
+const CURRENT_VERSION: i32 = 4;
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i32 = conn
@@ -66,7 +66,111 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         apply_v2_cardio_json(conn)?;
         conn.execute("PRAGMA user_version = 2", [])?;
     }
+    if current < 3 {
+        normalize_nutrition_units(conn)?;
+        conn.execute("PRAGMA user_version = 3", [])?;
+    }
+    if current < 4 {
+        // Recover products that v3 rewrote as N×reference grams/ml when they
+        // were really whole packages (e.g. 1 bar → 46 g → back to 1 unit).
+        promote_whole_package_products(conn)?;
+        conn.execute("PRAGMA user_version = 4", [])?;
+    }
 
+    Ok(())
+}
+
+/// Re-run unit normalization (also used after legacy import).
+pub fn normalize_nutrition_units_public(conn: &Connection) -> Result<()> {
+    normalize_nutrition_units(conn)?;
+    promote_whole_package_products(conn)?;
+    Ok(())
+}
+
+/// If every consumption is an integer multiple of the product’s reference amount
+/// (e.g. only 46 g and 92 g of a 46 g bar), treat the product as package/`unit`.
+fn promote_whole_package_products(conn: &Connection) -> Result<()> {
+    use crate::nutrition_units::{parse_unit, UnitKind};
+
+    let products: Vec<(i64, f64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT product_id, reference_quantity, reference_unit FROM product_nutritions",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    for (pid, ref_qty, ref_unit) in products {
+        let Ok(ref_parsed) = parse_unit(&ref_unit) else {
+            continue;
+        };
+        if ref_parsed.kind == UnitKind::Package || ref_qty <= 0.0 {
+            continue;
+        }
+
+        let rows: Vec<(i64, f64, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, quantity, unit FROM consumptions
+                 WHERE product_id = ?1 AND unit IS NOT NULL AND trim(unit) != ''",
+            )?;
+            let rows = stmt
+                .query_map(rusqlite::params![pid], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, f64>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        if rows.is_empty() {
+            continue;
+        }
+
+        let mut scales: Vec<(i64, f64)> = Vec::new();
+        let mut all_whole = true;
+        for (cid, qty, unit) in &rows {
+            let Ok(cu) = parse_unit(unit) else {
+                all_whole = false;
+                break;
+            };
+            if cu.kind != ref_parsed.kind {
+                all_whole = false;
+                break;
+            }
+            let scale = qty / ref_qty;
+            let nearest = scale.round();
+            if !(1.0..=20.0).contains(&nearest) || (scale - nearest).abs() > 1e-6 {
+                all_whole = false;
+                break;
+            }
+            scales.push((*cid, nearest));
+        }
+        if !all_whole || scales.is_empty() {
+            continue;
+        }
+
+        conn.execute(
+            "UPDATE product_nutritions SET reference_quantity = 1, reference_unit = 'unit'
+             WHERE product_id = ?1",
+            rusqlite::params![pid],
+        )?;
+        for (cid, n_units) in scales {
+            conn.execute(
+                "UPDATE consumptions SET quantity = ?1, unit = 'unit' WHERE id = ?2",
+                rusqlite::params![n_units, cid],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -93,6 +197,244 @@ fn apply_v2_cardio_json(conn: &Connection) -> Result<()> {
     if !column_exists(conn, "exercise_sets", "laps")? {
         conn.execute("ALTER TABLE exercise_sets ADD COLUMN laps TEXT", [])?;
     }
+    Ok(())
+}
+
+/// Normalize nutrition units to the explicit vocabulary: `g`, `ml`, `unit`.
+///
+/// - Product reference units: aliases → canonical kind unit.
+/// - Products only ever consumed as package counts against a mass/volume
+///   reference are converted to `1 unit` (macros already describe one package).
+/// - Package-style consumptions against remaining mass/volume products are
+///   rewritten to the reference amount (1 bar of a 46 g product → 46 g).
+/// - All consumption units are stored as `g` / `ml` / `unit`.
+fn normalize_nutrition_units(conn: &Connection) -> Result<()> {
+    use crate::nutrition_units::{parse_unit, UnitKind};
+
+    // --- 1. Normalize product reference units ---
+    let products: Vec<(i64, f64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT product_id, reference_quantity, reference_unit FROM product_nutritions",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    for (pid, ref_qty, ref_unit) in &products {
+        let Ok(parsed) = parse_unit(ref_unit) else {
+            continue;
+        };
+        let canonical = parsed.canonical();
+        if ref_unit != canonical {
+            // e.g. capsule → unit: keep quantity (usually 1).
+            // e.g. kg → g: convert quantity into base units.
+            let new_qty = if parsed.kind == UnitKind::Package {
+                *ref_qty
+            } else {
+                ref_qty * parsed.to_base
+            };
+            conn.execute(
+                "UPDATE product_nutritions SET reference_quantity = ?1, reference_unit = ?2
+                 WHERE product_id = ?3",
+                rusqlite::params![new_qty, canonical, pid],
+            )?;
+        }
+    }
+
+    // Re-read after product updates
+    let products: Vec<(i64, f64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT product_id, reference_quantity, reference_unit FROM product_nutritions",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    // --- 2. Decide which mass/volume products should become package products ---
+    for (pid, ref_qty, ref_unit) in &products {
+        let Ok(ref_parsed) = parse_unit(ref_unit) else {
+            continue;
+        };
+        if ref_parsed.kind == UnitKind::Package {
+            continue;
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT unit FROM consumptions WHERE product_id = ?1 AND unit IS NOT NULL AND trim(unit) != ''",
+        )?;
+        let units: Vec<String> = stmt
+            .query_map(rusqlite::params![pid], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if units.is_empty() {
+            continue;
+        }
+
+        let mut any_package = false;
+        let mut any_matching_measure = false;
+        for u in &units {
+            let Ok(p) = parse_unit(u) else {
+                continue;
+            };
+            if p.kind == UnitKind::Package {
+                any_package = true;
+            } else if p.kind == ref_parsed.kind {
+                any_matching_measure = true;
+            }
+        }
+
+        // Only package counts logged → product is package-oriented (e.g. protein bar).
+        if any_package && !any_matching_measure {
+            conn.execute(
+                "UPDATE product_nutritions SET reference_quantity = 1, reference_unit = 'unit'
+                 WHERE product_id = ?1",
+                rusqlite::params![pid],
+            )?;
+            // Consumptions: 1 bar → 1 unit (quantity unchanged).
+            conn.execute(
+                "UPDATE consumptions SET unit = 'unit'
+                 WHERE product_id = ?1
+                   AND unit IS NOT NULL
+                   AND lower(trim(unit)) IN (
+                     'unit','units','package','packages','pack','packs','packet','packets',
+                     'serving','servings','portion','portions','bar','bars','cup','cups',
+                     'capsule','capsules','cap','caps','tablet','tablets','pill','pills',
+                     'scoop','scoops','piece','pieces','item','items','bottle','bottles',
+                     'can','cans','slice','slices','drink','drinks','spoon','spoons'
+                   )",
+                rusqlite::params![pid],
+            )?;
+            let _ = ref_qty; // macros already describe one package serving
+        }
+    }
+
+    // --- 3. Rewrite remaining package consumptions against mass/volume products ---
+    let products: Vec<(i64, f64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT product_id, reference_quantity, reference_unit FROM product_nutritions",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    for (pid, ref_qty, ref_unit) in &products {
+        let Ok(ref_parsed) = parse_unit(ref_unit) else {
+            continue;
+        };
+        if ref_parsed.kind == UnitKind::Package {
+            continue;
+        }
+        let mut stmt = conn.prepare(
+            "SELECT id, quantity, unit FROM consumptions
+             WHERE product_id = ?1 AND unit IS NOT NULL AND trim(unit) != ''",
+        )?;
+        let rows: Vec<(i64, f64, String)> = stmt
+            .query_map(rusqlite::params![pid], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for (cid, qty, unit) in rows {
+            let Ok(cu) = parse_unit(&unit) else {
+                continue;
+            };
+            if cu.kind == UnitKind::Package {
+                // Mixed history: keep mass product, expand package counts to amount.
+                // (Pure package products were already converted in step 2.)
+                let new_qty = qty * ref_qty;
+                conn.execute(
+                    "UPDATE consumptions SET quantity = ?1, unit = ?2 WHERE id = ?3",
+                    rusqlite::params![new_qty, ref_parsed.canonical(), cid],
+                )?;
+            }
+        }
+    }
+
+    // --- 4. Normalize all remaining consumption units to g|ml|unit ---
+    let consumptions: Vec<(i64, Option<String>, i64)> = {
+        let mut stmt = conn.prepare("SELECT id, unit, product_id FROM consumptions")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    for (cid, unit, pid) in consumptions {
+        let unit_trim = unit.as_deref().map(str::trim).unwrap_or("");
+        if unit_trim.is_empty() {
+            // Default to product reference unit when present.
+            let ref_u: Option<String> = conn
+                .query_row(
+                    "SELECT reference_unit FROM product_nutritions WHERE product_id = ?1",
+                    [pid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(ru) = ref_u {
+                if let Ok(p) = parse_unit(&ru) {
+                    conn.execute(
+                        "UPDATE consumptions SET unit = ?1 WHERE id = ?2",
+                        rusqlite::params![p.canonical(), cid],
+                    )?;
+                }
+            }
+            continue;
+        }
+        if let Ok(p) = parse_unit(unit_trim) {
+            let canon = p.canonical();
+            if unit_trim != canon {
+                // Convert quantity into base units when alias had a factor
+                // (e.g. 0.1 kg → 100 g).
+                let qty: f64 = conn.query_row(
+                    "SELECT quantity FROM consumptions WHERE id = ?1",
+                    [cid],
+                    |r| r.get(0),
+                )?;
+                let new_qty = if p.kind == UnitKind::Package {
+                    qty
+                } else {
+                    qty * p.to_base
+                };
+                conn.execute(
+                    "UPDATE consumptions SET quantity = ?1, unit = ?2 WHERE id = ?3",
+                    rusqlite::params![new_qty, canon, cid],
+                )?;
+            }
+        }
+    }
+
     Ok(())
 }
 

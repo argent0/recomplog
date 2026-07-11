@@ -33,6 +33,27 @@ fn seed_product(db: &str) {
         ])
         .assert()
         .success();
+    bin()
+        .args([
+            "--db",
+            db,
+            "--json",
+            "nutrition",
+            "product",
+            "nutrition",
+            "set",
+            "1",
+            "--reference-quantity",
+            "100",
+            "--reference-unit",
+            "g",
+            "--energy-kcal",
+            "389",
+            "--protein-g",
+            "17",
+        ])
+        .assert()
+        .success();
 }
 
 fn seed_consumption(db: &str, date: &str) {
@@ -48,6 +69,8 @@ fn seed_consumption(db: &str, date: &str) {
             "1",
             "--quantity",
             "50",
+            "--unit",
+            "g",
             "--date",
             date,
         ])

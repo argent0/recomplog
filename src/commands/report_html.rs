@@ -120,40 +120,60 @@ fn fetch_html_sleep(conn: &Connection, since: &str, until: &str) -> Result<Vec<S
 }
 
 fn fetch_html_nutrition_daily(conn: &Connection, since: &str, until: &str) -> Result<Vec<NutDay>> {
+    // Aggregate in Rust so discrete units (bar, cup, serving) use the same
+    // consumption_scale rules as `report nutrition` / `report brief`.
     let mut stmt = conn.prepare(
         "SELECT date(c.consumed_at) AS d,
-          SUM(CASE WHEN pn.energy_kcal IS NOT NULL AND pn.reference_quantity > 0
-              THEN c.quantity / pn.reference_quantity * pn.energy_kcal ELSE 0 END) AS kcal,
-          SUM(CASE WHEN pn.protein_g IS NOT NULL AND pn.reference_quantity > 0
-              THEN c.quantity / pn.reference_quantity * pn.protein_g ELSE 0 END) AS protein,
-          SUM(CASE WHEN pn.carbohydrates_g IS NOT NULL AND pn.reference_quantity > 0
-              THEN c.quantity / pn.reference_quantity * pn.carbohydrates_g ELSE 0 END) AS carbs,
-          SUM(CASE WHEN pn.fat_g IS NOT NULL AND pn.reference_quantity > 0
-              THEN c.quantity / pn.reference_quantity * pn.fat_g ELSE 0 END) AS fat,
-          SUM(CASE WHEN pn.fiber_g IS NOT NULL AND pn.reference_quantity > 0
-              THEN c.quantity / pn.reference_quantity * pn.fiber_g ELSE 0 END) AS fiber,
-          SUM(CASE WHEN pn.sugars_g IS NOT NULL AND pn.reference_quantity > 0
-              THEN c.quantity / pn.reference_quantity * pn.sugars_g ELSE 0 END) AS sugars
+                c.quantity, c.unit, pn.reference_quantity, pn.reference_unit,
+                pn.energy_kcal, pn.protein_g, pn.carbohydrates_g, pn.fat_g, pn.fiber_g, pn.sugars_g
          FROM consumptions c
          LEFT JOIN product_nutritions pn ON pn.product_id = c.product_id
          WHERE date(c.consumed_at) >= date(?1) AND date(c.consumed_at) <= date(?2)
-         GROUP BY date(c.consumed_at)
          ORDER BY d ASC",
     )?;
-    let rows = stmt
-        .query_map(params![since, until], |r| {
-            Ok(NutDay {
-                date: r.get(0)?,
-                energy_kcal: r.get(1)?,
-                protein_g: r.get(2)?,
-                carbohydrates_g: r.get(3)?,
-                fat_g: r.get(4)?,
-                fiber_g: r.get(5)?,
-                sugars_g: r.get(6)?,
-            })
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(rows)
+    let mut by_day: std::collections::BTreeMap<String, NutDay> = std::collections::BTreeMap::new();
+    let mut rows = stmt.query(params![since, until])?;
+    while let Some(r) = rows.next()? {
+        let date: String = r.get(0)?;
+        let qty: f64 = r.get(1)?;
+        let unit: Option<String> = r.get(2)?;
+        let ref_q: Option<f64> = r.get(3)?;
+        let ref_unit: Option<String> = r.get(4)?;
+        let scale = match (ref_q, ref_unit.as_deref()) {
+            (Some(rq), Some(ru)) => {
+                crate::nutrition_units::consumption_scale(qty, rq, unit.as_deref(), ru)
+            }
+            _ => 0.0,
+        };
+        let day = by_day.entry(date.clone()).or_insert(NutDay {
+            date,
+            energy_kcal: 0.0,
+            protein_g: 0.0,
+            carbohydrates_g: 0.0,
+            fat_g: 0.0,
+            fiber_g: 0.0,
+            sugars_g: 0.0,
+        });
+        if let Some(v) = r.get::<_, Option<f64>>(5)? {
+            day.energy_kcal += v * scale;
+        }
+        if let Some(v) = r.get::<_, Option<f64>>(6)? {
+            day.protein_g += v * scale;
+        }
+        if let Some(v) = r.get::<_, Option<f64>>(7)? {
+            day.carbohydrates_g += v * scale;
+        }
+        if let Some(v) = r.get::<_, Option<f64>>(8)? {
+            day.fat_g += v * scale;
+        }
+        if let Some(v) = r.get::<_, Option<f64>>(9)? {
+            day.fiber_g += v * scale;
+        }
+        if let Some(v) = r.get::<_, Option<f64>>(10)? {
+            day.sugars_g += v * scale;
+        }
+    }
+    Ok(by_day.into_values().collect())
 }
 
 fn fetch_html_training(conn: &Connection, since: &str, until: &str) -> Result<TrainingSummary> {

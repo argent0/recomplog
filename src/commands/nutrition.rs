@@ -170,6 +170,8 @@ fn set_product_nutrition(
     if exists.is_none() {
         return Err(anyhow!("product not found"));
     }
+    let (reference_quantity, reference_unit) =
+        crate::nutrition_units::validate_product_reference(reference_quantity, reference_unit)?;
     conn.execute(
         "INSERT INTO product_nutritions
          (product_id, reference_quantity, reference_unit, energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g)
@@ -421,6 +423,7 @@ fn handle_product(
                     .or_else(|| v["reference_unit"].as_str())
                     .unwrap_or("g")
                     .to_string();
+                // Validated/normalized in set_product_nutrition.
                 let macros = &v["macros"];
                 let mut micros = vec![];
                 if let Some(arr) = v["micronutrients"].as_array() {
@@ -577,9 +580,17 @@ fn show_product(conn: &Connection, id: i64, json: bool) -> Result<()> {
              FROM product_nutritions WHERE product_id = ?1",
             [id],
             |r| {
+                let rq: f64 = r.get(0)?;
+                let ru: String = r.get(1)?;
+                let kind = crate::nutrition_units::parse_unit(&ru)
+                    .map(|p| p.kind.as_str())
+                    .unwrap_or("unknown");
+                let per = crate::nutrition_units::format_reference_serving(rq, &ru);
                 Ok(serde_json::json!({
-                    "reference_quantity": r.get::<_, f64>(0)?,
-                    "reference_unit": r.get::<_, String>(1)?,
+                    "reference_quantity": rq,
+                    "reference_unit": ru,
+                    "unit_kind": kind,
+                    "per": per,
                     "energy_kcal": r.get::<_, Option<f64>>(2)?,
                     "protein_g": r.get::<_, Option<f64>>(3)?,
                     "carbohydrates_g": r.get::<_, Option<f64>>(4)?,
@@ -620,7 +631,33 @@ fn show_product(conn: &Connection, id: i64, json: bool) -> Result<()> {
             println!("  tags: {}", tags.join(", "));
         }
         if let Some(nu) = &nutrition {
-            println!("  nutrition: {nu}");
+            let per = nu["per"].as_str().unwrap_or("?");
+            let kind = nu["unit_kind"].as_str().unwrap_or("?");
+            println!("  nutrition ({kind}, {per}):");
+            if let Some(v) = nu["energy_kcal"].as_f64() {
+                println!("    energy: {v} kcal");
+            }
+            if let Some(v) = nu["protein_g"].as_f64() {
+                println!("    protein: {v} g");
+            }
+            if let Some(v) = nu["carbohydrates_g"].as_f64() {
+                println!("    carbs: {v} g");
+            }
+            if let Some(v) = nu["fat_g"].as_f64() {
+                println!("    fat: {v} g");
+            }
+            if let Some(v) = nu["fiber_g"].as_f64() {
+                println!("    fiber: {v} g");
+            }
+            if let Some(v) = nu["sugars_g"].as_f64() {
+                println!("    sugars: {v} g");
+            }
+            println!(
+                "    reference: {} {}",
+                nu["reference_quantity"], nu["reference_unit"]
+            );
+        } else {
+            println!("  nutrition: (not set)");
         }
         for m in &micros {
             println!("  micro: {} {} {}", m["name"], m["amount"], m["unit"]);
@@ -772,15 +809,62 @@ fn handle_consumption(
         } => {
             let when = parse_date_to_ymd(&date)?;
             let now = db::now_utc();
+            let product_name: Option<String> = conn
+                .query_row("SELECT name FROM products WHERE id = ?1", [product], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if product_name.is_none() {
+                return Err(anyhow!("product {product} not found"));
+            }
+            let nutrition: Option<(f64, String)> = conn
+                .query_row(
+                    "SELECT reference_quantity, reference_unit FROM product_nutritions
+                     WHERE product_id = ?1",
+                    [product],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let Some((ref_qty, ref_unit)) = nutrition else {
+                return Err(anyhow!(
+                    "product {product} has no nutrition set; run \
+                     `nutrition product nutrition set {product} --reference-quantity … \
+                     --reference-unit g|ml|unit` first"
+                ));
+            };
+            let resolved = crate::nutrition_units::resolve_consumption(
+                quantity,
+                unit.as_deref(),
+                ref_qty,
+                &ref_unit,
+            )?;
             conn.execute(
                 "INSERT INTO consumptions (product_id, quantity, unit, consumed_at, created_at) VALUES (?1,?2,?3,?4,?5)",
-                params![product, quantity, unit, when, now],
+                params![product, resolved.quantity, resolved.unit, when, now],
             )?;
             let id = conn.last_insert_rowid();
             if json {
-                print_json(&Success::created(id, when, "consumption logged"));
+                print_json(&serde_json::json!({
+                    "success": true,
+                    "id": id,
+                    "message": "consumption logged",
+                    "product_id": product,
+                    "quantity": resolved.quantity,
+                    "unit": resolved.unit,
+                    "unit_kind": crate::nutrition_units::parse_unit(&resolved.unit)
+                        .map(|p| p.kind.as_str())
+                        .unwrap_or("unknown"),
+                    "product_reference_unit": ref_unit,
+                    "consumed_at": when,
+                }));
             } else {
-                quiet_print(quiet, format!("Consumption {id} logged"));
+                quiet_print(
+                    quiet,
+                    format!(
+                        "Consumption {id} logged: {} {}",
+                        resolved.quantity, resolved.unit
+                    ),
+                );
             }
         }
         ConsumptionAction::List {
@@ -823,9 +907,10 @@ fn handle_consumption(
                 print_json(&rows);
             } else {
                 for r in &rows {
+                    let unit = r["unit"].as_str().unwrap_or("?");
                     println!(
-                        "{}: {} qty={} on {}",
-                        r["id"], r["product_name"], r["quantity"], r["consumed_at"]
+                        "{}: {} {} {} on {}",
+                        r["id"], r["product_name"], r["quantity"], unit, r["consumed_at"]
                     );
                 }
             }

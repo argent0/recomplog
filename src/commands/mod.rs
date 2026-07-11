@@ -73,7 +73,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             dry_run,
             force: _,
         } => {
-            let target = 2;
+            let target = 4;
             if status || dry_run {
                 if json {
                     println!(
