@@ -100,7 +100,7 @@ fn handle_brief(days: u32, db_override: Option<&str>, json: bool) -> Result<()> 
         },
         NutritionReportValue::Macronutrients,
     )?;
-    let workouts_today = fetch_brief_workouts_on_day(&conn, &today_s)?;
+    let workouts_today = fetch_brief_workouts_detail_on_day(&conn, &today_s)?;
     let previous_workouts = fetch_brief_workouts_in_range(&conn, &prev_since_s, &prev_until_s)?;
     let previous_overview = fetch_workout_period_overview(&conn, prev_period, previous_workouts)?;
 
@@ -183,17 +183,26 @@ fn map_brief_workout(r: &rusqlite::Row<'_>) -> rusqlite::Result<BriefWorkout> {
     })
 }
 
-fn fetch_brief_workouts_on_day(conn: &Connection, day_ymd: &str) -> Result<Vec<BriefWorkout>> {
+/// Today's sessions with full detail (exercises + sets), newest first.
+fn fetch_brief_workouts_detail_on_day(
+    conn: &Connection,
+    day_ymd: &str,
+) -> Result<Vec<serde_json::Value>> {
     let mut stmt = conn.prepare(
-        "SELECT id, started_at, finished_at, workout_type, notes, duration_minutes, overall_feeling
-         FROM workouts
+        "SELECT id FROM workouts
          WHERE date(started_at, 'localtime') = date(?1)
          ORDER BY started_at DESC",
     )?;
-    let rows = stmt
-        .query_map(params![day_ymd], map_brief_workout)?
+    let ids: Vec<i64> = stmt
+        .query_map(params![day_ymd], |r| r.get(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(rows)
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(detail) = super::workout::fetch_workout_detail(conn, id)? {
+            out.push(detail);
+        }
+    }
+    Ok(out)
 }
 
 fn fetch_brief_workouts_in_range(
@@ -285,7 +294,16 @@ fn print_brief_human(report: &BriefReport, days: u32) {
 
     println!();
     println!("=== Workouts (today) ===");
-    print_workouts_table(&report.workouts.today);
+    if report.workouts.today.is_empty() {
+        println!("(no workouts)");
+    } else {
+        for (i, w) in report.workouts.today.iter().enumerate() {
+            if i > 0 {
+                println!();
+            }
+            super::workout::print_workout_detail(w);
+        }
+    }
 
     println!();
     let prev = &report.workouts.previous;

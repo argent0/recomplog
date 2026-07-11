@@ -81,8 +81,8 @@ recomplog --json report nutrition spending --since 2026-01-01 --by product
 2. Nutrition by day (macros, last N days; default 7)
 3. Measurements (last N days)
 4. Sleep (last N days)
-5. Today's workouts
-6. Previous N days workout overview (session/volume stats + list)
+5. Today's workouts **in full detail** (same shape as `workout show`: exercises + sets)
+6. Previous N days workout overview (session/volume stats + compact list)
 
 Nutrition report date flags: `--days N` cannot be combined with `--since` / `--until`.
 

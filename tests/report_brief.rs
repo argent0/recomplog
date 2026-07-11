@@ -192,7 +192,10 @@ fn brief_human_has_all_section_headers() {
             "=== Workouts overview (previous 7 days:",
         ))
         .stdout(predicate::str::contains("Oats"))
-        .stdout(predicate::str::contains("Push"));
+        .stdout(predicate::str::contains("Push"))
+        // Today's workout is shown in full detail (workout show shape).
+        .stdout(predicate::str::contains("bench press"))
+        .stdout(predicate::str::contains("set 1:"));
 }
 
 #[test]
@@ -228,7 +231,19 @@ fn brief_json_shape_and_today_data() {
 
     assert!(v["workouts"]["today"].is_array());
     assert!(!v["workouts"]["today"].as_array().unwrap().is_empty());
-    assert_eq!(v["workouts"]["today"][0]["workout_type"], "Push");
+    let today_w = &v["workouts"]["today"][0];
+    assert_eq!(today_w["workout_type"], "Push");
+    // Full detail: exercises + sets (same shape as `workout show`).
+    assert!(today_w["exercises"].is_array());
+    assert!(!today_w["exercises"].as_array().unwrap().is_empty());
+    assert_eq!(today_w["exercises"][0]["name"], "bench press");
+    assert!(today_w["exercises"][0]["sets"].is_array());
+    assert!(!today_w["exercises"][0]["sets"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(today_w["exercises"][0]["sets"][0]["reps"], 5);
+    assert_eq!(today_w["exercises"][0]["sets"][0]["weight_kg"], 100.0);
 
     assert!(
         v["workouts"]["previous"]["period"]["days"]

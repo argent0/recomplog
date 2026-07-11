@@ -369,8 +369,12 @@ fn print_track_metrics_oneline(m: &TrackMetrics) {
     println!("       track: {}", parts.join(" · "));
 }
 
-fn show_workout(db_override: Option<&str>, id: i64, json: bool) -> Result<()> {
-    let conn = db::open_db(db_override)?;
+/// Load full workout detail (header + exercises + sets), same shape as `workout show`.
+/// Returns `Ok(None)` when the workout id does not exist.
+pub(crate) fn fetch_workout_detail(
+    conn: &Connection,
+    id: i64,
+) -> Result<Option<serde_json::Value>> {
     let row = conn
         .query_row(
             "SELECT id, started_at, finished_at, workout_type, notes, overall_feeling, duration_minutes
@@ -390,10 +394,7 @@ fn show_workout(db_override: Option<&str>, id: i64, json: bool) -> Result<()> {
         )
         .optional()?;
     let Some(mut w) = row else {
-        if json {
-            print_error_json(&format!("workout {id} not found"));
-        }
-        return Err(anyhow!("workout not found"));
+        return Ok(None);
     };
     let started_at = w["started_at"].as_str().unwrap_or("").to_string();
     let activity_date = activity_date_prefix(&started_at);
@@ -418,7 +419,7 @@ fn show_workout(db_override: Option<&str>, id: i64, json: bool) -> Result<()> {
         .collect();
     let mut ex_json = Vec::new();
     for (we_id, name, order, notes, load_type) in exercises {
-        let sets = list_sets_json(&conn, we_id, &activity_date)?;
+        let sets = list_sets_json(conn, we_id, &activity_date)?;
         ex_json.push(serde_json::json!({
             "workout_exercise_id": we_id,
             "name": name,
@@ -429,32 +430,50 @@ fn show_workout(db_override: Option<&str>, id: i64, json: bool) -> Result<()> {
         }));
     }
     w["exercises"] = serde_json::json!(ex_json);
-    if json {
-        print_json(&w);
-    } else {
+    Ok(Some(w))
+}
+
+/// Human-readable dump matching `workout show` (no `--json`).
+pub(crate) fn print_workout_detail(w: &serde_json::Value) {
+    let id = w["id"].as_i64().unwrap_or(0);
+    println!(
+        "Workout {} — {} ({})",
+        id,
+        w["started_at"].as_str().unwrap_or(""),
+        w["workout_type"].as_str().unwrap_or("-")
+    );
+    let empty = vec![];
+    for ex in w["exercises"].as_array().unwrap_or(&empty) {
         println!(
-            "Workout {} — {} ({})",
-            id,
-            w["started_at"].as_str().unwrap_or(""),
-            w["workout_type"].as_str().unwrap_or("-")
+            "  {}. {} (we_id={})",
+            ex["order"], ex["name"], ex["workout_exercise_id"]
         );
-        for ex in &ex_json {
+        for s in ex["sets"].as_array().unwrap_or(&empty) {
             println!(
-                "  {}. {} (we_id={})",
-                ex["order"], ex["name"], ex["workout_exercise_id"]
+                "     set {}: reps={:?} weight={:?} phase={}",
+                s["set_number"], s["reps"], s["weight_kg"], s["phase"]
             );
-            for s in ex["sets"].as_array().unwrap_or(&vec![]) {
-                println!(
-                    "     set {}: reps={:?} weight={:?} phase={}",
-                    s["set_number"], s["reps"], s["weight_kg"], s["phase"]
-                );
-                if let Some(tm_val) = s.get("track_metrics") {
-                    if let Ok(tm) = serde_json::from_value::<TrackMetrics>(tm_val.clone()) {
-                        print_track_metrics_oneline(&tm);
-                    }
+            if let Some(tm_val) = s.get("track_metrics") {
+                if let Ok(tm) = serde_json::from_value::<TrackMetrics>(tm_val.clone()) {
+                    print_track_metrics_oneline(&tm);
                 }
             }
         }
+    }
+}
+
+fn show_workout(db_override: Option<&str>, id: i64, json: bool) -> Result<()> {
+    let conn = db::open_db(db_override)?;
+    let Some(w) = fetch_workout_detail(&conn, id)? else {
+        if json {
+            print_error_json(&format!("workout {id} not found"));
+        }
+        return Err(anyhow!("workout not found"));
+    };
+    if json {
+        print_json(&w);
+    } else {
+        print_workout_detail(&w);
     }
     Ok(())
 }

@@ -277,7 +277,8 @@ pub struct WorkoutPeriodOverview {
 /// Today + previous lookback for training in `report brief`.
 #[derive(Serialize, Debug, Clone)]
 pub struct BriefWorkouts {
-    pub today: Vec<BriefWorkout>,
+    /// Full detail per session today (same JSON shape as `workout show`).
+    pub today: Vec<serde_json::Value>,
     /// Overview of the N calendar days before today (same N as `--days`).
     pub previous: WorkoutPeriodOverview,
 }
