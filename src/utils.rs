@@ -64,6 +64,79 @@ pub fn print_error_json(err: &str) {
     });
 }
 
+/// Formats a duration in seconds as `H:MM:SS` or `M:SS`.
+pub fn format_duration(seconds: u32) -> String {
+    let h = seconds / 3600;
+    let m = (seconds % 3600) / 60;
+    let s = seconds % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// Formats pace as `M'SS"/km` (repslog-compatible human style).
+///
+/// Uses floor-minutes + round-seconds (same as repslog). Seconds of 60 carry into
+/// minutes so values near a whole minute show as `6'00"/km` rather than `5'60"/km`.
+/// Zero is formatted as `0'00"/km` (empty/invalid → `--`).
+pub fn format_pace(min_per_km: f64) -> String {
+    if !min_per_km.is_finite() || min_per_km < 0.0 {
+        return "--".into();
+    }
+    let mut mins = min_per_km.floor() as u32;
+    let mut secs = ((min_per_km - f64::from(mins)) * 60.0).round() as u32;
+    if secs >= 60 {
+        mins = mins.saturating_add(secs / 60);
+        secs %= 60;
+    }
+    format!("{mins}'{secs:02}\"/km")
+}
+
+/// Text bar + zone percentages for HR zone time distribution.
+pub fn format_hr_zones_bar(zones: &crate::models::HeartRateZones) -> String {
+    let total_secs: u32 = zones.z1_seconds
+        + zones.z2_seconds
+        + zones.z3_seconds
+        + zones.z4_seconds
+        + zones.z5_seconds;
+    if total_secs == 0 {
+        return "No HR data".to_string();
+    }
+
+    let width: usize = 20;
+    let z1_p = zones.z1_seconds as f64 / total_secs as f64;
+    let z2_p = zones.z2_seconds as f64 / total_secs as f64;
+    let z3_p = zones.z3_seconds as f64 / total_secs as f64;
+    let z4_p = zones.z4_seconds as f64 / total_secs as f64;
+    let z5_p = zones.z5_seconds as f64 / total_secs as f64;
+
+    let z1_w = (z1_p * width as f64).round() as usize;
+    let z2_w = (z2_p * width as f64).round() as usize;
+    let z3_w = (z3_p * width as f64).round() as usize;
+    let z4_w = (z4_p * width as f64).round() as usize;
+    let z5_w = width.saturating_sub(z1_w + z2_w + z3_w + z4_w);
+
+    let bar = format!(
+        "{}{}{}{}{}",
+        "█".repeat(z1_w),
+        "█".repeat(z2_w),
+        "█".repeat(z3_w),
+        "█".repeat(z4_w),
+        "█".repeat(z5_w)
+    );
+
+    format!(
+        "{bar} (Z1:{:.0}% Z2:{:.0}% Z3:{:.0}% Z4:{:.0}% Z5:{:.0}%)",
+        z1_p * 100.0,
+        z2_p * 100.0,
+        z3_p * 100.0,
+        z4_p * 100.0,
+        z5_p * 100.0
+    )
+}
+
 /// Formats minutes as a compact human string.
 pub fn format_minutes(minutes: i64) -> String {
     if minutes < 0 {
@@ -470,6 +543,16 @@ mod tests {
         assert_eq!(format_minutes(53), "53 m");
         assert_eq!(format_minutes(0), "0 m");
         assert_eq!(format_minutes(60), "1 h 0 m");
+    }
+
+    #[test]
+    fn format_pace_repslog_style() {
+        assert_eq!(format_pace(5.833333), "5'50\"/km");
+        assert_eq!(format_pace(0.0), "0'00\"/km");
+        // Near whole minute: carry rounded 60s → next minute (not 5'60").
+        assert_eq!(format_pace(5.9967), "6'00\"/km");
+        assert_eq!(format_pace(f64::NAN), "--");
+        assert_eq!(format_pace(-1.0), "--");
     }
 
     #[test]

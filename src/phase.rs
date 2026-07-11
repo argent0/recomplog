@@ -25,6 +25,14 @@ pub fn format_phase_label(phase: &str) -> String {
     }
 }
 
+pub fn format_reps_with_phase(reps: i32, phase: &str) -> String {
+    match phase {
+        ECCENTRIC => format!("{reps} reps (eccentric)"),
+        CONCENTRIC => format!("{reps} reps (concentric)"),
+        _ => format!("{reps} reps"),
+    }
+}
+
 pub fn name_contains_phase_info(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if lower.contains(ECCENTRIC) || lower.contains(CONCENTRIC) {

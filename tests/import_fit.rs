@@ -200,6 +200,24 @@ fn import_fit_zepp_running_e2e() {
         efforts.iter().any(|e| e["label"] == "1 km"),
         "expected 1 km best effort: {efforts:?}"
     );
+    // Top-level cardio_summary (repslog workout view parity)
+    let cs = &show_v["cardio_summary"];
+    assert!(cs.is_object(), "expected cardio_summary, got {cs:?}");
+    assert!(cs["total_distance_km"].as_f64().unwrap_or(0.0) > 7.0);
+    assert!(cs["total_duration_seconds"].as_u64().unwrap_or(0) > 0);
+    assert!(cs["track"].is_object());
+
+    // Human mode: rich cardio / track / splits sections (not just a one-liner)
+    bin()
+        .args(["--db", &db_s, "workout", "show", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("CARDIO SUMMARY"))
+        .stdout(predicate::str::contains("TRACK METRICS"))
+        .stdout(predicate::str::contains("COMPUTED KM SPLITS"))
+        .stdout(predicate::str::contains("EXERCISES"))
+        .stdout(predicate::str::contains("8.03 km"))
+        .stdout(predicate::str::contains("156 bpm"));
 }
 
 #[test]

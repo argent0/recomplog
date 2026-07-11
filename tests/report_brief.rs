@@ -195,7 +195,8 @@ fn brief_human_has_all_section_headers() {
         .stdout(predicate::str::contains("Push"))
         // Today's workout is shown in full detail (workout show shape).
         .stdout(predicate::str::contains("bench press"))
-        .stdout(predicate::str::contains("set 1:"));
+        .stdout(predicate::str::contains("EXERCISES"))
+        .stdout(predicate::str::contains("100.00 kg"));
 }
 
 #[test]

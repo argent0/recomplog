@@ -9,9 +9,12 @@ use crate::load_type;
 use crate::models::{Exercise, HeartRateZones, Laps, Success, Trackpoint};
 use crate::phase;
 use crate::sanity::{self, ProposedSetMetrics};
-use crate::track_metrics::{compute, compute_with_zones, TrackMetrics, ZoneRecomputeContext};
+use crate::track_metrics::{
+    compute, compute_with_zones, RouteKind, TrackMetrics, ZoneRecomputeContext,
+};
 use crate::utils::{
-    parse_flexible_datetime, print_error_json, print_json, print_table, quiet_print,
+    format_duration, format_hr_zones_bar, format_pace, parse_flexible_datetime, print_error_json,
+    print_json, print_table, quiet_print,
 };
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -117,21 +120,30 @@ pub fn handle(
             } else if rows.is_empty() {
                 println!("(no workouts)");
             } else {
-                let table_rows: Vec<Vec<String>> = rows
-                    .iter()
-                    .map(|w| {
-                        vec![
-                            w["id"].to_string(),
-                            w["started_at"].as_str().unwrap_or("").to_string(),
-                            w["workout_type"].as_str().unwrap_or("").to_string(),
-                            w["duration_minutes"]
-                                .as_i64()
-                                .map(|d| d.to_string())
-                                .unwrap_or_default(),
-                        ]
-                    })
-                    .collect();
-                print_table(vec!["id", "started", "type", "min"], table_rows);
+                let mut table_rows = Vec::new();
+                for w in &rows {
+                    let id = w["id"].as_i64().unwrap_or(0);
+                    let summary = workout_list_summary(
+                        &conn,
+                        id,
+                        w["workout_type"].as_str(),
+                        w["notes"].as_str(),
+                    )?;
+                    table_rows.push(vec![
+                        id.to_string(),
+                        w["started_at"].as_str().unwrap_or("").to_string(),
+                        w["workout_type"].as_str().unwrap_or("").to_string(),
+                        w["duration_minutes"]
+                            .as_i64()
+                            .map(|d| d.to_string())
+                            .unwrap_or_default(),
+                        summary,
+                    ]);
+                }
+                print_table(
+                    vec!["ID", "Started At", "Type", "Dur", "Summary"],
+                    table_rows,
+                );
             }
             Ok(())
         }
@@ -332,41 +344,372 @@ fn track_metrics_for_set(
     Ok(compute_with_zones(&points, distance_km, &ctx))
 }
 
-fn format_secs_compact(secs: u32) -> String {
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
+fn is_cardio_set(s: &serde_json::Value) -> bool {
+    s["distance_km"].as_f64().is_some()
+        || s["duration_seconds"].as_i64().is_some()
+        || s["avg_heart_rate_bpm"].as_f64().is_some()
+}
+
+/// One-line list summary: cardio stats when present, else workout notes (repslog parity).
+fn workout_list_summary(
+    conn: &Connection,
+    workout_id: i64,
+    workout_type: Option<&str>,
+    notes: Option<&str>,
+) -> Result<String> {
+    let mut stmt = conn.prepare(
+        r#"SELECT s.distance_km, s.duration_seconds, s.avg_heart_rate_bpm
+           FROM exercise_sets s
+           JOIN workout_exercises we ON we.id = s.workout_exercise_id
+           WHERE we.workout_id = ?1"#,
+    )?;
+    let mut total_distance = 0.0f64;
+    let mut total_duration: u32 = 0;
+    let mut hr_samples: Vec<f64> = Vec::new();
+    let mut cardio_found = false;
+    let mut rows = stmt.query([workout_id])?;
+    while let Some(r) = rows.next()? {
+        let dist: Option<f64> = r.get(0)?;
+        let dur: Option<i64> = r.get(1)?;
+        let hr: Option<f64> = r.get(2)?;
+        if let Some(d) = dist {
+            total_distance += d;
+            cardio_found = true;
+        }
+        if let Some(d) = dur {
+            total_duration = total_duration.saturating_add(d.max(0) as u32);
+            cardio_found = true;
+        }
+        if let Some(h) = hr {
+            hr_samples.push(h);
+            cardio_found = true;
+        }
+    }
+
+    if cardio_found {
+        let pace = if total_distance > 0.0 {
+            format_pace((total_duration as f64 / 60.0) / total_distance)
+        } else {
+            "--".to_string()
+        };
+        let avg_hr = if hr_samples.is_empty() {
+            "--".to_string()
+        } else {
+            format!(
+                "{:.0}",
+                hr_samples.iter().sum::<f64>() / hr_samples.len() as f64
+            )
+        };
+        Ok(format!(
+            "{} • {:.2} km • {} • {} • {} bpm",
+            workout_type.unwrap_or("Run"),
+            total_distance,
+            format_duration(total_duration),
+            pace,
+            avg_hr
+        ))
     } else {
-        format!("{m}:{s:02}")
+        Ok(notes.unwrap_or("").to_string())
     }
 }
 
-fn format_pace_min_per_km(pace: f64) -> String {
-    if !pace.is_finite() || pace <= 0.0 {
-        return "--".into();
-    }
-    let total_secs = (pace * 60.0).round() as i64;
-    let m = total_secs / 60;
-    let s = total_secs % 60;
-    format!("{m}:{s:02}/km")
+fn zones_total_seconds(z: &HeartRateZones) -> u32 {
+    z.z1_seconds + z.z2_seconds + z.z3_seconds + z.z4_seconds + z.z5_seconds
 }
 
-fn print_track_metrics_oneline(m: &TrackMetrics) {
-    let mut parts = vec![format!("{} samples", m.sample_count)];
-    parts.push(format!(
-        "moving {} (stopped {})",
-        format_secs_compact(m.moving_seconds),
-        format_secs_compact(m.stopped_seconds)
-    ));
-    if let Some(p) = m.moving_pace_min_per_km {
-        parts.push(format!("pace ~{}", format_pace_min_per_km(p)));
+fn parse_zones_value(v: &serde_json::Value) -> Option<HeartRateZones> {
+    if v.is_null() {
+        return None;
     }
-    if let Some(a) = m.ascent_m {
-        parts.push(format!("↑{a:.0}m"));
+    serde_json::from_value(v.clone()).ok()
+}
+
+fn parse_laps_value(v: &serde_json::Value) -> Vec<crate::models::Lap> {
+    if v.is_null() {
+        return Vec::new();
     }
-    println!("       track: {}", parts.join(" · "));
+    if let Ok(laps) = serde_json::from_value::<Laps>(v.clone()) {
+        return laps.0;
+    }
+    if let Ok(laps) = serde_json::from_value::<Vec<crate::models::Lap>>(v.clone()) {
+        return laps;
+    }
+    Vec::new()
+}
+
+/// Aggregate cardio fields across all cardio sets (repslog `cardio_summary` parity).
+fn build_cardio_summary(exercises: &[serde_json::Value]) -> Option<serde_json::Value> {
+    let mut total_dist = 0.0f64;
+    let mut total_dur: u32 = 0;
+    let mut total_cals: i32 = 0;
+    let mut hr_samples: Vec<f64> = Vec::new();
+    let mut max_hr = 0.0f64;
+    let mut aggregated_zones = HeartRateZones::default();
+    let mut cadence_samples: Vec<f64> = Vec::new();
+    let mut ascent = 0.0f64;
+    let mut descent = 0.0f64;
+    let mut laps_all: Vec<crate::models::Lap> = Vec::new();
+    let mut primary_track: Option<serde_json::Value> = None;
+    let mut any = false;
+
+    for ex in exercises {
+        let empty = vec![];
+        for s in ex["sets"].as_array().unwrap_or(&empty) {
+            if !is_cardio_set(s) {
+                continue;
+            }
+            any = true;
+            total_dist += s["distance_km"].as_f64().unwrap_or(0.0);
+            total_dur += s["duration_seconds"].as_i64().unwrap_or(0).max(0) as u32;
+            total_cals += s["calories_burned"].as_i64().unwrap_or(0) as i32;
+            if let Some(hr) = s["avg_heart_rate_bpm"].as_f64() {
+                hr_samples.push(hr);
+            }
+            if let Some(hr) = s["max_heart_rate_bpm"].as_f64() {
+                if hr > max_hr {
+                    max_hr = hr;
+                }
+            }
+            if let Some(z) = parse_zones_value(&s["heart_rate_zones"]) {
+                aggregated_zones.z1_seconds += z.z1_seconds;
+                aggregated_zones.z2_seconds += z.z2_seconds;
+                aggregated_zones.z3_seconds += z.z3_seconds;
+                aggregated_zones.z4_seconds += z.z4_seconds;
+                aggregated_zones.z5_seconds += z.z5_seconds;
+            }
+            if let Some(c) = s["avg_cadence_spm"].as_f64() {
+                cadence_samples.push(c);
+            }
+            ascent += s["total_ascent_m"].as_f64().unwrap_or(0.0);
+            descent += s["total_descent_m"].as_f64().unwrap_or(0.0);
+            laps_all.extend(parse_laps_value(&s["laps"]));
+            if primary_track.is_none() {
+                if let Some(tm) = s.get("track_metrics") {
+                    if !tm.is_null() {
+                        primary_track = Some(tm.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if !any {
+        return None;
+    }
+
+    let avg_hr = if hr_samples.is_empty() {
+        None
+    } else {
+        Some((hr_samples.iter().sum::<f64>() / hr_samples.len() as f64).round())
+    };
+    let avg_pace = if total_dist > 0.0 {
+        Some((total_dur as f64 / 60.0) / total_dist)
+    } else {
+        None
+    };
+    let avg_cadence = if cadence_samples.is_empty() {
+        None
+    } else {
+        Some(cadence_samples.iter().sum::<f64>() / cadence_samples.len() as f64)
+    };
+    let zones_json = if zones_total_seconds(&aggregated_zones) > 0 {
+        Some(aggregated_zones)
+    } else {
+        None
+    };
+
+    Some(serde_json::json!({
+        "total_distance_km": total_dist,
+        "total_duration_seconds": total_dur,
+        "avg_pace_min_per_km": avg_pace,
+        "avg_heart_rate_bpm": avg_hr,
+        "max_heart_rate_bpm": if max_hr > 0.0 { Some(max_hr.round()) } else { None },
+        "total_calories": total_cals,
+        "avg_cadence_spm": avg_cadence,
+        "total_ascent_m": if ascent > 0.0 { Some(ascent) } else { None },
+        "total_descent_m": if descent > 0.0 { Some(descent) } else { None },
+        "hr_zones": zones_json,
+        "laps": if laps_all.is_empty() { None } else { Some(laps_all) },
+        "track": primary_track,
+    }))
+}
+
+fn print_track_metrics(
+    m: &TrackMetrics,
+    device_distance_km: Option<f64>,
+    stored_zones_empty: bool,
+    show_synthetic_splits: bool,
+) {
+    println!("\nTRACK METRICS");
+    println!("  Samples  {}", m.sample_count);
+
+    let moving_pace = m
+        .moving_pace_min_per_km
+        .map(format_pace)
+        .unwrap_or_else(|| "--".into());
+    println!(
+        "  Moving   {}  (stopped {})    Moving pace  {}",
+        format_duration(m.moving_seconds),
+        format_duration(m.stopped_seconds),
+        moving_pace
+    );
+
+    if let Some(ref pace) = m.pace {
+        let cv = m
+            .pace_cv
+            .map(|c| format!("  · CV {:.0}%", c * 100.0))
+            .unwrap_or_default();
+        println!(
+            "  Pace     med {}  · {}–{}{}",
+            format_pace(pace.median),
+            format_pace(pace.min),
+            format_pace(pace.max),
+            cv
+        );
+    }
+
+    if !m.best_efforts.is_empty() {
+        let parts: Vec<String> = m
+            .best_efforts
+            .iter()
+            .take(4)
+            .map(|b| {
+                if let Some(dur) = b.duration_seconds {
+                    if b.label.contains("min") {
+                        format!(
+                            "{} {}",
+                            b.label,
+                            b.distance_km
+                                .map(|d| format!("{d:.2} km"))
+                                .unwrap_or_else(|| "--".into())
+                        )
+                    } else {
+                        format!("{} {}", b.label, format_duration(dur))
+                    }
+                } else {
+                    b.label.clone()
+                }
+            })
+            .collect();
+        println!("  Best     {}", parts.join("  ·  "));
+    }
+
+    if let Some(ref cad) = m.cadence {
+        let cv = m
+            .cadence_cv
+            .map(|c| format!("  · CV {:.0}%", c * 100.0))
+            .unwrap_or_default();
+        let stride = m
+            .avg_stride_m
+            .map(|s| format!("  · stride ~{s:.2} m"))
+            .unwrap_or_default();
+        println!(
+            "  Cadence  med {:.0}  · {:.0}–{:.0}{}{}  (device units)",
+            cad.median, cad.min, cad.max, cv, stride
+        );
+    }
+
+    if m.elev_min_m.is_some() || m.elev_max_m.is_some() {
+        let mut parts = Vec::new();
+        if let (Some(lo), Some(hi)) = (m.elev_min_m, m.elev_max_m) {
+            parts.push(format!("{lo:.0}–{hi:.0} m"));
+        }
+        if let Some(net) = m.elev_net_m {
+            parts.push(format!("net {net:+.0} m"));
+        }
+        if let (Some(a), Some(d)) = (m.ascent_m, m.descent_m) {
+            parts.push(format!("↑{a:.0} ↓{d:.0} (smoothed)"));
+        }
+        if let Some(gap) = m.grade_adj_pace_min_per_km {
+            parts.push(format!("GAP {}", format_pace(gap)));
+        }
+        if let Some(vam) = m.vam_m_per_hour {
+            parts.push(format!("VAM {vam:.0} m/h"));
+        }
+        if !parts.is_empty() {
+            println!("  Elev     {}", parts.join("  ·  "));
+        }
+    }
+
+    {
+        let mut hr_parts = Vec::new();
+        if let Some(min) = m.hr_min {
+            hr_parts.push(format!("min {min:.0}"));
+        }
+        if let Some(drift) = m.hr_drift_pct {
+            hr_parts.push(format!("drift {drift:+.1}%"));
+        }
+        if !hr_parts.is_empty() {
+            println!("  HR       {}", hr_parts.join("  ·  "));
+        }
+    }
+
+    if stored_zones_empty {
+        if let Some(ref z) = m.hr_zones_recomputed {
+            if zones_total_seconds(z) > 0 {
+                println!("  Track zones: {}", format_hr_zones_bar(z));
+            }
+        }
+    }
+
+    if let Some(ref route) = m.route {
+        let kind = match route.kind {
+            RouteKind::Loop => "loop",
+            RouteKind::PointToPoint => "point-to-point",
+            RouteKind::Unknown => "unknown",
+        };
+        let mut parts = vec![kind.to_string()];
+        if let Some(gps) = route.gps_distance_km {
+            if let Some(dev) = device_distance_km {
+                parts.push(format!("GPS {gps:.2} km (device {dev:.2})"));
+            } else {
+                parts.push(format!("GPS {gps:.2} km"));
+            }
+        }
+        if let Some(gap) = route.start_end_gap_m {
+            parts.push(format!("start–end {gap:.0} m"));
+        }
+        println!("  Route    {}", parts.join("  ·  "));
+    }
+
+    if show_synthetic_splits {
+        let full: Vec<_> = m
+            .synthetic_km_splits
+            .iter()
+            .filter(|s| !s.partial || s.distance_km >= 0.2)
+            .collect();
+        if full.iter().any(|s| !s.partial) {
+            println!("\nCOMPUTED KM SPLITS");
+            let show_hr = full.iter().any(|s| s.avg_hr.is_some());
+            let mut rows = Vec::new();
+            for s in full {
+                let label = if s.partial {
+                    format!("{:.2}*", s.distance_km)
+                } else {
+                    s.km_index.to_string()
+                };
+                let mut row = vec![
+                    label,
+                    format!("{:.2} km", s.distance_km),
+                    format_duration(s.duration_seconds),
+                    format_pace(s.pace_min_per_km),
+                ];
+                if show_hr {
+                    row.push(
+                        s.avg_hr
+                            .map(|h| format!("{h:.0}"))
+                            .unwrap_or_else(|| "--".into()),
+                    );
+                }
+                rows.push(row);
+            }
+            if show_hr {
+                print_table(vec!["Km", "Distance", "Time", "Pace", "Avg HR"], rows);
+            } else {
+                print_table(vec!["Km", "Distance", "Time", "Pace"], rows);
+            }
+        }
+    }
 }
 
 /// Load full workout detail (header + exercises + sets), same shape as `workout show`.
@@ -399,7 +742,7 @@ pub(crate) fn fetch_workout_detail(
     let started_at = w["started_at"].as_str().unwrap_or("").to_string();
     let activity_date = activity_date_prefix(&started_at);
     let mut stmt = conn.prepare(
-        r#"SELECT we.id, e.name, we."order", we.notes, e.load_type
+        r#"SELECT we.id, e.name, we."order", we.notes, e.load_type, we.goal_reps
            FROM workout_exercises we
            JOIN exercises e ON e.id = we.exercise_id
            WHERE we.workout_id = ?1
@@ -413,12 +756,13 @@ pub(crate) fn fetch_workout_detail(
                 r.get::<_, i64>(2)?,
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, Option<i64>>(5)?,
             ))
         })?
         .filter_map(|r| r.ok())
         .collect();
     let mut ex_json = Vec::new();
-    for (we_id, name, order, notes, load_type) in exercises {
+    for (we_id, name, order, notes, load_type, goal_reps) in exercises {
         let sets = list_sets_json(conn, we_id, &activity_date)?;
         ex_json.push(serde_json::json!({
             "workout_exercise_id": we_id,
@@ -426,39 +770,314 @@ pub(crate) fn fetch_workout_detail(
             "order": order,
             "notes": notes,
             "load_type": load_type,
+            "goal_reps": goal_reps,
             "sets": sets,
         }));
+    }
+    if let Some(summary) = build_cardio_summary(&ex_json) {
+        w["cardio_summary"] = summary;
     }
     w["exercises"] = serde_json::json!(ex_json);
     Ok(Some(w))
 }
 
 /// Human-readable dump matching `workout show` (no `--json`).
+/// Cardio sessions include CARDIO SUMMARY / TRACK METRICS / splits (repslog parity).
 pub(crate) fn print_workout_detail(w: &serde_json::Value) {
     let id = w["id"].as_i64().unwrap_or(0);
-    println!(
-        "Workout {} — {} ({})",
-        id,
-        w["started_at"].as_str().unwrap_or(""),
-        w["workout_type"].as_str().unwrap_or("-")
-    );
+    println!("Workout ID: {id}");
+    println!("Type: {}", w["workout_type"].as_str().unwrap_or("General"));
+    println!("Started: {}", w["started_at"].as_str().unwrap_or(""));
+    if let Some(notes) = w["notes"].as_str() {
+        if !notes.is_empty() {
+            println!("Notes: {notes}");
+        }
+    }
+
     let empty = vec![];
-    for ex in w["exercises"].as_array().unwrap_or(&empty) {
-        println!(
-            "  {}. {} (we_id={})",
-            ex["order"], ex["name"], ex["workout_exercise_id"]
-        );
+    let exercises = w["exercises"].as_array().unwrap_or(&empty);
+
+    // Collect cardio sets for summary blocks.
+    let mut cardio_sets: Vec<(&serde_json::Value, &serde_json::Value)> = Vec::new();
+    for ex in exercises {
         for s in ex["sets"].as_array().unwrap_or(&empty) {
-            println!(
-                "     set {}: reps={:?} weight={:?} phase={}",
-                s["set_number"], s["reps"], s["weight_kg"], s["phase"]
-            );
+            if is_cardio_set(s) {
+                cardio_sets.push((ex, s));
+            }
+        }
+    }
+
+    if !cardio_sets.is_empty() {
+        println!("\nCARDIO SUMMARY");
+        let mut total_dist = 0.0f64;
+        let mut total_dur: u32 = 0;
+        let mut total_cals: i32 = 0;
+        let mut hr_samples: Vec<f64> = Vec::new();
+        let mut max_hr = 0.0f64;
+        let mut aggregated_zones = HeartRateZones::default();
+        let mut cadence_samples: Vec<f64> = Vec::new();
+        let mut ascent = 0.0f64;
+        let mut descent = 0.0f64;
+
+        for (_, s) in &cardio_sets {
+            total_dist += s["distance_km"].as_f64().unwrap_or(0.0);
+            total_dur += s["duration_seconds"].as_i64().unwrap_or(0).max(0) as u32;
+            total_cals += s["calories_burned"].as_i64().unwrap_or(0) as i32;
+            if let Some(hr) = s["avg_heart_rate_bpm"].as_f64() {
+                hr_samples.push(hr);
+            }
+            if let Some(hr) = s["max_heart_rate_bpm"].as_f64() {
+                if hr > max_hr {
+                    max_hr = hr;
+                }
+            }
+            if let Some(z) = parse_zones_value(&s["heart_rate_zones"]) {
+                aggregated_zones.z1_seconds += z.z1_seconds;
+                aggregated_zones.z2_seconds += z.z2_seconds;
+                aggregated_zones.z3_seconds += z.z3_seconds;
+                aggregated_zones.z4_seconds += z.z4_seconds;
+                aggregated_zones.z5_seconds += z.z5_seconds;
+            }
+            if let Some(c) = s["avg_cadence_spm"].as_f64() {
+                cadence_samples.push(c);
+            }
+            ascent += s["total_ascent_m"].as_f64().unwrap_or(0.0);
+            descent += s["total_descent_m"].as_f64().unwrap_or(0.0);
+        }
+
+        let avg_hr = if hr_samples.is_empty() {
+            0.0
+        } else {
+            hr_samples.iter().sum::<f64>() / hr_samples.len() as f64
+        };
+        let avg_pace = if total_dist > 0.0 {
+            (total_dur as f64 / 60.0) / total_dist
+        } else {
+            0.0
+        };
+        let hr_display = if hr_samples.is_empty() && max_hr == 0.0 {
+            "--".to_string()
+        } else {
+            format!("{} / {} bpm", avg_hr.round(), max_hr.round())
+        };
+        let cadence_display = if cadence_samples.is_empty() {
+            "--".to_string()
+        } else {
+            let avg_c = cadence_samples.iter().sum::<f64>() / cadence_samples.len() as f64;
+            format!("{avg_c:.0} spm")
+        };
+        let elev_display = if ascent > 0.0 || descent > 0.0 {
+            format!("↑{ascent:.0}m ↓{descent:.0}m")
+        } else {
+            "--".to_string()
+        };
+
+        print_table(
+            vec![
+                "Total Dist",
+                "Total Time",
+                "Avg Pace",
+                "Avg/Max HR",
+                "Calories",
+                "Cadence",
+                "Elev",
+            ],
+            vec![vec![
+                format!("{total_dist:.2} km"),
+                format_duration(total_dur),
+                format_pace(avg_pace),
+                hr_display,
+                format!("{total_cals} kcal"),
+                cadence_display,
+                elev_display,
+            ]],
+        );
+
+        if total_dur > 0 && zones_total_seconds(&aggregated_zones) > 0 {
+            println!("HR Zones: {}", format_hr_zones_bar(&aggregated_zones));
+        }
+
+        let mut all_laps: Vec<crate::models::Lap> = Vec::new();
+        for (_, s) in &cardio_sets {
+            all_laps.extend(parse_laps_value(&s["laps"]));
+        }
+        if !all_laps.is_empty() {
+            println!("\nLAPS / SPLITS");
+            let show_lap_hr = all_laps.iter().any(|l| l.avg_heart_rate_bpm.is_some());
+            let mut lap_rows = Vec::new();
+            for lap in all_laps {
+                let mut row = vec![
+                    lap.lap_number.to_string(),
+                    format!("{:.2} km", lap.distance_km),
+                    format_duration(lap.duration_seconds),
+                    format_pace(lap.pace_min_per_km),
+                ];
+                if show_lap_hr {
+                    row.push(
+                        lap.avg_heart_rate_bpm
+                            .map(|h| format!("{h:.0}"))
+                            .unwrap_or_else(|| "--".into()),
+                    );
+                }
+                lap_rows.push(row);
+            }
+            if show_lap_hr {
+                print_table(vec!["Lap", "Distance", "Time", "Pace", "Avg HR"], lap_rows);
+            } else {
+                print_table(vec!["Lap", "Distance", "Time", "Pace"], lap_rows);
+            }
+        }
+
+        // Trackpoint-derived metrics from first cardio set that has them.
+        for (_, s) in &cardio_sets {
             if let Some(tm_val) = s.get("track_metrics") {
+                if tm_val.is_null() {
+                    continue;
+                }
                 if let Ok(tm) = serde_json::from_value::<TrackMetrics>(tm_val.clone()) {
-                    print_track_metrics_oneline(&tm);
+                    let has_device_laps = !parse_laps_value(&s["laps"]).is_empty();
+                    let stored_zones_empty = parse_zones_value(&s["heart_rate_zones"])
+                        .map(|z| zones_total_seconds(&z) == 0)
+                        .unwrap_or(true);
+                    print_track_metrics(
+                        &tm,
+                        s["distance_km"].as_f64(),
+                        stored_zones_empty,
+                        !has_device_laps,
+                    );
+                    break;
                 }
             }
         }
+    }
+
+    println!("\nEXERCISES");
+    for ex in exercises {
+        let name = ex["name"].as_str().unwrap_or("?");
+        let we_id = ex["workout_exercise_id"].as_i64().unwrap_or(0);
+        let load_type = ex["load_type"].as_str().unwrap_or("external");
+        println!("{name} (WE ID: {we_id})");
+        if let Some(notes) = ex["notes"].as_str() {
+            if !notes.is_empty() {
+                println!("Notes: {notes}");
+            }
+        }
+
+        let mut set_rows = Vec::new();
+        let mut left_reps = 0i32;
+        let mut right_reps = 0i32;
+        let mut both_or_unspec_reps = 0i32;
+        let mut has_side = false;
+        let goal_reps = ex["goal_reps"].as_i64().map(|g| g as i32);
+
+        for s in ex["sets"].as_array().unwrap_or(&empty) {
+            if let Some(sd) = s["side"].as_str() {
+                has_side = true;
+                match sd {
+                    "left" => left_reps += s["reps"].as_i64().unwrap_or(0) as i32,
+                    "right" => right_reps += s["reps"].as_i64().unwrap_or(0) as i32,
+                    _ => both_or_unspec_reps += s["reps"].as_i64().unwrap_or(0) as i32,
+                }
+            } else {
+                both_or_unspec_reps += s["reps"].as_i64().unwrap_or(0) as i32;
+            }
+
+            let cluster_label = s["cluster_id"]
+                .as_i64()
+                .map(|cid| format!(" [C{cid}]"))
+                .unwrap_or_default();
+
+            let mut details = Vec::new();
+            if let Some(reps) = s["reps"].as_i64() {
+                details.push(phase::format_reps_with_phase(
+                    reps as i32,
+                    s["phase"].as_str().unwrap_or("full"),
+                ));
+            }
+            let load = bodyweight::format_load_display(
+                load_type,
+                s["weight_kg"].as_f64(),
+                s["external_load_kg"].as_f64(),
+            );
+            if !load.is_empty() {
+                details.push(load);
+            }
+            if let Some(dist) = s["distance_km"].as_f64() {
+                details.push(format!("{dist:.2} km"));
+            }
+            if let Some(dur) = s["duration_seconds"].as_i64() {
+                details.push(format_duration(dur.max(0) as u32));
+            }
+            if let Some(rpe) = s["rpe"].as_f64() {
+                details.push(format!("RPE {rpe}"));
+            }
+            if let Some(rir) = s["rir"].as_f64() {
+                details.push(format!("RIR {rir}"));
+            }
+
+            let cardio_info = if s["avg_heart_rate_bpm"].as_f64().is_some() {
+                format!(
+                    "{} bpm | {} | {} cal",
+                    s["avg_heart_rate_bpm"]
+                        .as_f64()
+                        .map(|v| v.round().to_string())
+                        .unwrap_or_else(|| "--".into()),
+                    s["avg_pace_min_per_km"]
+                        .as_f64()
+                        .map(format_pace)
+                        .unwrap_or_else(|| "--".into()),
+                    s["calories_burned"]
+                        .as_i64()
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "--".into())
+                )
+            } else {
+                String::new()
+            };
+
+            let side_label = s["side"]
+                .as_str()
+                .map(|sd| sd.to_uppercase())
+                .unwrap_or_else(|| "-".to_string());
+            let phase_label = {
+                let label = phase::format_phase_label(s["phase"].as_str().unwrap_or("full"));
+                if label.is_empty() {
+                    "full".to_string()
+                } else {
+                    label
+                }
+            };
+            set_rows.push(vec![
+                format!("{}{}", s["set_number"].as_i64().unwrap_or(0), cluster_label),
+                side_label,
+                phase_label,
+                details.join(" • "),
+                cardio_info,
+                s["notes"].as_str().unwrap_or("").to_string(),
+            ]);
+        }
+
+        if has_side || goal_reps.is_some() {
+            let mut summary_parts = Vec::new();
+            if left_reps > 0 || right_reps > 0 {
+                summary_parts.push(format!("Left: {left_reps} reps | Right: {right_reps} reps"));
+            }
+            if both_or_unspec_reps > 0 && (left_reps > 0 || right_reps > 0) {
+                summary_parts.push(format!("Other: {both_or_unspec_reps} reps"));
+            }
+            if let Some(g) = goal_reps {
+                let actual = left_reps + right_reps + both_or_unspec_reps;
+                summary_parts.push(format!("Goal: {g} | Actual: {actual}"));
+            }
+            if !summary_parts.is_empty() {
+                println!("  {}", summary_parts.join("  •  "));
+            }
+        }
+
+        print_table(
+            vec!["Set #", "Side", "Phase", "Details", "Cardio", "Notes"],
+            set_rows,
+        );
     }
 }
 
@@ -1718,7 +2337,19 @@ fn handle_set(
                     );
                     if let Some(tm_val) = s.get("track_metrics") {
                         if let Ok(tm) = serde_json::from_value::<TrackMetrics>(tm_val.clone()) {
-                            print_track_metrics_oneline(&tm);
+                            let mut parts = vec![format!("{} samples", tm.sample_count)];
+                            parts.push(format!(
+                                "moving {} (stopped {})",
+                                format_duration(tm.moving_seconds),
+                                format_duration(tm.stopped_seconds)
+                            ));
+                            if let Some(p) = tm.moving_pace_min_per_km {
+                                parts.push(format!("pace ~{}", format_pace(p)));
+                            }
+                            if let Some(a) = tm.ascent_m {
+                                parts.push(format!("↑{a:.0}m"));
+                            }
+                            println!("  track: {}", parts.join(" · "));
                         }
                     }
                 }
