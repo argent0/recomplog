@@ -57,10 +57,12 @@ recomplog nutrition consumption create --product 12 --quantity 0.8 --date today
 recomplog report html --days 14 --name dashboard.html
 recomplog report body --days 30
 
-# Multi-section terminal brief (today consumption + workouts, then N-day lists)
+# Multi-section terminal brief (focal-day consumption + workouts, then N-day lists)
 recomplog report brief
 recomplog report brief --days 14
+recomplog report brief --date yesterday --days 7
 recomplog --json report brief --days 7
+recomplog --json report brief --date 2020-06-15 --days 3
 
 # Nutrition: period totals (macros + micronutrients)
 recomplog --json report nutrition summary --days 7
@@ -77,12 +79,14 @@ recomplog --json report nutrition spending --since 2026-01-01 --by product
 
 `report brief` prints (human) or returns (JSON) in one shot:
 
-1. Today's consumptions
-2. Nutrition by day (macros, last N days; default 7)
-3. Measurements (last N days)
-4. Sleep (last N days)
-5. Today's workouts **in full detail** (same shape as `workout show`: exercises + sets)
+1. Focal-day consumptions (default: today; set with `--date`)
+2. Nutrition by day (macros, last N days ending on the focal day; default 7)
+3. Measurements (last N days ending on the focal day)
+4. Sleep (last N days ending on the focal day)
+5. Focal-day workouts **in full detail** (same shape as `workout show`: exercises + sets)
 6. Previous N days workout overview (session/volume stats + compact list)
+
+`--date` accepts flexible forms (`today`, `yesterday`, `YYYY-MM-DD`, `last monday`, …). Lookback (`--days`) is inclusive of the anchor day for nutrition/body/sleep; previous workouts use the N days *before* the anchor.
 
 Nutrition report date flags: `--days N` cannot be combined with `--since` / `--until`.
 

@@ -49,7 +49,9 @@ pub fn handle(
             )
             .map_err(Into::into)
         }
-        ReportAction::Brief { days } => handle_brief(days, db_override, json),
+        ReportAction::Brief { days, date } => {
+            handle_brief(days, date.as_deref(), db_override, json)
+        }
         ReportAction::Nutrition { action } => handle_nutrition_report(action, db_override, json),
         ReportAction::Html {
             days,
@@ -61,25 +63,34 @@ pub fn handle(
 
 // ---------- Brief report (multi-section daily dump) ----------
 
-fn handle_brief(days: u32, db_override: Option<&str>, json: bool) -> Result<()> {
+fn handle_brief(
+    days: u32,
+    date: Option<&str>,
+    db_override: Option<&str>,
+    json: bool,
+) -> Result<()> {
     if days == 0 {
         return Err(anyhow!("--days must be >= 1"));
     }
 
-    let today = Local::now().date_naive();
-    let today_s = today.format("%Y-%m-%d").to_string();
-    let since_date = today - Duration::days(i64::from(days) - 1);
+    let local_today = Local::now().date_naive();
+    let anchor = match date {
+        Some(s) => crate::utils::parse_flexible_date(s)?,
+        None => local_today,
+    };
+    let anchor_s = anchor.format("%Y-%m-%d").to_string();
+    let since_date = anchor - Duration::days(i64::from(days) - 1);
     let since_s = since_date.format("%Y-%m-%d").to_string();
 
     let period = Period {
         since: Some(since_s.clone()),
-        until: Some(today_s.clone()),
+        until: Some(anchor_s.clone()),
         days: Some(days),
     };
 
-    // Previous N calendar days before today (same N as --days).
-    let prev_until = today - Duration::days(1);
-    let prev_since = today - Duration::days(i64::from(days));
+    // Previous N calendar days before the anchor (same N as --days).
+    let prev_until = anchor - Duration::days(1);
+    let prev_since = anchor - Duration::days(i64::from(days));
     let prev_since_s = prev_since.format("%Y-%m-%d").to_string();
     let prev_until_s = prev_until.format("%Y-%m-%d").to_string();
     let prev_period = Period {
@@ -90,26 +101,29 @@ fn handle_brief(days: u32, db_override: Option<&str>, json: bool) -> Result<()> 
 
     let conn = db::open_db(db_override)?;
 
-    let consumption_today = fetch_brief_consumptions(&conn, &today_s)?;
-    let nutrition_daily = build_nutrition_daily_report(
+    let consumption_today = fetch_brief_consumptions(&conn, &anchor_s)?;
+    // Pass explicit since/until so nutrition is anchored to `--date`, not wall-clock today.
+    let mut nutrition_daily = build_nutrition_daily_report(
         &conn,
         &NutritionPeriodArgs {
-            since: None,
-            until: None,
-            days: Some(days),
+            since: Some(since_s.clone()),
+            until: Some(anchor_s.clone()),
+            days: None,
         },
         NutritionReportValue::Macronutrients,
     )?;
-    let workouts_today = fetch_brief_workouts_detail_on_day(&conn, &today_s)?;
+    // Preserve --days on the nested period for agents (resolve path leaves it unset).
+    nutrition_daily.period.days = Some(days);
+    let workouts_today = fetch_brief_workouts_detail_on_day(&conn, &anchor_s)?;
     let previous_workouts = fetch_brief_workouts_in_range(&conn, &prev_since_s, &prev_until_s)?;
     let previous_overview = fetch_workout_period_overview(&conn, prev_period, previous_workouts)?;
 
     let repo = BodyRepository::new(conn);
     let measurements = repo
-        .list_measurements(Some(&since_s), Some(&today_s))
+        .list_measurements(Some(&since_s), Some(&anchor_s))
         .map_err(|e| anyhow!("{e}"))?;
     let sleep = repo
-        .list_sleeps(Some(&since_s), Some(&today_s))
+        .list_sleeps(Some(&since_s), Some(&anchor_s))
         .map_err(|e| anyhow!("{e}"))?;
 
     let report = BriefReport {
@@ -127,7 +141,12 @@ fn handle_brief(days: u32, db_override: Option<&str>, json: bool) -> Result<()> 
     if json {
         print_json(&report);
     } else {
-        print_brief_human(&report, days);
+        let day_label = if anchor == local_today {
+            "today".to_string()
+        } else {
+            anchor_s.clone()
+        };
+        print_brief_human(&report, days, &day_label);
     }
     Ok(())
 }
@@ -269,8 +288,8 @@ fn fetch_workout_period_overview(
     })
 }
 
-fn print_brief_human(report: &BriefReport, days: u32) {
-    println!("=== Consumption (today) ===");
+fn print_brief_human(report: &BriefReport, days: u32, day_label: &str) {
+    println!("=== Consumption ({day_label}) ===");
     if report.consumption_today.is_empty() {
         println!("(no consumptions)");
     } else {
@@ -293,7 +312,7 @@ fn print_brief_human(report: &BriefReport, days: u32) {
     print_sleep_table(&report.sleep);
 
     println!();
-    println!("=== Workouts (today) ===");
+    println!("=== Workouts ({day_label}) ===");
     if report.workouts.today.is_empty() {
         println!("(no workouts)");
     } else {

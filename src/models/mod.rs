@@ -274,20 +274,23 @@ pub struct WorkoutPeriodOverview {
     pub workouts: Vec<BriefWorkout>,
 }
 
-/// Today + previous lookback for training in `report brief`.
+/// Focal day + previous lookback for training in `report brief`.
 #[derive(Serialize, Debug, Clone)]
 pub struct BriefWorkouts {
-    /// Full detail per session today (same JSON shape as `workout show`).
+    /// Full detail per session on the focal day (same JSON shape as `workout show`).
+    /// Focal day is local today unless `report brief --date` is set.
     pub today: Vec<serde_json::Value>,
-    /// Overview of the N calendar days before today (same N as `--days`).
+    /// Overview of the N calendar days before the focal day (same N as `--days`).
     pub previous: WorkoutPeriodOverview,
 }
 
-/// Combined multi-section brief: today logs + N-day lookback lists.
+/// Combined multi-section brief: focal-day logs + N-day lookback lists.
 #[derive(Serialize, Debug)]
 pub struct BriefReport {
-    /// Lookback window for nutrition / measurements / sleep (includes today).
+    /// Lookback window for nutrition / measurements / sleep (includes focal day).
+    /// `until` is the anchor day (`--date` or today).
     pub period: Period,
+    /// Consumptions on the focal day (`period.until`).
     pub consumption_today: Vec<BriefConsumption>,
     pub nutrition_daily: NutritionDailyReport,
     pub measurements: Vec<Measurement>,

@@ -89,6 +89,7 @@ recomplog --json workout set add-cluster --workout 1 --exercise "bench press" --
 recomplog import fit activity.fit --exercise running
 recomplog import legacy --from-db ../bodylog/bodylog.db --dry-run
 recomplog --json report brief --days 7
+recomplog --json report brief --date yesterday --days 7
 recomplog report html --days 14 --name dashboard.html
 recomplog --json check missing --days 7 --workout-days 3
 ```

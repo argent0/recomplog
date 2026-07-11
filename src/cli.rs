@@ -1045,17 +1045,22 @@ pub enum ReportAction {
     Sleep(ReportRangeArgs),
     /// Combined recomposition dashboard data (JSON for agents).
     Summary(SummaryArgs),
-    /// Multi-section terminal brief: today consumption + full workout detail,
+    /// Multi-section terminal brief: focal-day consumption + full workout detail,
     /// then N-day nutrition / body / sleep / previous workouts overview.
     ///
     /// Replaces the multi-tool shell habit of listing consumption, nutrition,
-    /// measurements, and sleep in one shot. Today's workouts use the same
-    /// detail as `workout show` (exercises + sets).
+    /// measurements, and sleep in one shot. Focal-day workouts use the same
+    /// detail as `workout show` (exercises + sets). Use `--date` to anchor the
+    /// brief on a day other than today.
     Brief {
         /// Lookback for nutrition, measurements, sleep, and previous workouts.
-        /// Today's consumption and today's workouts always use the current local day.
+        /// Focal-day consumption and workouts use `--date` (default: today).
         #[arg(short, long, default_value_t = 7)]
         days: u32,
+        /// Anchor day for the brief (consumption + workouts that day; lookback ends here).
+        /// Flexible: today, yesterday, YYYY-MM-DD, last monday, …
+        #[arg(long)]
+        date: Option<String>,
     },
     /// Generate a self-contained mobile-friendly HTML dashboard report.
     Html {
