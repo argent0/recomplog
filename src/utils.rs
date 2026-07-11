@@ -1,4 +1,5 @@
 //! Shared helpers: tables, durations, flexible dates, JSON output.
+pub const DATETIME_FMT: &str = "%Y-%m-%d %H:%M:%S";
 
 use crate::error::RecomplogError;
 use anyhow::{anyhow, Result as AnyResult};

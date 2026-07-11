@@ -37,18 +37,31 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             if dry_run {
                 if json {
                     println!(
-                        r#"{{"success":true,"message":"dry-run: would initialize database"}}"#
+                        r#"{{"success":true,"message":"dry-run: would initialize database and seed exercises"}}"#
                     );
                 } else {
-                    println!("dry-run: would create/open database and apply migrations");
+                    println!(
+                        "dry-run: would create/open database, apply migrations, seed exercises"
+                    );
                 }
                 return Ok(());
             }
-            let _conn = db::open_db(db_override)?;
+            let conn = db::open_db(db_override)?;
+            let added = workout::seed_default_exercises(&conn)?;
             if json {
-                println!(r#"{{"success":true,"message":"database initialized"}}"#);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "success": true,
+                        "message": "database initialized",
+                        "added_exercises": added,
+                    }))?
+                );
             } else {
                 println!("Database initialized (or already up to date).");
+                for n in &added {
+                    println!("  seeded exercise: {n}");
+                }
             }
             Ok(())
         }
@@ -57,15 +70,15 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             dry_run,
             force: _,
         } => {
-            let target = 1;
+            let target = 2;
             if status || dry_run {
                 if json {
                     println!(
-                        r#"{{"current":1,"latest":{},"dry_run":{}}}"#,
+                        r#"{{"current":2,"latest":{},"dry_run":{}}}"#,
                         target, dry_run
                     );
                 } else {
-                    println!("Current schema version: 1 (target: {})", target);
+                    println!("Schema target version: {target} (applied automatically on open)");
                 }
                 return Ok(());
             }
@@ -79,7 +92,9 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             let mut repo = BodyRepository::new(conn);
             body::handle_check(&mut repo, args, sanity, json, quiet).map_err(Into::into)
         }
-        Commands::Workout { action } => workout::handle(action, db_override, json, quiet),
+        Commands::Workout { action } => {
+            workout::handle(action, db_override, &sanity.workout, json, quiet)
+        }
         Commands::Body { action } => {
             let conn = db::open_db(db_override)?;
             let mut repo = BodyRepository::new(conn);

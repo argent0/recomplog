@@ -1,9 +1,13 @@
+mod bodyweight;
 mod cli;
 mod commands;
 mod config;
 mod db;
 mod error;
+mod fit;
+mod load_type;
 mod models;
+mod phase;
 mod repository;
 mod sanity;
 mod utils;

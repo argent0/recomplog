@@ -44,7 +44,7 @@ pub fn open_db(override_path: Option<&str>) -> Result<Connection> {
 }
 
 /// Current schema version. Bump when adding a new migration block.
-const CURRENT_VERSION: i32 = 1;
+const CURRENT_VERSION: i32 = 2;
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i32 = conn
@@ -62,7 +62,37 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         apply_initial_schema(conn)?;
         conn.execute("PRAGMA user_version = 1", [])?;
     }
+    if current < 2 {
+        apply_v2_cardio_json(conn)?;
+        conn.execute("PRAGMA user_version = 2", [])?;
+    }
 
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    for n in names {
+        if n? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn apply_v2_cardio_json(conn: &Connection) -> Result<()> {
+    // Fresh DBs from v1 apply may already include columns if schema was updated;
+    // ALTER only when missing (idempotent for re-runs / mixed paths).
+    if !column_exists(conn, "exercise_sets", "heart_rate_zones")? {
+        conn.execute(
+            "ALTER TABLE exercise_sets ADD COLUMN heart_rate_zones TEXT",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "exercise_sets", "laps")? {
+        conn.execute("ALTER TABLE exercise_sets ADD COLUMN laps TEXT", [])?;
+    }
     Ok(())
 }
 
@@ -137,6 +167,8 @@ CREATE TABLE IF NOT EXISTS exercise_sets (
     total_descent_m REAL,
     date_of_birth TEXT,
     resting_hr_bpm REAL,
+    heart_rate_zones TEXT,
+    laps TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

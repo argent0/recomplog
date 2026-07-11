@@ -84,7 +84,9 @@ recomplog --json body measurement create --date today --weight-kg 81.2
 recomplog --json body sleep create --date today --total-sleep "7h 45m"
 recomplog --json nutrition product create "Oats" --tags breakfast
 recomplog --json workout list --days 14
-recomplog --json workout set add --workout 1 --exercise "bench press" --reps 5 --weight 100
+recomplog --json workout set add --workout 1 --exercise "bench press" --reps 5 --weight 100 --phase full
+recomplog --json workout set add-cluster --workout 1 --exercise "bench press" --reps "10,5,5" --weight 100 --phase full --rir "0,0,1" --effective-reps "6,4,3" --rest 15
+recomplog import fit activity.fit --exercise running
 recomplog import legacy --from-db ../bodylog/bodylog.db --dry-run
 recomplog report html --days 14 --name dashboard.html
 ```

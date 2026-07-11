@@ -2,30 +2,363 @@
 
 use crate::cli::ImportAction;
 use crate::db;
-use crate::utils::{print_error_json, print_json};
+use crate::fit::{parse_fit_path, ImportPlan};
+use crate::models::HrZoneProfile;
+use crate::utils::print_json;
 use anyhow::{anyhow, Result};
+use chrono::Datelike;
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
+use std::fs;
+use std::path::Path;
 
 pub fn handle(action: ImportAction, db_override: Option<&str>, json: bool) -> Result<()> {
     match action {
-        ImportAction::Fit { path, exercise } => {
-            if json {
-                print_error_json("FIT import not yet fully ported");
-            } else {
-                println!(
-                    "FIT import stub (path={}, exercise={:?}). Use import legacy for old DBs.",
-                    path, exercise
-                );
-            }
-            // Soft success for skeleton - return error so agents know
-            Err(anyhow!("FIT import not yet implemented"))
-        }
+        ImportAction::Fit {
+            path,
+            exercise,
+            workout_type,
+            notes,
+            force,
+            hr_zone_bounds,
+            no_profile_hr,
+            dry_run,
+        } => handle_fit(
+            &path,
+            exercise.as_deref(),
+            workout_type.as_deref(),
+            notes.as_deref(),
+            force,
+            hr_zone_bounds.as_deref(),
+            no_profile_hr,
+            dry_run,
+            db_override,
+            json,
+        ),
         ImportAction::Legacy {
             from_db,
             domain,
             dry_run,
         } => handle_legacy_import(&from_db, domain.as_deref(), dry_run, db_override, json),
     }
+}
+
+fn parse_hr_zone_bounds(s: &str) -> Result<[f64; 5]> {
+    let parts: Vec<&str> = s
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.len() != 5 {
+        return Err(anyhow!(
+            "expected 5 comma-separated bpm bounds for zones 1-5 (e.g. 120,140,160,175,190)"
+        ));
+    }
+    let mut out = [0.0; 5];
+    for (i, p) in parts.iter().enumerate() {
+        out[i] = p
+            .parse::<f64>()
+            .map_err(|_| anyhow!("invalid bpm value '{p}'"))?;
+        if out[i] <= 0.0 {
+            return Err(anyhow!("zone bound {} must be > 0", i + 1));
+        }
+        if i > 0 && out[i] < out[i - 1] {
+            return Err(anyhow!("zone bounds must be non-decreasing"));
+        }
+    }
+    Ok(out)
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    let bytes = fs::read(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn load_hr_profile(conn: &Connection) -> Option<HrZoneProfile> {
+    let dob: Option<String> = conn
+        .query_row(
+            "SELECT date_of_birth FROM user_profile WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .flatten();
+    let dob = dob?;
+    // median sleep HR last 14 days
+    let mut stmt = conn
+        .prepare(
+            "SELECT heart_rate_bpm FROM sleep
+             WHERE heart_rate_bpm IS NOT NULL
+               AND date >= date('now', '-14 days')
+             ORDER BY date DESC",
+        )
+        .ok()?;
+    let hrs: Vec<f64> = stmt
+        .query_map([], |r| r.get::<_, f64>(0))
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect();
+    let resting = if hrs.is_empty() {
+        None
+    } else {
+        let mut v = hrs;
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = v.len();
+        Some(if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            (v[n / 2 - 1] + v[n / 2]) / 2.0
+        })
+    };
+    // age-based HRmax Tanaka
+    let age = chrono::NaiveDate::parse_from_str(&dob, "%Y-%m-%d")
+        .ok()
+        .map(|d| {
+            let today = chrono::Local::now().date_naive();
+            (today.year() - d.year()) as u32
+        })?;
+    let hr_max = 208.0 - 0.7 * age as f64;
+    let (bounds, method) = if let Some(rhr) = resting {
+        if hr_max > rhr {
+            let fracs = [0.60, 0.70, 0.80, 0.90, 1.00];
+            let hrr = hr_max - rhr;
+            let mut out = [0.0; 5];
+            for (i, p) in fracs.iter().enumerate() {
+                out[i] = (rhr + p * hrr).round();
+            }
+            (out, format!("karvonen age={age} rhr={rhr:.0}"))
+        } else {
+            return None;
+        }
+    } else {
+        // %HRmax only
+        let fracs = [0.60, 0.70, 0.80, 0.90, 1.00];
+        let mut out = [0.0; 5];
+        for (i, p) in fracs.iter().enumerate() {
+            out[i] = (hr_max * p).round();
+        }
+        (out, format!("pct_hrmax age={age}"))
+    };
+    Some(HrZoneProfile {
+        date_of_birth: dob,
+        resting_hr_bpm: resting,
+        bounds,
+        method,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_fit(
+    path: &str,
+    exercise: Option<&str>,
+    workout_type: Option<&str>,
+    notes: Option<&str>,
+    force: bool,
+    hr_zone_bounds: Option<&str>,
+    no_profile_hr: bool,
+    dry_run: bool,
+    db_override: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let path_obj = Path::new(path);
+    if !path_obj.exists() {
+        return Err(anyhow!("FIT file not found: {path}"));
+    }
+    let sha = file_sha256(path_obj)?;
+    let activity = parse_fit_path(path_obj).map_err(|e| anyhow!("{e}"))?;
+    let bounds = hr_zone_bounds.map(parse_hr_zone_bounds).transpose()?;
+
+    let conn = db::open_db(db_override)?;
+    if !force {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM activity_imports WHERE file_sha256 = ?1",
+                [&sha],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if exists.is_some() {
+            return Err(anyhow!(
+                "file already imported (sha256={sha}); use --force to import again"
+            ));
+        }
+    }
+
+    let profile = if no_profile_hr {
+        None
+    } else {
+        load_hr_profile(&conn)
+    };
+
+    let plan = ImportPlan::from_activity(
+        &activity,
+        workout_type,
+        notes,
+        path_obj
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path),
+        bounds.as_ref(),
+        profile.as_ref(),
+    )
+    .map_err(|e| anyhow!("{e}"))?;
+
+    let exercise_name = exercise
+        .map(|s| s.to_lowercase())
+        .or_else(|| activity.sport.as_ref().map(|s| s.to_lowercase()))
+        .unwrap_or_else(|| "running".to_string());
+
+    let exercise_id: i64 = conn
+        .query_row(
+            "SELECT id FROM exercises WHERE name = ?1 COLLATE NOCASE",
+            [&exercise_name],
+            |r| r.get(0),
+        )
+        .map_err(|_| {
+            anyhow!("exercise '{exercise_name}' not in catalog; create it first or pass --exercise")
+        })?;
+
+    if dry_run {
+        let out = serde_json::json!({
+            "dry_run": true,
+            "sha256": sha,
+            "exercise": exercise_name,
+            "exercise_id": exercise_id,
+            "started_at": plan.started_at,
+            "distance_km": plan.distance_km,
+            "duration_seconds": plan.duration_seconds,
+            "avg_heart_rate_bpm": plan.avg_heart_rate_bpm,
+            "trackpoints": plan.trackpoints.len(),
+            "hr_zones": plan.heart_rate_zones,
+            "laps": plan.laps.as_ref().map(|l| l.len()),
+        });
+        if json {
+            print_json(&out);
+        } else {
+            println!("FIT dry-run: {}", serde_json::to_string_pretty(&out)?);
+        }
+        return Ok(());
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO workouts (started_at, workout_type, notes, duration_minutes)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            plan.started_at,
+            plan.workout_type,
+            plan.notes,
+            plan.duration_minutes
+        ],
+    )?;
+    let workout_id = tx.last_insert_rowid();
+    tx.execute(
+        r#"INSERT INTO workout_exercises (workout_id, exercise_id, "order") VALUES (?1, ?2, 1)"#,
+        params![workout_id, exercise_id],
+    )?;
+    let we_id = tx.last_insert_rowid();
+    let zones_json = plan
+        .heart_rate_zones
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let laps_json = plan.laps.as_ref().map(serde_json::to_string).transpose()?;
+    tx.execute(
+        "INSERT INTO exercise_sets
+         (workout_exercise_id, set_number, distance_km, duration_seconds,
+          avg_heart_rate_bpm, max_heart_rate_bpm, avg_pace_min_per_km, calories_burned,
+          avg_cadence_spm, total_ascent_m, total_descent_m, heart_rate_zones, laps,
+          date_of_birth, resting_hr_bpm, phase)
+         VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'full')",
+        params![
+            we_id,
+            plan.distance_km,
+            plan.duration_seconds,
+            plan.avg_heart_rate_bpm,
+            plan.max_heart_rate_bpm,
+            plan.avg_pace_min_per_km,
+            plan.calories_burned,
+            plan.avg_cadence_spm,
+            plan.total_ascent_m,
+            plan.total_descent_m,
+            zones_json,
+            laps_json,
+            plan.date_of_birth,
+            plan.resting_hr_bpm,
+        ],
+    )?;
+    let set_id = tx.last_insert_rowid();
+    for tp in &plan.trackpoints {
+        tx.execute(
+            "INSERT INTO activity_trackpoints
+             (exercise_set_id, recorded_at, latitude, longitude, altitude_m,
+              heart_rate_bpm, cadence_spm, distance_km, speed_m_s)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                set_id,
+                tp.recorded_at,
+                tp.latitude,
+                tp.longitude,
+                tp.altitude_m,
+                tp.heart_rate_bpm,
+                tp.cadence_spm,
+                tp.distance_km,
+                tp.speed_m_s,
+            ],
+        )?;
+    }
+    // force: allow re-import by deleting old hash first
+    if force {
+        let _ = tx.execute(
+            "DELETE FROM activity_imports WHERE file_sha256 = ?1",
+            [&sha],
+        );
+    }
+    tx.execute(
+        "INSERT INTO activity_imports
+         (workout_id, source_format, source_filename, file_sha256, device_name,
+          manufacturer_id, product_id, fit_sport, fit_sub_sport)
+         VALUES (?1, 'fit', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            workout_id,
+            path_obj.file_name().and_then(|s| s.to_str()),
+            sha,
+            plan.device_name,
+            plan.manufacturer_id,
+            plan.product_id,
+            plan.fit_sport,
+            plan.fit_sub_sport,
+        ],
+    )?;
+    tx.commit()?;
+
+    let out = serde_json::json!({
+        "success": true,
+        "workout_id": workout_id,
+        "set_id": set_id,
+        "exercise": exercise_name,
+        "sha256": sha,
+        "trackpoints": plan.trackpoints.len(),
+        "distance_km": plan.distance_km,
+        "duration_seconds": plan.duration_seconds,
+    });
+    if json {
+        print_json(&out);
+    } else {
+        println!(
+            "Imported FIT → workout {} set {} ({:.2} km, {} s, {} trackpoints)",
+            workout_id,
+            set_id,
+            plan.distance_km,
+            plan.duration_seconds,
+            plan.trackpoints.len()
+        );
+    }
+    Ok(())
 }
 
 fn handle_legacy_import(
@@ -244,6 +577,42 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
                 "INSERT OR IGNORE INTO consumptions (id, product_id, quantity, unit, consumed_at, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
                 params![id, pid, qty, unit, ca_at, ca],
             )? as i64;
+        }
+    }
+
+    // stores
+    if let Ok(mut stmt) = src.prepare("SELECT id, name, created_at FROM stores") {
+        for row in stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (id, name, ca) = row?;
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO stores (id, name, created_at) VALUES (?1,?2,?3)",
+                params![id, name, ca],
+            );
+        }
+    }
+    // micronutrients
+    if let Ok(mut stmt) =
+        src.prepare("SELECT product_id, nutrient_id, amount, unit FROM product_micronutrients")
+    {
+        for row in stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })? {
+            let (pid, nid, amt, unit) = row?;
+            let _ = tx.execute(
+                "INSERT OR IGNORE INTO product_micronutrients (product_id, nutrient_id, amount, unit) VALUES (?1,?2,?3,?4)",
+                params![pid, nid, amt, unit],
+            );
         }
     }
 

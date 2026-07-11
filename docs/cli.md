@@ -92,3 +92,22 @@ The importer auto-detects based on tables present in the source database.
 Always prefer `--json` when scripting or being called by LLMs.
 
 The structure is intentionally regular: `<group> <entity> <action>` where possible.
+
+## Advanced (parity)
+
+```bash
+# Sets
+recomplog workout set add-cluster --workout 1 --exercise "bench press" \
+  --reps "10,5,5" --weight 100 --phase full --rir "0,0,1" --effective-reps "6,4,3" --rest 15
+recomplog workout set add-cardio --workout 1 --exercise running \
+  --distance 5 --duration 1500 --avg-heart-rate 150 --max-heart-rate 175 --pace 5 --calories 400
+
+# Nutrition micros + store
+recomplog nutrition store create "Local Market"
+recomplog nutrition product nutrition set 1 --reference-quantity 100 --reference-unit g \
+  --energy-kcal 59 --protein-g 10 --micronutrient Magnesium 200 mg
+
+# FIT
+recomplog import fit activity.fit --exercise running --dry-run
+recomplog import fit activity.fit --hr-zone-bounds 120,140,160,175,190
+```

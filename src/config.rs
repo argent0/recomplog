@@ -361,6 +361,9 @@ pub struct SanityLimits {
     /// Absolute-only sleep field limits (no delta / variation thresholds).
     #[serde(default)]
     pub sleep: SleepSanityLimits,
+    /// Absolute-only workout / set field limits (repslog-style).
+    #[serde(default)]
+    pub workout: WorkoutSanityLimits,
 }
 
 fn default_weight_kg() -> MetricLimits {
@@ -392,6 +395,122 @@ impl Default for SanityLimits {
             bmi: default_bmi(),
             resting_metabolism_kcal: default_resting_metabolism_kcal(),
             sleep: SleepSanityLimits::default(),
+            workout: WorkoutSanityLimits::default(),
+        }
+    }
+}
+
+/// Absolute-only limits for workout sets (no delta layer).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkoutSanityLimits {
+    #[serde(default = "w_default_reps")]
+    pub reps: AbsoluteLimits,
+    #[serde(default = "w_default_weight_kg")]
+    pub weight_kg: AbsoluteLimits,
+    #[serde(default = "w_default_external_load_kg")]
+    pub external_load_kg: AbsoluteLimits,
+    #[serde(default = "w_default_duration_seconds")]
+    pub duration_seconds: AbsoluteLimits,
+    #[serde(default = "w_default_distance_km")]
+    pub distance_km: AbsoluteLimits,
+    #[serde(default = "w_default_rpe")]
+    pub rpe: AbsoluteLimits,
+    #[serde(default = "w_default_rir")]
+    pub rir: AbsoluteLimits,
+    #[serde(default = "w_default_effective_reps")]
+    pub effective_reps: AbsoluteLimits,
+    #[serde(default = "w_default_rest_seconds")]
+    pub rest_seconds: AbsoluteLimits,
+    #[serde(default = "w_default_heart_rate_bpm")]
+    pub heart_rate_bpm: AbsoluteLimits,
+    #[serde(default = "w_default_pace_min_per_km")]
+    pub pace_min_per_km: AbsoluteLimits,
+    #[serde(default = "w_default_calories_burned")]
+    pub calories_burned: AbsoluteLimits,
+    #[serde(default = "w_default_cadence_spm")]
+    pub cadence_spm: AbsoluteLimits,
+    #[serde(default = "w_default_elevation_m")]
+    pub elevation_m: AbsoluteLimits,
+    #[serde(default = "w_default_hr_zone_seconds")]
+    pub hr_zone_seconds: AbsoluteLimits,
+    #[serde(default = "w_default_duration_minutes")]
+    pub duration_minutes: AbsoluteLimits,
+    #[serde(default = "w_default_overall_feeling")]
+    pub overall_feeling: AbsoluteLimits,
+}
+
+fn w_default_reps() -> AbsoluteLimits {
+    AbsoluteLimits::new(0.0, 500.0)
+}
+fn w_default_weight_kg() -> AbsoluteLimits {
+    AbsoluteLimits::new(0.001, 500.0)
+}
+fn w_default_external_load_kg() -> AbsoluteLimits {
+    AbsoluteLimits::new(-100.0, 200.0)
+}
+fn w_default_duration_seconds() -> AbsoluteLimits {
+    AbsoluteLimits::new(1.0, 86400.0)
+}
+fn w_default_distance_km() -> AbsoluteLimits {
+    AbsoluteLimits::new(0.001, 500.0)
+}
+fn w_default_rpe() -> AbsoluteLimits {
+    AbsoluteLimits::new(0.0, 10.0)
+}
+fn w_default_rir() -> AbsoluteLimits {
+    AbsoluteLimits::new(0.0, 20.0)
+}
+fn w_default_effective_reps() -> AbsoluteLimits {
+    AbsoluteLimits::new(0.0, 500.0)
+}
+fn w_default_rest_seconds() -> AbsoluteLimits {
+    AbsoluteLimits::new(0.0, 7200.0)
+}
+fn w_default_heart_rate_bpm() -> AbsoluteLimits {
+    AbsoluteLimits::new(30.0, 250.0)
+}
+fn w_default_pace_min_per_km() -> AbsoluteLimits {
+    AbsoluteLimits::new(2.0, 30.0)
+}
+fn w_default_calories_burned() -> AbsoluteLimits {
+    AbsoluteLimits::new(0.0, 20000.0)
+}
+fn w_default_cadence_spm() -> AbsoluteLimits {
+    AbsoluteLimits::new(0.0, 300.0)
+}
+fn w_default_elevation_m() -> AbsoluteLimits {
+    AbsoluteLimits::new(0.0, 20000.0)
+}
+fn w_default_hr_zone_seconds() -> AbsoluteLimits {
+    AbsoluteLimits::new(0.0, 86400.0)
+}
+fn w_default_duration_minutes() -> AbsoluteLimits {
+    AbsoluteLimits::new(0.0, 1440.0)
+}
+fn w_default_overall_feeling() -> AbsoluteLimits {
+    AbsoluteLimits::new(1.0, 5.0)
+}
+
+impl Default for WorkoutSanityLimits {
+    fn default() -> Self {
+        Self {
+            reps: w_default_reps(),
+            weight_kg: w_default_weight_kg(),
+            external_load_kg: w_default_external_load_kg(),
+            duration_seconds: w_default_duration_seconds(),
+            distance_km: w_default_distance_km(),
+            rpe: w_default_rpe(),
+            rir: w_default_rir(),
+            effective_reps: w_default_effective_reps(),
+            rest_seconds: w_default_rest_seconds(),
+            heart_rate_bpm: w_default_heart_rate_bpm(),
+            pace_min_per_km: w_default_pace_min_per_km(),
+            calories_burned: w_default_calories_burned(),
+            cadence_spm: w_default_cadence_spm(),
+            elevation_m: w_default_elevation_m(),
+            hr_zone_seconds: w_default_hr_zone_seconds(),
+            duration_minutes: w_default_duration_minutes(),
+            overall_feeling: w_default_overall_feeling(),
         }
     }
 }

@@ -128,11 +128,32 @@ pub enum WorkoutAction {
     List {
         #[arg(long)]
         days: Option<i64>,
+        #[arg(long, default_value_t = 30)]
+        limit: i64,
     },
     /// Show a workout with its exercises and sets.
     Show { id: i64 },
+    /// Update workout fields (partial).
+    Update {
+        id: i64,
+        #[arg(long = "type")]
+        workout_type: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long)]
+        duration: Option<i32>,
+        #[arg(long)]
+        feeling: Option<i32>,
+        #[arg(long)]
+        started_at: Option<String>,
+    },
     /// Delete a workout (cascades exercises/sets).
     Delete { id: i64 },
+    /// Simple volume stats for recent workouts.
+    Stats {
+        #[arg(long, default_value_t = 30)]
+        days: i64,
+    },
 
     /// Exercise catalog operations (under the workout group).
     Exercise {
@@ -167,6 +188,26 @@ pub enum ExerciseAction {
         load_type: Option<String>,
         #[arg(short, long)]
         muscles: Option<String>,
+        #[arg(short, long)]
+        description: Option<String>,
+        #[arg(long = "allow-phase-in-name")]
+        allow_phase_in_name: bool,
+    },
+    Update {
+        /// Exercise id or name
+        exercise: String,
+        #[arg(short, long)]
+        category: Option<String>,
+        #[arg(short, long)]
+        equipment: Option<String>,
+        #[arg(long = "clear-equipment")]
+        clear_equipment: bool,
+        #[arg(long = "load-type")]
+        load_type: Option<String>,
+        #[arg(short, long)]
+        muscles: Option<String>,
+        #[arg(short, long)]
+        description: Option<String>,
     },
     Search {
         term: String,
@@ -178,12 +219,175 @@ pub enum ExerciseAction {
 pub enum SetAction {
     /// Add a strength (or general) set.
     Add {
-        /// Target workout id
+        #[arg(long)]
+        workout: Option<i64>,
+        #[arg(long)]
+        exercise: Option<String>,
+        /// Direct workout_exercise id (alternative to --workout + --exercise)
+        #[arg(long = "workout-exercise")]
+        workout_exercise: Option<i64>,
+        #[arg(long)]
+        reps: Option<i32>,
+        #[arg(long)]
+        weight: Option<f64>,
+        #[arg(long = "external-load")]
+        external_load: Option<f64>,
+        #[arg(long = "no-weight-recorded")]
+        no_weight_recorded: bool,
+        #[arg(long)]
+        duration: Option<i32>,
+        #[arg(long)]
+        distance: Option<f64>,
+        #[arg(long)]
+        rpe: Option<f64>,
+        #[arg(long)]
+        rir: Option<f64>,
+        #[arg(long = "effective-reps")]
+        effective_reps: Option<i32>,
+        #[arg(long = "rest")]
+        rest_seconds: Option<i32>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long, value_parser = ["left", "right", "both"])]
+        side: Option<String>,
+        #[arg(long, default_value = "full")]
+        phase: String,
+        #[arg(long = "avg-heart-rate")]
+        avg_heart_rate: Option<f64>,
+        #[arg(long = "max-heart-rate")]
+        max_heart_rate: Option<f64>,
+        #[arg(long = "hr-zones")]
+        hr_zones: Option<String>,
+        #[arg(long)]
+        pace: Option<f64>,
+        #[arg(long)]
+        calories: Option<i32>,
+        #[arg(long)]
+        laps: Option<String>,
+    },
+    /// Add a cardio-focused set (distance, duration, HR, pace).
+    #[command(name = "add-cardio")]
+    AddCardio {
+        #[arg(long)]
+        workout: Option<i64>,
+        #[arg(long)]
+        exercise: Option<String>,
+        #[arg(long = "workout-exercise")]
+        workout_exercise: Option<i64>,
+        #[arg(long)]
+        distance: f64,
+        #[arg(long)]
+        duration: i32,
+        #[arg(long = "avg-heart-rate")]
+        avg_heart_rate: f64,
+        #[arg(long = "max-heart-rate")]
+        max_heart_rate: f64,
+        #[arg(long)]
+        pace: f64,
+        #[arg(long)]
+        calories: i32,
+        #[arg(long = "hr-zones")]
+        hr_zones: Option<String>,
+        #[arg(long)]
+        laps: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long, default_value = "full")]
+        phase: String,
+    },
+    /// Add a rest-pause/cluster sequence (comma-separated reps/rir/effective-reps).
+    #[command(name = "add-cluster")]
+    AddCluster {
+        #[arg(long)]
+        workout: Option<i64>,
+        #[arg(long)]
+        exercise: Option<String>,
+        #[arg(long = "workout-exercise")]
+        workout_exercise: Option<i64>,
+        #[arg(long)]
+        weight: Option<f64>,
+        #[arg(long = "external-load")]
+        external_load: Option<f64>,
+        #[arg(long = "no-weight-recorded")]
+        no_weight_recorded: bool,
+        /// Comma-separated reps e.g. "10,5,5"
+        #[arg(long)]
+        reps: String,
+        /// Comma-separated RIR e.g. "0,0,1"
+        #[arg(long)]
+        rir: String,
+        /// Comma-separated effective reps e.g. "6,4,3"
+        #[arg(long = "effective-reps")]
+        effective_reps: String,
+        #[arg(long = "rest")]
+        rest_seconds: i32,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long, value_parser = ["left", "right", "both"])]
+        side: Option<String>,
+        #[arg(long, default_value = "full")]
+        phase: String,
+    },
+    /// Add left/right (or both) sets for unilateral work.
+    #[command(name = "add-unilateral")]
+    AddUnilateral {
+        #[arg(long)]
+        workout: Option<i64>,
+        #[arg(long)]
+        exercise: Option<String>,
+        #[arg(long = "workout-exercise")]
+        workout_exercise: Option<i64>,
+        /// Comma-separated reps
+        #[arg(long)]
+        reps: String,
+        #[arg(long)]
+        weight: Option<f64>,
+        #[arg(long = "external-load")]
+        external_load: Option<f64>,
+        #[arg(long = "no-weight-recorded")]
+        no_weight_recorded: bool,
+        #[arg(long)]
+        rir: Option<String>,
+        #[arg(long = "effective-reps")]
+        effective_reps: Option<String>,
+        #[arg(long = "rest")]
+        rest_seconds: Option<i32>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long, value_parser = ["left", "right", "both"], default_value = "both")]
+        side: String,
+        #[arg(long, default_value = "full")]
+        phase: String,
+    },
+    /// List sets for a workout_exercise id.
+    List {
+        #[arg(long = "workout-exercise")]
+        workout_exercise: i64,
+    },
+    /// Add exercise to workout and optionally log the first set.
+    Quick {
         #[arg(long)]
         workout: i64,
-        /// Exercise name or id
         #[arg(long)]
         exercise: String,
+        #[arg(long)]
+        reps: Option<i32>,
+        #[arg(long)]
+        weight: Option<f64>,
+        #[arg(long = "external-load")]
+        external_load: Option<f64>,
+        #[arg(long = "no-weight-recorded")]
+        no_weight_recorded: bool,
+        #[arg(long)]
+        duration: Option<i32>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long)]
+        phase: Option<String>,
+    },
+    /// Update fields on an existing set.
+    Update {
+        id: i64,
         #[arg(long)]
         reps: Option<i32>,
         #[arg(long)]
@@ -206,20 +410,8 @@ pub enum SetAction {
         notes: Option<String>,
         #[arg(long, value_parser = ["left", "right", "both"])]
         side: Option<String>,
-        #[arg(long, default_value = "working")]
-        phase: String,
-    },
-    /// Add a cardio-focused set.
-    #[command(name = "add-cardio")]
-    AddCardio {
         #[arg(long)]
-        workout: i64,
-        #[arg(long)]
-        exercise: String,
-        #[arg(long)]
-        distance: Option<f64>,
-        #[arg(long)]
-        duration: Option<i32>,
+        phase: Option<String>,
         #[arg(long = "avg-heart-rate")]
         avg_heart_rate: Option<f64>,
         #[arg(long = "max-heart-rate")]
@@ -228,8 +420,13 @@ pub enum SetAction {
         pace: Option<f64>,
         #[arg(long)]
         calories: Option<i32>,
+    },
+    /// Reorder a set within its workout-exercise.
+    Move {
+        id: i64,
+        /// Target 1-based position
         #[arg(long)]
-        notes: Option<String>,
+        to: i32,
     },
     /// Delete a set by id.
     Delete { id: i64 },
@@ -465,7 +662,20 @@ pub enum NutritionAction {
         #[command(subcommand)]
         action: NutrientAction,
     },
-    // product-tag, store etc. can be added here later
+    #[command(name = "product-tag")]
+    ProductTag {
+        #[command(subcommand)]
+        action: TaxonomyAction,
+    },
+    Store {
+        #[command(subcommand)]
+        action: StoreAction,
+    },
+    #[command(name = "store-tag")]
+    StoreTag {
+        #[command(subcommand)]
+        action: TaxonomyAction,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -487,14 +697,26 @@ pub enum ProductAction {
     },
     Rename {
         id: i64,
-        new_name: String,
+        #[arg(long)]
+        name: String,
     },
     Delete {
         id: i64,
+        #[arg(long)]
+        force: bool,
     },
-    /// Set macro nutrition per reference quantity.
+    /// Set macros + micronutrients for a product.
+    Nutrition {
+        #[command(subcommand)]
+        action: ProductNutritionAction,
+    },
+    Tag {
+        #[command(subcommand)]
+        action: TagModifyAction,
+    },
+    /// Back-compat aliases
     #[command(name = "set")]
-    Set {
+    SetLegacy {
         id: i64,
         #[arg(long, default_value = "100")]
         reference_quantity: f64,
@@ -513,16 +735,56 @@ pub enum ProductAction {
         #[arg(long)]
         sugars_g: Option<f64>,
     },
-    /// Add a tag to a product.
     #[command(name = "tag-add")]
     TagAdd {
         id: i64,
         tag: String,
     },
-    /// Remove a tag from a product.
     #[command(name = "tag-remove")]
     TagRemove {
         id: i64,
+        tag: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProductNutritionAction {
+    Set {
+        id: i64,
+        #[arg(long)]
+        reference_quantity: Option<f64>,
+        #[arg(long)]
+        reference_unit: Option<String>,
+        #[arg(long)]
+        energy_kcal: Option<f64>,
+        #[arg(long)]
+        protein_g: Option<f64>,
+        #[arg(long)]
+        carbohydrates_g: Option<f64>,
+        #[arg(long)]
+        fat_g: Option<f64>,
+        #[arg(long)]
+        fiber_g: Option<f64>,
+        #[arg(long)]
+        sugars_g: Option<f64>,
+        /// Repeatable: --micronutrient NAME AMOUNT UNIT
+        #[arg(long, value_names = ["NAME", "AMOUNT", "UNIT"], num_args = 3, action = clap::ArgAction::Append)]
+        micronutrient: Vec<String>,
+        #[arg(long = "json-file")]
+        json_file: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum TagModifyAction {
+    Add {
+        id: i64,
+        #[arg(long)]
+        tag: String,
+    },
+    Remove {
+        id: i64,
+        #[arg(long)]
         tag: String,
     },
 }
@@ -532,14 +794,31 @@ pub enum PurchaseAction {
     Create {
         #[arg(long)]
         product: i64,
-        #[arg(long)]
+        #[arg(long, default_value_t = 1.0)]
         quantity: f64,
         #[arg(long)]
         price: Option<String>,
         #[arg(long)]
         store: Option<i64>,
+        #[arg(long, default_value = "today")]
+        date: String,
     },
-    List,
+    List {
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long)]
+        product: Option<i64>,
+        #[arg(long)]
+        store: Option<i64>,
+    },
+    Show {
+        id: i64,
+    },
+    Delete {
+        id: i64,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -550,9 +829,21 @@ pub enum ConsumptionAction {
         #[arg(long)]
         quantity: f64,
         #[arg(long)]
-        date: Option<String>,
+        unit: Option<String>,
+        #[arg(long, default_value = "today")]
+        date: String,
     },
-    List,
+    List {
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long)]
+        product: Option<i64>,
+    },
+    Delete {
+        id: i64,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -560,9 +851,53 @@ pub enum NutrientAction {
     List,
     Create {
         name: String,
+        #[arg(long)]
         unit: String,
         #[arg(long)]
         recommended_intake: Option<f64>,
+    },
+    Show {
+        id: i64,
+    },
+    Search {
+        query: String,
+    },
+    Delete {
+        id: i64,
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum TaxonomyAction {
+    Create { name: String },
+    List,
+    Search { query: String },
+    Show { id: i64 },
+    Delete { id: i64 },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum StoreAction {
+    Create {
+        name: String,
+    },
+    List,
+    Show {
+        id: i64,
+    },
+    Rename {
+        id: i64,
+        #[arg(long)]
+        name: String,
+    },
+    Delete {
+        id: i64,
+    },
+    Tag {
+        #[command(subcommand)]
+        action: TagModifyAction,
     },
 }
 
@@ -655,9 +990,28 @@ pub enum NutritionReportAction {
 pub enum ImportAction {
     /// Import a FIT file (Garmin/Zepp/Amazfit running or other activities).
     Fit {
+        /// Path to the .fit file
         path: String,
+        /// Override exercise name (default: FIT session.sport). Must exist in catalog.
         #[arg(long)]
         exercise: Option<String>,
+        /// Workout type label (default: Run)
+        #[arg(long = "type")]
+        workout_type: Option<String>,
+        #[arg(short, long)]
+        notes: Option<String>,
+        /// Allow re-import of a previously imported file
+        #[arg(long)]
+        force: bool,
+        /// HR zone upper bounds bpm zones 1-5 (comma-separated)
+        #[arg(long = "hr-zone-bounds")]
+        hr_zone_bounds: Option<String>,
+        /// Skip deriving zones from user profile / sleep
+        #[arg(long = "no-profile-hr")]
+        no_profile_hr: bool,
+        /// Show what would be imported
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Import data from a legacy tool database (repslog.db, bodylog.db, or nutlog.db).
     ///

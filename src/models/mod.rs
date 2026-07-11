@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::sanity::SanityWarning;
 use crate::utils::TimestampInfo;
@@ -303,4 +303,73 @@ pub struct SleepSummary {
     pub avg_quality: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trend: Option<String>,
+}
+
+// ---------- Workout models ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct HeartRateZones {
+    #[serde(default)]
+    pub z1_seconds: u32,
+    #[serde(default)]
+    pub z2_seconds: u32,
+    #[serde(default)]
+    pub z3_seconds: u32,
+    #[serde(default)]
+    pub z4_seconds: u32,
+    #[serde(default)]
+    pub z5_seconds: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Lap {
+    pub lap_number: u16,
+    pub distance_km: f64,
+    pub duration_seconds: u32,
+    pub pace_min_per_km: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_heart_rate_bpm: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_heart_rate_bpm: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct Laps(pub Vec<Lap>);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Exercise {
+    pub id: i64,
+    pub name: String,
+    pub category: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub muscle_groups: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub equipment: Option<String>,
+    pub load_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub is_custom: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Trackpoint {
+    pub recorded_at: String,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub altitude_m: Option<f64>,
+    pub heart_rate_bpm: Option<f64>,
+    pub cadence_spm: Option<f64>,
+    pub distance_km: Option<f64>,
+    pub speed_m_s: Option<f64>,
+}
+
+/// Optional profile for deriving HR zones from DOB + resting HR (local DB).
+#[derive(Debug, Clone)]
+pub struct HrZoneProfile {
+    pub date_of_birth: String,
+    pub resting_hr_bpm: Option<f64>,
+    pub bounds: [f64; 5],
+    pub method: String,
 }
