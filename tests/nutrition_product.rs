@@ -42,6 +42,45 @@ fn product_create_search_set_nutrition() {
         .success()
         .stdout(predicate::str::contains("Greek Yogurt"));
 
+    // Short fuzzy queries must not match unrelated tokens (e.g. "iron" ≠ "virgin").
+    bin()
+        .args([
+            "--db",
+            &db,
+            "nutrition",
+            "product",
+            "create",
+            "Gentech Iron Bar",
+        ])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "nutrition",
+            "product",
+            "create",
+            "Virgin Olive Oil",
+        ])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "search",
+            "--name",
+            "iron",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Gentech Iron Bar"))
+        .stdout(predicate::str::contains("Virgin Olive Oil").not());
+
     bin()
         .args([
             "--db",
