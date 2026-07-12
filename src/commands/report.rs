@@ -7,11 +7,11 @@ use crate::config::SanityLimits;
 use crate::db;
 use crate::models::{
     BriefConsumption, BriefReport, BriefWorkout, BriefWorkouts, DailyNutritionEntry, MacroTotals,
-    Measurement, MicroTotal, NutritionDailyReport, NutritionReport, Period, ProductSpending, Sleep,
+    Measurement, MicroTotal, NutritionDailyReport, NutritionReport, Period, ProductSpending,
     SpendingReport, StoreSpending, WorkoutPeriodOverview,
 };
 use crate::repository::BodyRepository;
-use crate::utils::{format_minutes, parse_date_to_ymd, print_json, print_table};
+use crate::utils::{parse_date_to_ymd, print_json, print_table};
 use anyhow::{anyhow, Result};
 use chrono::{Duration, Local, NaiveDate};
 use rusqlite::{params, Connection};
@@ -313,7 +313,7 @@ fn print_brief_human(report: &BriefReport, days: u32, day_label: &str) {
 
     println!();
     println!("=== Sleep (last {days} days) ===");
-    print_sleep_table(&report.sleep);
+    super::body::print_sleep_table(&report.sleep);
 
     println!();
     println!("=== Workouts ({day_label}) ===");
@@ -410,45 +410,6 @@ fn print_measurements_table(measurements: &[Measurement]) {
             "Visceral",
             "BMI",
             "RMR (kcal)",
-        ],
-        rows,
-    );
-}
-
-fn print_sleep_table(sleeps: &[Sleep]) {
-    if sleeps.is_empty() {
-        println!("(no sleep entries)");
-        return;
-    }
-    let rows: Vec<Vec<String>> = sleeps
-        .iter()
-        .map(|s| {
-            vec![
-                s.id.to_string(),
-                s.date.clone(),
-                s.bedtime.clone().unwrap_or_default(),
-                s.wake_time.clone().unwrap_or_default(),
-                s.total_sleep_minutes
-                    .map(format_minutes)
-                    .unwrap_or_default(),
-                s.sleep_efficiency_pct
-                    .map(|v| format!("{:.1}", v))
-                    .unwrap_or_default(),
-                brief_opt_i64(s.sleep_score),
-                brief_opt_i64(s.subjective_quality),
-            ]
-        })
-        .collect();
-    print_table(
-        vec![
-            "ID",
-            "Date",
-            "Bedtime",
-            "Wake",
-            "Total Sleep",
-            "Eff%",
-            "Score",
-            "Quality",
         ],
         rows,
     );

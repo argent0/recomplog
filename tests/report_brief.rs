@@ -189,6 +189,14 @@ fn brief_human_has_all_section_headers() {
             "=== Measurements (last 7 days) ===",
         ))
         .stdout(predicate::str::contains("=== Sleep (last 7 days) ==="))
+        // Same columns as `body sleep list`.
+        .stdout(predicate::str::contains("Time in Bed"))
+        .stdout(predicate::str::contains("Total Sleep"))
+        .stdout(predicate::str::contains("REM"))
+        .stdout(predicate::str::contains("Deep"))
+        .stdout(predicate::str::contains("Light"))
+        .stdout(predicate::str::contains("Awake"))
+        .stdout(predicate::str::contains("Hyp/hr"))
         .stdout(predicate::str::contains("=== Workouts (today) ==="))
         .stdout(predicate::str::contains(
             "=== Workouts overview (previous 7 days:",

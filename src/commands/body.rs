@@ -1593,9 +1593,15 @@ fn handle_sleep_list(repo: &mut Repository, args: ListArgs, json: bool, quiet: b
         return Ok(());
     }
 
+    print_sleep_table(&sleeps);
+    Ok(())
+}
+
+/// Human table for sleep list / report brief (same columns everywhere).
+pub(crate) fn print_sleep_table(sleeps: &[Sleep]) {
     if sleeps.is_empty() {
         println!("(no sleep entries)");
-        return Ok(());
+        return;
     }
 
     let rows: Vec<Vec<String>> = sleeps
@@ -1650,7 +1656,6 @@ fn handle_sleep_list(repo: &mut Repository, args: ListArgs, json: bool, quiet: b
         ],
         rows,
     );
-    Ok(())
 }
 
 fn opt_minutes(v: Option<i64>) -> String {
