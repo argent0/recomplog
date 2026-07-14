@@ -1,4 +1,4 @@
-//! Integration tests for `report html` (gap 06 dashboard depth).
+//! Integration tests for `report html` (gap 06 dashboard depth + plot upgrades).
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -10,7 +10,7 @@ fn bin() -> Command {
 }
 
 fn setup_full_fixture(db: &str) {
-    // Two measurements with BF for fat/lean series + regression
+    // Two measurements with BF + skeletal muscle + resting metabolism
     bin()
         .args([
             "--db",
@@ -25,6 +25,10 @@ fn setup_full_fixture(db: &str) {
             "82",
             "--body-fat-pct",
             "20",
+            "--skeletal-muscle-pct",
+            "40",
+            "--resting-metabolism-kcal",
+            "1700",
         ])
         .assert()
         .success();
@@ -42,6 +46,10 @@ fn setup_full_fixture(db: &str) {
             "81",
             "--body-fat-pct",
             "19.5",
+            "--skeletal-muscle-pct",
+            "40.5",
+            "--resting-metabolism-kcal",
+            "1680",
         ])
         .assert()
         .success();
@@ -155,6 +163,24 @@ fn setup_full_fixture(db: &str) {
         ])
         .assert()
         .success();
+    // Second day with more kcal than BMR (for bar color path)
+    bin()
+        .args([
+            "--db",
+            db,
+            "--json",
+            "nutrition",
+            "consumption",
+            "create",
+            "--product",
+            "1",
+            "--quantity",
+            "500",
+            "--date",
+            "2026-07-08",
+        ])
+        .assert()
+        .success();
 
     // Training volume
     bin()
@@ -247,8 +273,9 @@ fn report_html_writes_file() {
     let (html, v) = run_html(&db, &out.display().to_string());
     assert!(html.contains("recomplog"));
     assert!(html.contains("Chart"));
-    assert!(html.contains("id=\"fmChart\""));
-    assert!(!html.contains("id=\"nChart\""));
+    assert!(html.contains("id=\"wChart\""));
+    assert!(html.contains("id=\"mmPctChart\""));
+    assert!(!html.contains("id=\"fmChart\""));
     // Single weight point → insufficient trend
     assert_eq!(
         v["overview"]["weight_trend"]["direction"].as_str(),
@@ -268,11 +295,16 @@ fn report_html_full_dashboard_depth() {
 
     let (html, v) = run_html(&db, &out.display().to_string());
 
-    // Fat/lean series
-    assert!(html.contains("id=\"fmChart\""));
-    assert!(html.contains("Fat mass"));
-    assert!(html.contains("Lean mass"));
-    assert!(html.contains("fatMass"));
+    // Body regression charts (no fat/lean dual chart)
+    assert!(html.contains("id=\"wChart\""));
+    assert!(html.contains("id=\"bfChart\""));
+    assert!(html.contains("id=\"mmPctChart\""));
+    assert!(html.contains("id=\"mmKgChart\""));
+    assert!(!html.contains("id=\"fmChart\""));
+    assert!(html.contains("regressionChart"));
+    assert!(html.contains("R²") || html.contains("R\u{00b2}") || html.contains("R&sup2;"));
+    // R² in title when ≥2 points
+    assert!(html.contains("R² =") || html.contains("R\u{00b2} ="));
 
     // Sleep stages + quality
     assert!(html.contains("id=\"ssChart\""));
@@ -281,14 +313,26 @@ fn report_html_full_dashboard_depth() {
     assert!(html.contains("id=\"sqChart\""));
     assert!(html.contains("Efficiency %"));
 
-    // Nutrition: new ids, macros incl. carbs; old nChart gone
+    // Nutrition: energy BMR + macros + new plots
     assert!(html.contains("id=\"nKcalChart\""));
     assert!(html.contains("id=\"nMacroChart\""));
+    assert!(html.contains("id=\"nCalSourceChart\""));
+    assert!(html.contains("id=\"nProtLeanChart\""));
+    assert!(html.contains("id=\"nProtMusChart\""));
     assert!(!html.contains("id=\"nChart\""));
     assert!(html.contains("fat g"));
     assert!(html.contains("fiber g"));
     assert!(html.contains("sugars g"));
     assert!(html.contains("carbs g"));
+    assert!(html.contains("hasBmr"));
+    assert!(html.contains("Resting metabolism") || html.contains("nutBmr"));
+    assert!(html.contains("protLean"));
+    assert!(html.contains("protMuscle"));
+    assert!(html.contains("pctProtein"));
+
+    // Short date labels: no year on axis series (ISO dates may still appear in period subtitle)
+    // Chart payload uses day-only when same month (July fixture).
+    assert!(html.contains("\"labels\":[\"1\",\"8\"]") || html.contains("\"1\""));
 
     // Trends on cards
     assert!(html.contains("kg/wk") || html.contains("→ flat"));

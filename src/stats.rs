@@ -16,6 +16,16 @@ pub struct Regression {
     pub slope_per_day: f64,
     pub slope_per_week: f64,
     pub n: usize,
+    /// Residual sum of squares (for confidence bands).
+    pub ss_res: f64,
+}
+
+/// Mean response ± margin at a given x (for 95% CI of the fitted line).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConfidenceAt {
+    pub y: f64,
+    pub lower: f64,
+    pub upper: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -96,7 +106,103 @@ pub fn linear_regression(points: &[DataPoint]) -> Option<Regression> {
         slope_per_day: slope,
         slope_per_week: slope * 7.0,
         n,
+        ss_res,
     })
+}
+
+/// Two-sided 95% critical value of Student's t (interpolated table, z for large df).
+fn t_critical_95(df: f64) -> f64 {
+    if df <= 0.0 {
+        return 0.0;
+    }
+    if df >= 120.0 {
+        return 1.96;
+    }
+
+    let table: &[(f64, f64)] = &[
+        (1.0, 12.706),
+        (2.0, 4.303),
+        (3.0, 3.182),
+        (4.0, 2.776),
+        (5.0, 2.571),
+        (6.0, 2.447),
+        (7.0, 2.365),
+        (8.0, 2.306),
+        (9.0, 2.262),
+        (10.0, 2.228),
+        (15.0, 2.131),
+        (20.0, 2.086),
+        (25.0, 2.060),
+        (30.0, 2.042),
+        (40.0, 2.021),
+        (60.0, 2.000),
+    ];
+
+    for &(d, t) in table {
+        if df <= d {
+            return t;
+        }
+    }
+    1.96
+}
+
+/// 95% confidence interval of the mean response at `x` for a fitted line.
+pub fn confidence_at(
+    points: &[DataPoint],
+    slope: f64,
+    intercept: f64,
+    x: f64,
+    residual_ss: f64,
+) -> ConfidenceAt {
+    let n = points.len();
+    let y = slope * x + intercept;
+    if n < 2 {
+        return ConfidenceAt {
+            y,
+            lower: y,
+            upper: y,
+        };
+    }
+
+    let n_f = n as f64;
+    let x_mean = points.iter().map(|p| p.x).sum::<f64>() / n_f;
+    let ss_xx: f64 = points.iter().map(|p| (p.x - x_mean).powi(2)).sum();
+    let df = (n - 2) as f64;
+    let se = if df > 0.0 {
+        (residual_ss / df).sqrt()
+    } else {
+        0.0
+    };
+    let t_crit = t_critical_95(df);
+
+    if ss_xx.abs() < f64::EPSILON {
+        return ConfidenceAt {
+            y,
+            lower: y,
+            upper: y,
+        };
+    }
+
+    let se_fit = se * ((1.0 / n_f) + (x - x_mean).powi(2) / ss_xx).sqrt();
+    let margin = t_crit * se_fit;
+    ConfidenceAt {
+        y,
+        lower: y - margin,
+        upper: y + margin,
+    }
+}
+
+/// Fitted line and 95% CI at each observed x (same order as `points`).
+/// Returns `None` when regression fails.
+pub fn regression_with_ci_at_points(
+    points: &[DataPoint],
+) -> Option<(Regression, Vec<ConfidenceAt>)> {
+    let reg = linear_regression(points)?;
+    let band: Vec<ConfidenceAt> = points
+        .iter()
+        .map(|p| confidence_at(points, reg.slope, reg.intercept, p.x, reg.ss_res))
+        .collect();
+    Some((reg, band))
 }
 
 /// Classifies slope vs metric-specific flat band. Never returns `InsufficientData`
@@ -175,6 +281,31 @@ mod tests {
         assert!((r.r_squared - 1.0).abs() < 1e-9);
         assert!((r.slope_per_week - 14.0).abs() < 1e-9);
         assert_eq!(r.n, 5);
+        assert!(r.ss_res.abs() < 1e-9);
+    }
+
+    #[test]
+    fn perfect_line_ci_collapses() {
+        let pts: Vec<DataPoint> = (0..5)
+            .map(|i| DataPoint {
+                x: i as f64,
+                y: 2.0 * i as f64 + 1.0,
+            })
+            .collect();
+        let (reg, band) = regression_with_ci_at_points(&pts).expect("ci");
+        assert!((reg.r_squared - 1.0).abs() < 1e-9);
+        for (p, c) in pts.iter().zip(band.iter()) {
+            assert!((c.y - p.y).abs() < 1e-9);
+            assert!((c.upper - c.lower).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn two_points_zero_df_zero_margin() {
+        let pts = vec![DataPoint { x: 0.0, y: 1.0 }, DataPoint { x: 1.0, y: 3.0 }];
+        let c = confidence_at(&pts, 2.0, 1.0, 0.5, 0.0);
+        assert!((c.y - 2.0).abs() < 1e-9);
+        assert!((c.upper - c.lower).abs() < 1e-9);
     }
 
     #[test]
