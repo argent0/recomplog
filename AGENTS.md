@@ -81,6 +81,7 @@ cargo test
 
 # Typical agent usage
 recomplog --json body measurement create --date today --weight-kg 81.2
+recomplog --json body measurement medians --window 7 --days 7
 recomplog --json body sleep create --date today --total-sleep "7h 45m"
 recomplog --json nutrition product create "Oats" --tags breakfast
 # Nutrition units: g (mass), ml (volume), unit (package) — consumption must match product kind.

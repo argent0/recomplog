@@ -602,6 +602,8 @@ pub enum MeasurementAction {
     Create(CreateMeasurementArgs),
     /// List measurements.
     List(ListArgs),
+    /// Rolling medians over a trailing calendar-day window.
+    Medians(MediansArgs),
     /// Show a single measurement.
     Show(ShowArgs),
     /// Update fields on an existing measurement.
@@ -633,6 +635,20 @@ pub struct CreateMeasurementArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct ListArgs {
+    #[arg(long)]
+    pub days: Option<i64>,
+    #[arg(long)]
+    pub since: Option<String>,
+    #[arg(long)]
+    pub until: Option<String>,
+}
+
+/// Args for `body measurement medians`.
+#[derive(Args, Debug, Clone)]
+pub struct MediansArgs {
+    /// Trailing calendar-day window length (inclusive of the row date).
+    #[arg(long, value_name = "DAYS", default_value = "7")]
+    pub window: i64,
     #[arg(long)]
     pub days: Option<i64>,
     #[arg(long)]

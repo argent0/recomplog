@@ -34,6 +34,7 @@ recomplog --json workout set add --workout 42 --exercise "bench press" --reps 5 
 ```bash
 recomplog body measurement create --date today --weight-kg 80.5 --body-fat-pct 17.8 --json
 recomplog body measurement list --days 30 --json
+recomplog body measurement medians --window 7 --days 7 --json
 recomplog body measurement show --date yesterday
 
 recomplog body sleep create --date today --total-sleep "7h 45m"

@@ -1,10 +1,11 @@
 use crate::cli::{
-    BodyReportAction, CheckArgs, CreateMeasurementArgs, DeleteArgs, ListArgs, ProfileAction,
-    ProfileSetArgs, ReportRangeArgs, ShowArgs, SleepAction, SleepCreateArgs, SleepUpdateArgs,
-    SummaryArgs, UpdateMeasurementArgs,
+    BodyReportAction, CheckArgs, CreateMeasurementArgs, DeleteArgs, ListArgs, MediansArgs,
+    ProfileAction, ProfileSetArgs, ReportRangeArgs, ShowArgs, SleepAction, SleepCreateArgs,
+    SleepUpdateArgs, SummaryArgs, UpdateMeasurementArgs,
 };
 use crate::config::SanityLimits;
 use crate::error::{RecomplogError, Result};
+use crate::hr_zones::median_f64;
 use crate::models::{
     HeartRateZones, Lap, Measurement, MeasurementPoint, MetricReport, MetricStats, Period, Sleep,
     SleepAverages, SleepExtreme, SleepExtremes, SleepReport, SleepSummary, Success, SummaryReport,
@@ -17,6 +18,7 @@ use crate::sanity::{
 };
 use crate::utils::{format_local, parse_date_to_ymd, resolve_date_range};
 use crate::utils::{format_minutes, parse_duration_to_minutes, print_table};
+use chrono::NaiveDate;
 use serde::Serialize;
 
 /// Print pretty JSON (for --json paths).
@@ -78,6 +80,7 @@ pub fn handle_measurement(
             handle_create(repo, args, limits, json, quiet)
         }
         crate::cli::MeasurementAction::List(args) => handle_list(repo, args, json, quiet),
+        crate::cli::MeasurementAction::Medians(args) => handle_medians(repo, args, json, quiet),
         crate::cli::MeasurementAction::Show(args) => handle_show(repo, args, json),
         crate::cli::MeasurementAction::Update(args) => {
             handle_update(repo, args, limits, json, quiet)
@@ -665,6 +668,292 @@ fn opt_f64(v: Option<f64>) -> String {
 }
 fn opt_i64(v: Option<i64>) -> String {
     v.map(|x| x.to_string()).unwrap_or_default()
+}
+
+// ---------- MEASUREMENT MEDIANS ----------
+
+/// Per-field non-null sample counts inside a calendar window.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MedianFieldCounts {
+    pub weight_kg: i64,
+    pub body_fat_pct: i64,
+    pub skeletal_muscle_pct: i64,
+    pub visceral_fat_level: i64,
+    pub bmi: i64,
+    pub resting_metabolism_kcal: i64,
+}
+
+/// One rolling-median row for `body measurement medians`.
+#[derive(Debug, Clone, Serialize)]
+struct MedianRow {
+    pub id: i64,
+    pub date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight_kg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_fat_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skeletal_muscle_pct: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visceral_fat_level: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bmi: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resting_metabolism_kcal: Option<i64>,
+    pub n: i64,
+    pub n_by_field: MedianFieldCounts,
+}
+
+fn count_opt<T, F>(rows: &[&Measurement], extract: F) -> i64
+where
+    F: Fn(&Measurement) -> Option<T>,
+{
+    rows.iter().filter(|m| extract(m).is_some()).count() as i64
+}
+
+fn median_opt_f64<F>(rows: &[&Measurement], extract: F) -> Option<f64>
+where
+    F: Fn(&Measurement) -> Option<f64>,
+{
+    let vals: Vec<f64> = rows.iter().filter_map(|m| extract(m)).collect();
+    median_f64(&vals)
+}
+
+fn median_opt_i64<F>(rows: &[&Measurement], extract: F) -> Option<i64>
+where
+    F: Fn(&Measurement) -> Option<i64>,
+{
+    let vals: Vec<f64> = rows
+        .iter()
+        .filter_map(|m| extract(m).map(|v| v as f64))
+        .collect();
+    median_f64(&vals).map(|v| v.round() as i64)
+}
+
+fn field_counts(rows: &[&Measurement]) -> MedianFieldCounts {
+    MedianFieldCounts {
+        weight_kg: count_opt(rows, |m| m.weight_kg),
+        body_fat_pct: count_opt(rows, |m| m.body_fat_pct),
+        skeletal_muscle_pct: count_opt(rows, |m| m.skeletal_muscle_pct),
+        visceral_fat_level: count_opt(rows, |m| m.visceral_fat_level),
+        bmi: count_opt(rows, |m| m.bmi),
+        resting_metabolism_kcal: count_opt(rows, |m| m.resting_metabolism_kcal),
+    }
+}
+
+/// Human `N` cell: `n` plus sparse field suffixes (`7 bf:5`).
+/// Only fields with `0 < n_field < n` are listed.
+pub fn format_n_summary(n: i64, counts: &MedianFieldCounts) -> String {
+    let mut parts = vec![n.to_string()];
+    let fields: [(&str, i64); 6] = [
+        ("w", counts.weight_kg),
+        ("bf", counts.body_fat_pct),
+        ("sm", counts.skeletal_muscle_pct),
+        ("vf", counts.visceral_fat_level),
+        ("bmi", counts.bmi),
+        ("rmr", counts.resting_metabolism_kcal),
+    ];
+    for (abbr, c) in fields {
+        if c > 0 && c < n {
+            parts.push(format!("{abbr}:{c}"));
+        }
+    }
+    parts.join(" ")
+}
+
+fn window_start_ymd(anchor_ymd: &str, window_days: i64) -> Result<String> {
+    let d = NaiveDate::parse_from_str(anchor_ymd, "%Y-%m-%d")
+        .map_err(|e| RecomplogError::InvalidDate(format!("{anchor_ymd}: {e}")))?;
+    let start = d - chrono::Duration::days(window_days - 1);
+    Ok(start.format("%Y-%m-%d").to_string())
+}
+
+fn subtract_calendar_days(ymd: &str, days: i64) -> Result<String> {
+    let d = NaiveDate::parse_from_str(ymd, "%Y-%m-%d")
+        .map_err(|e| RecomplogError::InvalidDate(format!("{ymd}: {e}")))?;
+    let start = d - chrono::Duration::days(days);
+    Ok(start.format("%Y-%m-%d").to_string())
+}
+
+fn in_display_range(date: &str, since: Option<&str>, until: Option<&str>) -> bool {
+    if let Some(s) = since {
+        if date < s {
+            return false;
+        }
+    }
+    if let Some(u) = until {
+        if date > u {
+            return false;
+        }
+    }
+    true
+}
+
+fn compute_median_row(anchor: &Measurement, window: &[&Measurement]) -> MedianRow {
+    let n = window.len() as i64;
+    let n_by_field = field_counts(window);
+    MedianRow {
+        id: anchor.id,
+        date: anchor.date.clone(),
+        weight_kg: median_opt_f64(window, |m| m.weight_kg),
+        body_fat_pct: median_opt_f64(window, |m| m.body_fat_pct),
+        skeletal_muscle_pct: median_opt_f64(window, |m| m.skeletal_muscle_pct),
+        visceral_fat_level: median_opt_i64(window, |m| m.visceral_fat_level),
+        bmi: median_opt_f64(window, |m| m.bmi),
+        resting_metabolism_kcal: median_opt_i64(window, |m| m.resting_metabolism_kcal),
+        n,
+        n_by_field,
+    }
+}
+
+fn handle_medians(repo: &mut Repository, args: MediansArgs, json: bool, quiet: bool) -> Result<()> {
+    if args.window < 1 {
+        return Err(RecomplogError::InvalidInput(
+            "--window must be >= 1 (calendar days)".to_string(),
+        ));
+    }
+
+    let (display_since, display_until) =
+        resolve_date_range(args.since.as_deref(), args.until.as_deref(), args.days)
+            .map_err(|e| RecomplogError::InvalidDate(e.to_string()))?;
+
+    let load_since = match display_since.as_deref() {
+        Some(s) => Some(subtract_calendar_days(s, args.window - 1)?),
+        None => None,
+    };
+
+    let all = repo.list_measurements(load_since.as_deref(), display_until.as_deref())?;
+
+    let mut rows: Vec<MedianRow> = Vec::new();
+    for anchor in &all {
+        if !in_display_range(
+            &anchor.date,
+            display_since.as_deref(),
+            display_until.as_deref(),
+        ) {
+            continue;
+        }
+        let start = window_start_ymd(&anchor.date, args.window)?;
+        let window: Vec<&Measurement> = all
+            .iter()
+            .filter(|p| {
+                p.date.as_str() >= start.as_str() && p.date.as_str() <= anchor.date.as_str()
+            })
+            .collect();
+        rows.push(compute_median_row(anchor, &window));
+    }
+
+    if json {
+        print_json(&rows);
+        return Ok(());
+    }
+
+    if quiet {
+        for r in &rows {
+            let n_str = format_n_summary(r.n, &r.n_by_field);
+            println!(
+                "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                r.id,
+                r.date,
+                r.weight_kg.map(|v| v.to_string()).unwrap_or_default(),
+                r.body_fat_pct.map(|v| v.to_string()).unwrap_or_default(),
+                r.skeletal_muscle_pct
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                r.visceral_fat_level
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                r.bmi.map(|v| v.to_string()).unwrap_or_default(),
+                r.resting_metabolism_kcal
+                    .map(|v| v.to_string())
+                    .unwrap_or_default(),
+                n_str,
+            );
+        }
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("(no measurements)");
+        return Ok(());
+    }
+
+    let table_rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| {
+            vec![
+                r.id.to_string(),
+                r.date.clone(),
+                opt_f64(r.weight_kg),
+                opt_f64(r.body_fat_pct),
+                opt_f64(r.skeletal_muscle_pct),
+                opt_i64(r.visceral_fat_level),
+                opt_f64(r.bmi),
+                opt_i64(r.resting_metabolism_kcal),
+                format_n_summary(r.n, &r.n_by_field),
+            ]
+        })
+        .collect();
+    print_table(
+        vec![
+            "ID",
+            "Date",
+            "Weight (kg)",
+            "Body Fat %",
+            "Muscle %",
+            "Visceral",
+            "BMI",
+            "RMR (kcal)",
+            "N",
+        ],
+        table_rows,
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod median_tests {
+    use super::{format_n_summary, MedianFieldCounts};
+
+    fn counts(w: i64, bf: i64, sm: i64, vf: i64, bmi: i64, rmr: i64) -> MedianFieldCounts {
+        MedianFieldCounts {
+            weight_kg: w,
+            body_fat_pct: bf,
+            skeletal_muscle_pct: sm,
+            visceral_fat_level: vf,
+            bmi,
+            resting_metabolism_kcal: rmr,
+        }
+    }
+
+    #[test]
+    fn n_summary_all_complete() {
+        assert_eq!(format_n_summary(7, &counts(7, 7, 7, 7, 7, 7)), "7");
+    }
+
+    #[test]
+    fn n_summary_sparse_bf() {
+        assert_eq!(format_n_summary(7, &counts(7, 5, 7, 7, 7, 7)), "7 bf:5");
+    }
+
+    #[test]
+    fn n_summary_gap_and_sparse_sm() {
+        assert_eq!(format_n_summary(5, &counts(5, 5, 4, 5, 5, 5)), "5 sm:4");
+    }
+
+    #[test]
+    fn n_summary_all_null_fields_omitted() {
+        // Only weight present; others 0 → no sparse suffix for zeros
+        assert_eq!(format_n_summary(7, &counts(7, 0, 0, 0, 0, 0)), "7");
+    }
+
+    #[test]
+    fn n_summary_multiple_sparse() {
+        assert_eq!(
+            format_n_summary(7, &counts(7, 5, 6, 7, 0, 7)),
+            "7 bf:5 sm:6"
+        );
+    }
 }
 
 fn handle_show(repo: &mut Repository, args: ShowArgs, json: bool) -> Result<()> {

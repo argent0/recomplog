@@ -65,6 +65,7 @@ Dates accept flexible forms: `today`, `yesterday`, `2026-07-05`, `last monday`, 
 # Body
 recomplog body measurement create --date today --weight-kg 80.5 --json
 recomplog body measurement list --days 14
+recomplog body measurement medians --window 7 --days 7
 recomplog body sleep create --date today --total-sleep "7h 45m"
 recomplog body profile set --height-cm 178
 
