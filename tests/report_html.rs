@@ -334,27 +334,48 @@ fn report_html_full_dashboard_depth() {
     // Chart payload uses day-only when same month (July fixture).
     assert!(html.contains("\"labels\":[\"1\",\"8\"]") || html.contains("\"1\""));
 
+    // Four body cards only: label + N-day median + trend + last
+    assert!(html.contains(">Weight<"));
+    assert!(html.contains(">Body fat<"));
+    assert!(html.contains(">Muscle %<"));
+    assert!(html.contains(">Muscle mass<"));
+    assert!(!html.contains(">Fat mass<"));
+    assert!(!html.contains(">Lean mass<"));
+    assert!(!html.contains(">Measurements<"));
+    assert!(!html.contains(">Sleep nights<"));
+    assert!(!html.contains(">Workouts<"));
+    assert!(!html.contains(">Volume<"));
+    assert!(html.contains("class=\"last\""));
+    assert!(html.contains("last "));
+
     // Trends on cards
-    assert!(html.contains("kg/wk") || html.contains("→ flat"));
+    assert!(html.contains("kg/wk") || html.contains("→ flat") || html.contains("%/wk"));
     assert!(
         html.contains("trend-down") || html.contains("trend-up") || html.contains("trend-flat")
     );
-
-    // Training cards
-    assert!(html.contains("Workouts"));
-    assert!(html.contains("Volume"));
 
     // JSON overview contract
     let ov = &v["overview"];
     assert!(ov["weight_trend"].is_object());
     assert!(ov["body_fat_trend"].is_object());
+    assert!(ov["muscle_pct_trend"].is_object());
+    assert!(ov["muscle_mass_trend"].is_object());
     let wt = &ov["weight_trend"];
     assert!(wt["n"].as_u64().unwrap() >= 2);
     let dir = wt["direction"].as_str().unwrap();
     assert!(matches!(dir, "up" | "down" | "flat"));
     assert!(wt.get("slope_per_week").is_some());
     assert!(wt.get("r_squared").is_some());
-    assert!(ov["fat_mass_kg"].as_f64().is_some());
+    // Medians (primary card values) and last recorded
+    assert!((ov["median_weight_kg"].as_f64().unwrap() - 81.5).abs() < 1e-9);
+    assert!((ov["latest_weight_kg"].as_f64().unwrap() - 81.0).abs() < 1e-9);
+    assert!((ov["median_body_fat_pct"].as_f64().unwrap() - 19.75).abs() < 1e-9);
+    assert!((ov["latest_body_fat_pct"].as_f64().unwrap() - 19.5).abs() < 1e-9);
+    assert!((ov["median_muscle_pct"].as_f64().unwrap() - 40.25).abs() < 1e-9);
+    assert!((ov["latest_muscle_pct"].as_f64().unwrap() - 40.5).abs() < 1e-9);
+    // muscle mass: 82*0.40=32.8, 81*0.405=32.805 → median 32.8025
+    assert!(ov["median_muscle_mass_kg"].as_f64().is_some());
+    assert!(ov["latest_muscle_mass_kg"].as_f64().is_some());
     assert!(ov["training"]["workout_count"].as_i64().unwrap() >= 1);
     assert!(ov["training"]["total_volume"].as_f64().unwrap() > 0.0);
 }

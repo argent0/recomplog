@@ -1,6 +1,7 @@
 //! Self-contained Chart.js HTML dashboard (`report html`).
 
 use crate::db;
+use crate::hr_zones::median_f64;
 use crate::stats::{
     metric_trend_from_points, regression_with_ci_at_points, DataPoint, MetricTrend, TrendDirection,
     BF_FLAT_PCT_PER_DAY, WEIGHT_FLAT_KG_PER_DAY,
@@ -11,6 +12,11 @@ use chrono::{Datelike, Local, NaiveDate};
 use rusqlite::{params, Connection};
 use std::fs;
 use std::path::Path;
+
+/// Flat band for skeletal muscle % (same scale as body-fat %/day).
+const MUSCLE_PCT_FLAT_PER_DAY: f64 = BF_FLAT_PCT_PER_DAY;
+/// Flat band for muscle mass kg (same scale as weight kg/day).
+const MUSCLE_KG_FLAT_PER_DAY: f64 = WEIGHT_FLAT_KG_PER_DAY;
 
 #[derive(Debug, Clone)]
 struct MeasPoint {
@@ -368,6 +374,30 @@ fn latest_fmt(v: Option<f64>, unit: &str) -> String {
     }
 }
 
+fn median_of_opts(values: &[Option<f64>]) -> Option<f64> {
+    let vals: Vec<f64> = values.iter().copied().flatten().collect();
+    median_f64(&vals)
+}
+
+/// One overview card: label, N-day median (primary), trend, last value.
+fn metric_card_html(
+    label: &str,
+    median: Option<f64>,
+    last: Option<f64>,
+    unit: &str,
+    trend: &MetricTrend,
+) -> String {
+    format!(
+        r#"    <div class="card"><div class="label">{label}</div><div class="value">{median}</div><div class="trend {trend_cls}">{trend_label}</div><div class="last">last {last}</div></div>
+"#,
+        label = label,
+        median = latest_fmt(median, unit),
+        last = latest_fmt(last, unit),
+        trend_label = trend.label,
+        trend_cls = trend_css_class(trend.direction),
+    )
+}
+
 fn j<T: serde::Serialize>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "null".into())
 }
@@ -414,10 +444,29 @@ pub fn handle_html(
         "%",
         BF_FLAT_PCT_PER_DAY,
     );
+    let muscle_pct_trend = metric_trend_from_points(
+        &series_points(&weight_labels, &muscle_pct, since),
+        "%",
+        MUSCLE_PCT_FLAT_PER_DAY,
+    );
+    let muscle_kg_trend = metric_trend_from_points(
+        &series_points(&weight_labels, &muscle_kg, since),
+        "kg",
+        MUSCLE_KG_FLAT_PER_DAY,
+    );
 
     let latest_weight = measurements.iter().rev().find_map(|m| m.weight_kg);
     let latest_bf = measurements.iter().rev().find_map(|m| m.body_fat_pct);
-    let (fat_mass_latest, lean_mass_latest) = derive_composition(latest_weight, latest_bf);
+    let latest_muscle_pct = measurements
+        .iter()
+        .rev()
+        .find_map(|m| m.skeletal_muscle_pct);
+    let latest_muscle_kg = measurements.iter().rev().find_map(|m| m.muscle_mass_kg);
+
+    let median_weight = median_of_opts(&weights);
+    let median_bf = median_of_opts(&bf);
+    let median_muscle_pct = median_of_opts(&muscle_pct);
+    let median_muscle_kg = median_of_opts(&muscle_kg);
 
     let weight_series = build_reg_series(&weight_labels, &weights, since);
     let bf_series = build_reg_series(&weight_labels, &bf, since);
@@ -425,14 +474,20 @@ pub fn handle_html(
     let mm_kg_series = build_reg_series(&weight_labels, &muscle_kg, since);
 
     let overview = serde_json::json!({
+        "median_weight_kg": median_weight,
         "latest_weight_kg": latest_weight,
+        "median_body_fat_pct": median_bf,
         "latest_body_fat_pct": latest_bf,
-        "fat_mass_kg": fat_mass_latest,
-        "lean_mass_kg": lean_mass_latest,
+        "median_muscle_pct": median_muscle_pct,
+        "latest_muscle_pct": latest_muscle_pct,
+        "median_muscle_mass_kg": median_muscle_kg,
+        "latest_muscle_mass_kg": latest_muscle_kg,
         "measurement_count": measurements.len(),
         "sleep_nights": sleeps.len(),
         "weight_trend": weight_trend,
         "body_fat_trend": body_fat_trend,
+        "muscle_pct_trend": muscle_pct_trend,
+        "muscle_mass_trend": muscle_kg_trend,
         "training": {
             "workout_count": training.workout_count,
             "days_trained": training.days_trained,
@@ -452,15 +507,18 @@ pub fn handle_html(
         &measurements,
         &sleeps,
         &nutrition,
-        &training,
+        median_weight,
         latest_weight,
+        median_bf,
         latest_bf,
-        fat_mass_latest,
-        lean_mass_latest,
-        measurements.len(),
-        sleeps.len(),
+        median_muscle_pct,
+        latest_muscle_pct,
+        median_muscle_kg,
+        latest_muscle_kg,
         &weight_trend,
         &body_fat_trend,
+        &muscle_pct_trend,
+        &muscle_kg_trend,
     );
 
     fs::create_dir_all(output_dir)?;
@@ -492,15 +550,18 @@ fn generate_html(
     measurements: &[MeasPoint],
     sleeps: &[SleepPoint],
     nutrition: &[NutDay],
-    training: &TrainingSummary,
+    median_weight: Option<f64>,
     latest_weight: Option<f64>,
+    median_bf: Option<f64>,
     latest_bf: Option<f64>,
-    fat_mass_latest: Option<f64>,
-    lean_mass_latest: Option<f64>,
-    measurement_count: usize,
-    sleep_nights: usize,
+    median_muscle_pct: Option<f64>,
+    latest_muscle_pct: Option<f64>,
+    median_muscle_kg: Option<f64>,
+    latest_muscle_kg: Option<f64>,
     weight_trend: &MetricTrend,
     body_fat_trend: &MetricTrend,
+    muscle_pct_trend: &MetricTrend,
+    muscle_kg_trend: &MetricTrend,
 ) -> String {
     let sleep_iso: Vec<String> = sleeps.iter().map(|s| s.date.clone()).collect();
     let sleep_labels = short_date_labels(&sleep_iso);
@@ -614,8 +675,6 @@ fn generate_html(
         })
         .collect();
 
-    let show_training = training.workout_count > 0;
-
     let dash = serde_json::json!({
         "weight": {
             "labels": weight_series.labels,
@@ -671,17 +730,25 @@ fn generate_html(
         "protMuscle": prot_muscle,
     });
 
-    let training_cards = if show_training {
-        format!(
-            r#"    <div class="card"><div class="label">Workouts</div><div class="value">{wc}</div></div>
-    <div class="card"><div class="label">Volume</div><div class="value">{vol:.0}</div></div>
-"#,
-            wc = training.workout_count,
-            vol = training.total_volume,
-        )
-    } else {
-        String::new()
-    };
+    let body_cards = format!(
+        "{}{}{}{}",
+        metric_card_html("Weight", median_weight, latest_weight, "kg", weight_trend),
+        metric_card_html("Body fat", median_bf, latest_bf, "%", body_fat_trend),
+        metric_card_html(
+            "Muscle %",
+            median_muscle_pct,
+            latest_muscle_pct,
+            "%",
+            muscle_pct_trend
+        ),
+        metric_card_html(
+            "Muscle mass",
+            median_muscle_kg,
+            latest_muscle_kg,
+            "kg",
+            muscle_kg_trend
+        ),
+    );
 
     let mut chart_cards = String::new();
     chart_cards.push_str(&format!(
@@ -884,6 +951,7 @@ new Chart(document.getElementById('nProtMusChart'), {
   .card .label {{ color:var(--muted); font-size:0.75rem; text-transform:uppercase; }}
   .card .value {{ font-size:1.35rem; font-weight:600; margin-top:0.25rem; }}
   .card .trend {{ font-size:0.75rem; margin-top:0.2rem; }}
+  .card .last {{ font-size:0.7rem; color:var(--muted); margin-top:0.15rem; }}
   .trend-up {{ color: #81c784; }}
   .trend-down {{ color: #ef5350; }}
   .trend-flat {{ color: var(--muted); }}
@@ -898,13 +966,7 @@ new Chart(document.getElementById('nProtMusChart'), {
   <h1>recomplog</h1>
   <p class="sub">{days} days · {since} → {until}</p>
   <div class="cards">
-    <div class="card"><div class="label">Weight</div><div class="value">{weight}</div><div class="trend {w_trend_cls}">{w_trend}</div></div>
-    <div class="card"><div class="label">Body fat</div><div class="value">{bf_val}</div><div class="trend {bf_trend_cls}">{bf_trend}</div></div>
-    <div class="card"><div class="label">Fat mass</div><div class="value">{fat}</div></div>
-    <div class="card"><div class="label">Lean mass</div><div class="value">{lean}</div></div>
-    <div class="card"><div class="label">Measurements</div><div class="value">{mc}</div></div>
-    <div class="card"><div class="label">Sleep nights</div><div class="value">{sc}</div></div>
-{training_cards}  </div>
+{body_cards}  </div>
   <div class="charts">
 {chart_cards}  </div>
 <script>
@@ -949,17 +1011,7 @@ function regressionChart(id, s, color) {{
         days = days,
         since = since,
         until = until,
-        weight = latest_fmt(latest_weight, "kg"),
-        bf_val = latest_fmt(latest_bf, "%"),
-        fat = latest_fmt(fat_mass_latest, "kg"),
-        lean = latest_fmt(lean_mass_latest, "kg"),
-        mc = measurement_count,
-        sc = sleep_nights,
-        w_trend = weight_trend.label,
-        bf_trend = body_fat_trend.label,
-        w_trend_cls = trend_css_class(weight_trend.direction),
-        bf_trend_cls = trend_css_class(body_fat_trend.direction),
-        training_cards = training_cards,
+        body_cards = body_cards,
         chart_cards = chart_cards,
         dash = j(&dash),
         chart_js = chart_js,
@@ -987,6 +1039,14 @@ mod tests {
     fn muscle_mass_derived() {
         assert!((derive_muscle_mass(Some(80.0), Some(40.0)).unwrap() - 32.0).abs() < 1e-9);
         assert!(derive_muscle_mass(Some(80.0), None).is_none());
+    }
+
+    #[test]
+    fn median_of_opts_even_and_sparse() {
+        assert!((median_of_opts(&[Some(82.0), Some(81.0)]).unwrap() - 81.5).abs() < 1e-9);
+        assert_eq!(median_of_opts(&[None, Some(80.0)]), Some(80.0));
+        assert_eq!(median_of_opts(&[None, None]), None);
+        assert_eq!(median_of_opts(&[]), None);
     }
 
     #[test]
