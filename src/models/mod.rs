@@ -4,13 +4,25 @@ use crate::sanity::SanityWarning;
 use crate::utils::TimestampInfo;
 
 // Common success envelope for mutating operations when --json
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Default)]
 pub struct Success {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
+    /// Event calendar day only (measurements / sleep). Not storage time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
+    /// When the row was stored (audit). Always present on log creates when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purchased_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -21,14 +33,14 @@ pub struct Success {
 }
 
 impl Success {
+    /// Generic create (catalog or simple). Prefer the typed helpers for log entities.
     pub fn created(id: i64, date: impl Into<String>, msg: impl Into<String>) -> Self {
         Self {
             success: true,
             id: Some(id),
             date: Some(date.into()),
             message: Some(msg.into()),
-            deleted_id: None,
-            warnings: None,
+            ..Default::default()
         }
     }
 
@@ -45,24 +57,83 @@ impl Success {
         s
     }
 
+    /// Body measurement/sleep: event calendar `date` + storage `created_at`.
+    pub fn created_log_day(
+        id: i64,
+        event_date: impl Into<String>,
+        created_at: impl Into<String>,
+        msg: impl Into<String>,
+    ) -> Self {
+        Self {
+            success: true,
+            id: Some(id),
+            date: Some(event_date.into()),
+            created_at: Some(created_at.into()),
+            message: Some(msg.into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn created_log_day_with_warnings(
+        id: i64,
+        event_date: impl Into<String>,
+        created_at: impl Into<String>,
+        msg: impl Into<String>,
+        warnings: Vec<SanityWarning>,
+    ) -> Self {
+        let mut s = Self::created_log_day(id, event_date, created_at, msg);
+        if !warnings.is_empty() {
+            s.warnings = Some(warnings);
+        }
+        s
+    }
+
+    pub fn created_workout(
+        id: i64,
+        started_at: impl Into<String>,
+        finished_at: Option<String>,
+        created_at: impl Into<String>,
+        msg: impl Into<String>,
+    ) -> Self {
+        Self {
+            success: true,
+            id: Some(id),
+            started_at: Some(started_at.into()),
+            finished_at,
+            created_at: Some(created_at.into()),
+            message: Some(msg.into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn created_purchase(
+        id: i64,
+        purchased_at: impl Into<String>,
+        created_at: impl Into<String>,
+        msg: impl Into<String>,
+    ) -> Self {
+        Self {
+            success: true,
+            id: Some(id),
+            purchased_at: Some(purchased_at.into()),
+            created_at: Some(created_at.into()),
+            message: Some(msg.into()),
+            ..Default::default()
+        }
+    }
+
     pub fn ok(msg: impl Into<String>) -> Self {
         Self {
             success: true,
-            id: None,
-            date: None,
             message: Some(msg.into()),
-            deleted_id: None,
-            warnings: None,
+            ..Default::default()
         }
     }
     pub fn deleted(id: i64) -> Self {
         Self {
             success: true,
-            id: None,
-            date: None,
-            message: None,
             deleted_id: Some(id),
-            warnings: None,
+            ..Default::default()
         }
     }
 }

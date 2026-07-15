@@ -77,9 +77,18 @@ pub fn handle(
             )?;
             let id = conn.last_insert_rowid();
             if json {
-                print_json(&Success::created(id, started.clone(), "workout created"));
+                print_json(&Success::created_workout(
+                    id,
+                    started.clone(),
+                    finished.clone(),
+                    created,
+                    "workout created",
+                ));
             } else {
-                quiet_print(quiet, format!("Created workout {id} (started {started})"));
+                quiet_print(
+                    quiet,
+                    format!("Created workout {id} (started {started}, stored {created})"),
+                );
             }
             Ok(())
         }
@@ -87,7 +96,8 @@ pub fn handle(
             let conn = db::open_db(db_override)?;
             let lim = limit.max(1);
             let mut sql = String::from(
-                "SELECT id, started_at, finished_at, workout_type, notes, duration_minutes, overall_feeling
+                "SELECT id, started_at, finished_at, workout_type, notes, duration_minutes, \
+                 overall_feeling, created_at
                  FROM workouts WHERE 1=1",
             );
             let mut binds: Vec<String> = vec![];
@@ -113,6 +123,7 @@ pub fn handle(
                         "notes": r.get::<_, Option<String>>(4)?,
                         "duration_minutes": r.get::<_, Option<i64>>(5)?,
                         "overall_feeling": r.get::<_, Option<i64>>(6)?,
+                        "created_at": r.get::<_, String>(7)?,
                     }))
                 })?
                 .filter_map(|r| r.ok())
@@ -722,7 +733,8 @@ pub(crate) fn fetch_workout_detail(
 ) -> Result<Option<serde_json::Value>> {
     let row = conn
         .query_row(
-            "SELECT id, started_at, finished_at, workout_type, notes, overall_feeling, duration_minutes
+            "SELECT id, started_at, finished_at, workout_type, notes, overall_feeling, \
+             duration_minutes, created_at
              FROM workouts WHERE id = ?1",
             [id],
             |r| {
@@ -734,6 +746,7 @@ pub(crate) fn fetch_workout_detail(
                     "notes": r.get::<_, Option<String>>(4)?,
                     "overall_feeling": r.get::<_, Option<i64>>(5)?,
                     "duration_minutes": r.get::<_, Option<i64>>(6)?,
+                    "created_at": r.get::<_, String>(7)?,
                 }))
             },
         )

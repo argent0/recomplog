@@ -571,9 +571,16 @@ fn handle_create(
     ) {
         Ok(id) => {
             emit_sanity_warnings(&warnings);
+            let m = repo.get_measurement(id)?;
             let msg = format!("Measurement logged for {}", date);
             if json {
-                print_json(&Success::created_with_warnings(id, date, msg, warnings));
+                print_json(&Success::created_log_day_with_warnings(
+                    id,
+                    m.date,
+                    m.created_at.utc,
+                    msg,
+                    warnings,
+                ));
             } else {
                 quiet_print(&msg, quiet);
             }
@@ -1780,9 +1787,10 @@ fn handle_sleep_create(
         notes.as_deref(),
     ) {
         Ok(id) => {
+            let s = repo.get_sleep(id)?;
             let msg = format!("Sleep entry created for {}", date);
             if json {
-                print_json(&Success::created(id, date, msg));
+                print_json(&Success::created_log_day(id, s.date, s.created_at.utc, msg));
             } else {
                 quiet_print(&msg, quiet);
                 // Print a small human summary of what was logged

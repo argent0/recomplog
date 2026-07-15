@@ -38,9 +38,12 @@ This document defines the coding standards for the unified `recomplog` project.
 6. **Database**
    - All changes via migrations in `migrations/`.
    - Foreign keys on.
+   - **Two clocks:** event time (when the user says it happened) vs storage time
+     (`created_at` / `updated_at` / `imported_at` = always `now_utc()`; never user input).
    - Instants: UTC RFC3339 (`YYYY-MM-DDTHH:MM:SSZ`) only — write via `format_instant_utc` /
      `now_utc` / `parse_rfc3339_instant_for_db` + `validate_instant_for_db`.
-   - Calendar days: `YYYY-MM-DD` only.
+   - Calendar days: `YYYY-MM-DD` only (event day for measurements/sleep).
+   - Day buckets and reports use **event** fields only, never `created_at`.
    - Never rely on SQLite `datetime('now')` for new rows; always set timestamps from Rust.
    - Keep the model pragmatic.
 

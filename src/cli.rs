@@ -118,10 +118,11 @@ pub enum Commands {
 pub enum WorkoutAction {
     /// Create a new workout session (container for exercises/sets).
     Create {
-        /// Start time as RFC3339 (e.g. 2026-07-14T18:30:00-03:00). Default: now (UTC Z).
+        /// When the session **started** (event time, RFC3339). Default: now.
+        /// Storage time (`created_at`) is always insert time, independent of this.
         #[arg(long)]
         started_at: Option<String>,
-        /// End time as RFC3339 (e.g. 2026-07-14T19:45:00-03:00). Stored as UTC Z.
+        /// When the session **ended** (event time, RFC3339). Optional.
         #[arg(long = "finished-at")]
         finished_at: Option<String>,
         /// e.g. Push, Pull, Run, Full Body
@@ -153,10 +154,10 @@ pub enum WorkoutAction {
         duration: Option<i32>,
         #[arg(long)]
         feeling: Option<i32>,
-        /// Start time as RFC3339 (stored as UTC Z).
+        /// When the session **started** (event time, RFC3339).
         #[arg(long)]
         started_at: Option<String>,
-        /// End time as RFC3339 (stored as UTC Z).
+        /// When the session **ended** (event time, RFC3339).
         #[arg(long = "finished-at")]
         finished_at: Option<String>,
         /// Validate and show what would be updated without writing.
@@ -615,6 +616,8 @@ pub enum MeasurementAction {
 
 #[derive(Args, Debug, Clone)]
 pub struct CreateMeasurementArgs {
+    /// Calendar day this measurement is **for** (event day), not when you typed the command.
+    /// Flexible: today, yesterday, YYYY-MM-DD, … Storage time is always `created_at` = now.
     #[arg(long, default_value = "today")]
     pub date: String,
     #[arg(long)]
@@ -712,7 +715,8 @@ pub enum SleepAction {
 
 #[derive(Args, Debug, Clone)]
 pub struct SleepCreateArgs {
-    /// Wake-up date (local calendar day).
+    /// Wake-up **calendar day** this sleep log is for (event day), not when you typed the command.
+    /// Flexible: today, yesterday, YYYY-MM-DD, … Storage time is always `created_at` = now.
     #[arg(long, default_value = "today")]
     pub date: String,
     #[arg(long)]
@@ -949,9 +953,10 @@ pub enum PurchaseAction {
         price: Option<String>,
         #[arg(long)]
         store: Option<i64>,
-        /// Purchase instant as RFC3339 (e.g. 2026-07-14T18:30:00-03:00). Required.
-        #[arg(long)]
-        date: String,
+        /// When the purchase **happened** (event time, RFC3339). Storage time is always now.
+        /// Alias: `--date` (deprecated name; still accepted).
+        #[arg(long = "purchased-at", visible_alias = "date")]
+        purchased_at: String,
     },
     List {
         /// Flexible calendar day: today, yesterday, YYYY-MM-DD, …
@@ -985,9 +990,10 @@ pub enum ConsumptionAction {
         /// Omit to use the product’s reference unit. Aliases: bar, cup, capsule → unit.
         #[arg(long)]
         unit: Option<String>,
-        /// Consumption instant as RFC3339 (e.g. 2026-07-14T13:45:00-03:00). Required.
-        #[arg(long)]
-        date: String,
+        /// When the meal/portion **happened** (event time, RFC3339). Storage time is always now.
+        /// Alias: `--date` (deprecated name; still accepted).
+        #[arg(long = "consumed-at", visible_alias = "date")]
+        consumed_at: String,
         /// Allow logging at local midnight (discouraged; usually a missing time-of-day).
         #[arg(long = "allow-midnight")]
         allow_midnight: bool,

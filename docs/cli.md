@@ -102,7 +102,9 @@ recomplog --json report nutrition spending --since 2026-01-01 --by product
 
 Query `--date` / `--since` / `--until` accept flexible forms (`today`, `yesterday`, `YYYY-MM-DD`, `last monday`, …). Lookback (`--days`) is inclusive of the anchor day for nutrition/body/sleep; previous workouts use the N days *before* the anchor.
 
-**Create/update instants** (workout `--started-at` / `--finished-at`, nutrition purchase/consumption `--date`) require **RFC3339** (any offset; stored as UTC `…Z`). Consumption at local midnight is refused unless `--allow-midnight` (discouraged).
+**Event time vs storage time:** log creates always record *when it happened* (event) separately from *when it was stored* (`created_at` = now). Example: log a 09:00 meal at noon with `--consumed-at 2026-07-14T09:00:00-03:00`.
+
+**Create/update event instants** (workout `--started-at` / `--finished-at`, nutrition `--purchased-at` / `--consumed-at`; `--date` is still accepted as an alias) require **RFC3339** (any offset; stored as UTC `…Z`). Consumption at local midnight is refused unless `--allow-midnight` (discouraged). Body `--date` remains a flexible **event calendar day**.
 
 Nutrition report date flags: `--days N` cannot be combined with `--since` / `--until`.
 

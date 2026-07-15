@@ -682,9 +682,9 @@ fn handle_purchase(
             quantity,
             price,
             store,
-            date,
+            purchased_at,
         } => {
-            let when = parse_rfc3339_instant_for_db(&date)?;
+            let when = parse_rfc3339_instant_for_db(&purchased_at)?;
             let now = db::now_utc();
             let price_cents: Option<i64> = price
                 .and_then(|p| p.replace(['$', ','], "").parse::<f64>().ok())
@@ -696,9 +696,17 @@ fn handle_purchase(
             )?;
             let id = conn.last_insert_rowid();
             if json {
-                print_json(&Success::created(id, when, "purchase recorded"));
+                print_json(&Success::created_purchase(
+                    id,
+                    when,
+                    now,
+                    "purchase recorded",
+                ));
             } else {
-                quiet_print(quiet, format!("Purchase {id} recorded"));
+                quiet_print(
+                    quiet,
+                    format!("Purchase {id} recorded (happened {when}, stored {now})"),
+                );
             }
         }
         PurchaseAction::List {
@@ -708,7 +716,8 @@ fn handle_purchase(
             store,
         } => {
             let mut sql = String::from(
-                "SELECT pu.id, pu.product_id, p.name, pu.quantity, pu.price_cents, pu.store_id, pu.purchased_at
+                "SELECT pu.id, pu.product_id, p.name, pu.quantity, pu.price_cents, pu.store_id, \
+                 pu.purchased_at, pu.created_at
                  FROM purchases pu LEFT JOIN products p ON p.id = pu.product_id WHERE 1=1",
             );
             let mut binds: Vec<String> = vec![];
@@ -738,6 +747,7 @@ fn handle_purchase(
                         "price_cents": r.get::<_, Option<i64>>(4)?,
                         "store_id": r.get::<_, Option<i64>>(5)?,
                         "purchased_at": r.get::<_, String>(6)?,
+                        "created_at": r.get::<_, String>(7)?,
                     }))
                 })?
                 .filter_map(|r| r.ok())
@@ -747,8 +757,13 @@ fn handle_purchase(
             } else {
                 for r in &rows {
                     println!(
-                        "{}: product={} qty={} price_cents={:?}",
-                        r["id"], r["product_id"], r["quantity"], r["price_cents"]
+                        "{}: product={} qty={} price_cents={:?} purchased_at={} created_at={}",
+                        r["id"],
+                        r["product_id"],
+                        r["quantity"],
+                        r["price_cents"],
+                        r["purchased_at"].as_str().unwrap_or(""),
+                        r["created_at"].as_str().unwrap_or(""),
                     );
                 }
             }
@@ -756,7 +771,8 @@ fn handle_purchase(
         PurchaseAction::Show { id } => {
             let row = conn
                 .query_row(
-                    "SELECT id, product_id, quantity, price_cents, store_id, purchased_at FROM purchases WHERE id=?1",
+                    "SELECT id, product_id, quantity, price_cents, store_id, purchased_at, created_at \
+                     FROM purchases WHERE id=?1",
                     [id],
                     |r| {
                         Ok(serde_json::json!({
@@ -766,6 +782,7 @@ fn handle_purchase(
                             "price_cents": r.get::<_, Option<i64>>(3)?,
                             "store_id": r.get::<_, Option<i64>>(4)?,
                             "purchased_at": r.get::<_, String>(5)?,
+                            "created_at": r.get::<_, String>(6)?,
                         }))
                     },
                 )
@@ -808,12 +825,12 @@ fn handle_consumption(
             product,
             quantity,
             unit,
-            date,
+            consumed_at,
             allow_midnight,
         } => {
-            let when_dt = parse_rfc3339_to_utc(&date)?;
+            let when_dt = parse_rfc3339_to_utc(&consumed_at)?;
             refuse_consumption_midnight(when_dt, allow_midnight)?;
-            let when = parse_rfc3339_instant_for_db(&date)?;
+            let when = parse_rfc3339_instant_for_db(&consumed_at)?;
             let now = db::now_utc();
             let product_name: Option<String> = conn
                 .query_row("SELECT name FROM products WHERE id = ?1", [product], |r| {
@@ -862,12 +879,13 @@ fn handle_consumption(
                         .unwrap_or("unknown"),
                     "product_reference_unit": ref_unit,
                     "consumed_at": when,
+                    "created_at": now,
                 }));
             } else {
                 quiet_print(
                     quiet,
                     format!(
-                        "Consumption {id} logged: {} {}",
+                        "Consumption {id} logged: {} {} (happened {when}, stored {now})",
                         resolved.quantity, resolved.unit
                     ),
                 );
@@ -879,7 +897,7 @@ fn handle_consumption(
             product,
         } => {
             let mut sql = String::from(
-                "SELECT c.id, c.product_id, p.name, c.quantity, c.unit, c.consumed_at
+                "SELECT c.id, c.product_id, p.name, c.quantity, c.unit, c.consumed_at, c.created_at
                  FROM consumptions c LEFT JOIN products p ON p.id = c.product_id WHERE 1=1",
             );
             let mut binds: Vec<String> = vec![];
@@ -905,6 +923,7 @@ fn handle_consumption(
                         "quantity": r.get::<_, f64>(3)?,
                         "unit": r.get::<_, Option<String>>(4)?,
                         "consumed_at": r.get::<_, String>(5)?,
+                        "created_at": r.get::<_, String>(6)?,
                     }))
                 })?
                 .filter_map(|r| r.ok())

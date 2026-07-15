@@ -23,15 +23,34 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
 4. Run `cargo fmt && cargo clippy -- -D warnings && cargo test` before finishing changes.
 5. Use the provided `clippy.toml` and `rustfmt.toml`.
 
+## Time model (event vs storage)
+
+**Never conflate “when it happened” with “when it was stored.”**
+
+Example: at 12:00 the user logs “I ate at 09:00” → `consumed_at = 09:00`, `created_at = 12:00`.
+Reports, day buckets, and `check missing` use **event** time only.
+
+| Kind | Meaning | Examples | Who sets it |
+|------|---------|----------|-------------|
+| **Event** | When the user says it occurred | `started_at` / `finished_at`, `consumed_at`, `purchased_at`, `measurements.date`, `sleep.date`, `recorded_at` | User / device / import payload |
+| **Storage** | When recomplog wrote or last updated the row | `created_at`, `updated_at`, `imported_at` | Always app `now_utc()`; **never** user-editable |
+
+- Log creates always set **both** clocks independently.
+- Catalog entities (`product`, `exercise`, tags, …) only have storage time.
+- `exercise_sets.created_at` is **log** time; the session day comes from the parent workout.
+- Create/update **event instants** accept **RFC3339 only** (`--started-at`, `--consumed-at`, `--purchased-at`; `--date` is an alias for nutrition event instants).
+- Event **calendar days** and **query** flags stay flexible (`today`, `yesterday`, `2026-07-05`, …).
+- Nutrition consumption refuses local midnight on the **event** instant unless `--allow-midnight`.
+
 ## CLI Design Rules
 
 - Subcommand vocabulary is stable: `create`, `list`, `show`, `update`, `delete`, `search`, `report`, `import`.
 - Global flags (`--json`, `--db`, `--config`, `--quiet`) are inherited everywhere.
-- Date fields accept flexible human forms: `today`, `yesterday`, `2026-07-05`, `last monday`, etc.
-- Mutating commands return a clear success shape under `--json`:
+- Mutating log creates under `--json` include storage + event keys, e.g.:
   ```json
-  { "success": true, "id": 123, "message": "..." }
+  { "success": true, "id": 123, "created_at": "…Z", "consumed_at": "…Z", "message": "..." }
   ```
+  Measurement/sleep keep calendar `date` as the event day and still include `created_at`.
 - Hard sanity failures → error + non-zero exit. Large deltas → warnings in JSON (unless `--no-sanity-check`).
 - Legacy import is first-class: `recomplog import legacy --from-db /path/to/old.db`
 
@@ -44,9 +63,6 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
 - Instants (points in time) stored as UTC RFC3339 with `Z` only: `YYYY-MM-DDTHH:MM:SSZ`
   (`started_at`, `finished_at`, `recorded_at`, `created_at`/`updated_at`/`imported_at`,
   `purchased_at`, `consumed_at`). Legacy naive values are Buenos Aires (UTC−3).
-- Create/update CLI for instants accepts **RFC3339 only** (any offset → stored as `…Z`).
-  Queries (`--since`, `--until`, `--days`, body `--date`) stay flexible (`today`, …).
-- Nutrition consumption refuses local midnight unless `--allow-midnight` (discouraged).
 
 ## Import / Migration from Legacy Tools
 
@@ -92,9 +108,10 @@ recomplog --json nutrition product create "Oats" --tags breakfast
 # Nutrition units: g (mass), ml (volume), unit (package) — consumption must match product kind.
 # unit = whole discrete item (bar, capsule); pourables (oil, bulk) use g and log the portion only.
 recomplog --json nutrition product nutrition set 3 --reference-quantity 1 --reference-unit unit --energy-kcal 180
-recomplog --json nutrition consumption create --product 3 --quantity 1 --unit unit --date 2026-07-14T13:45:00-03:00
-recomplog --json nutrition consumption create --product 12 --quantity 80 --unit g --date 2026-07-14T08:30:00-03:00
-recomplog --json nutrition purchase create --product 3 --quantity 2 --date 2026-07-14T18:00:00-03:00
+# Event time ≠ storage time (log meal that happened earlier today)
+recomplog --json nutrition consumption create --product 3 --quantity 1 --unit unit --consumed-at 2026-07-14T13:45:00-03:00
+recomplog --json nutrition consumption create --product 12 --quantity 80 --unit g --consumed-at 2026-07-14T08:30:00-03:00
+recomplog --json nutrition purchase create --product 3 --quantity 2 --purchased-at 2026-07-14T18:00:00-03:00
 recomplog --json workout create --type Push --started-at 2026-07-14T17:00:00-03:00
 recomplog --json workout list --days 14
 recomplog --json workout set add --workout 1 --exercise "bench press" --reps 5 --weight 100 --phase full
