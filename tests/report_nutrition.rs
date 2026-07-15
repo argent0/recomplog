@@ -1,12 +1,18 @@
 //! Integration tests for `report nutrition` (summary, list --value, spending --by).
 
 use assert_cmd::Command;
+use chrono::Local;
 use predicates::prelude::*;
 use serde_json::Value;
 use tempfile::TempDir;
 
 fn bin() -> Command {
     Command::cargo_bin("recomplog").unwrap()
+}
+
+fn today_noon_rfc3339() -> String {
+    let ymd = Local::now().date_naive().format("%Y-%m-%d");
+    format!("{ymd}T12:00:00-03:00")
 }
 
 fn setup_fixture(db: &str) {
@@ -136,7 +142,7 @@ fn setup_fixture(db: &str) {
             "--quantity",
             "100",
             "--date",
-            "2026-07-05",
+            "2026-07-05T12:00:00-03:00",
         ])
         .assert()
         .success();
@@ -153,7 +159,7 @@ fn setup_fixture(db: &str) {
             "--quantity",
             "100",
             "--date",
-            "2026-07-05",
+            "2026-07-05T12:00:00-03:00",
         ])
         .assert()
         .success();
@@ -170,7 +176,7 @@ fn setup_fixture(db: &str) {
             "--quantity",
             "50",
             "--date",
-            "2026-07-03",
+            "2026-07-03T12:00:00-03:00",
         ])
         .assert()
         .success();
@@ -193,7 +199,7 @@ fn setup_fixture(db: &str) {
             "--store",
             "1",
             "--date",
-            "2026-07-04",
+            "2026-07-04T12:00:00-03:00",
         ])
         .assert()
         .success();
@@ -214,7 +220,7 @@ fn setup_fixture(db: &str) {
             "--store",
             "2",
             "--date",
-            "2026-07-05",
+            "2026-07-05T12:00:00-03:00",
         ])
         .assert()
         .success();
@@ -342,6 +348,7 @@ fn list_fill_range_zero_days() {
     setup_fixture(&db);
 
     // Log one consumption today so --days 3 has at least one non-empty day
+    let today_at = today_noon_rfc3339();
     bin()
         .args([
             "--db",
@@ -355,7 +362,7 @@ fn list_fill_range_zero_days() {
             "--quantity",
             "100",
             "--date",
-            "today",
+            &today_at,
         ])
         .assert()
         .success();
@@ -638,7 +645,7 @@ fn package_and_mass_units_are_explicit() {
             "--unit",
             "bar",
             "--date",
-            "2026-07-11",
+            "2026-07-11T12:00:00-03:00",
         ],
     );
     assert_eq!(bar["unit"], "unit");
@@ -659,7 +666,7 @@ fn package_and_mass_units_are_explicit() {
             "--unit",
             "unit",
             "--date",
-            "2026-07-11",
+            "2026-07-11T12:00:00-03:00",
         ])
         .assert()
         .success();
@@ -680,7 +687,7 @@ fn package_and_mass_units_are_explicit() {
             "--unit",
             "g",
             "--date",
-            "2026-07-11",
+            "2026-07-11T12:00:00-03:00",
         ])
         .assert()
         .success();
@@ -700,7 +707,7 @@ fn package_and_mass_units_are_explicit() {
             "--unit",
             "bar",
             "--date",
-            "2026-07-11",
+            "2026-07-11T12:00:00-03:00",
         ])
         .assert()
         .failure()
@@ -721,7 +728,7 @@ fn package_and_mass_units_are_explicit() {
             "--unit",
             "g",
             "--date",
-            "2026-07-11",
+            "2026-07-11T12:00:00-03:00",
         ])
         .assert()
         .failure()

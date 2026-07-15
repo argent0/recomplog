@@ -17,8 +17,7 @@
 
 use crate::hr_zones;
 use crate::models::{HeartRateZones, Trackpoint};
-use crate::utils::DATETIME_FMT;
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 const STOP_SPEED_M_S: f64 = 0.5;
@@ -474,9 +473,9 @@ pub fn compute_with_zones(
 }
 
 fn parse_ts_unix(s: &str) -> Option<i64> {
-    NaiveDateTime::parse_from_str(s, DATETIME_FMT)
+    crate::utils::parse_stored_instant(s)
         .ok()
-        .map(|dt| dt.and_utc().timestamp())
+        .map(|dt| dt.timestamp())
 }
 
 fn delta_t(a: Option<i64>, b: Option<i64>) -> Option<i64> {
@@ -919,6 +918,8 @@ fn route_summary(points: &[Trackpoint]) -> Option<RouteSummary> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::{format_instant_utc, DATETIME_FMT};
+    use chrono::NaiveDateTime;
 
     fn tp(t: &str, dist_km: f64, speed: f64, hr: f64) -> Trackpoint {
         Trackpoint {
@@ -935,11 +936,11 @@ mod tests {
 
     fn steady_run(seconds: i64, speed_m_s: f64, hr: f64) -> Vec<Trackpoint> {
         let mut pts = Vec::new();
-        let base = NaiveDateTime::parse_from_str("2026-07-10 10:00:00", DATETIME_FMT).unwrap();
+        let base = NaiveDateTime::parse_from_str("2026-07-10 10:00:00", DATETIME_FMT)
+            .unwrap()
+            .and_utc();
         for s in 0..=seconds {
-            let t = (base + chrono::Duration::seconds(s))
-                .format(DATETIME_FMT)
-                .to_string();
+            let t = format_instant_utc(base + chrono::Duration::seconds(s));
             let dist_km = (speed_m_s * s as f64) / 1000.0;
             let mut p = tp(&t, dist_km, speed_m_s, hr);
             p.cadence_spm = Some(80.0);
@@ -966,27 +967,23 @@ mod tests {
 
     #[test]
     fn stop_in_middle_counts_stopped() {
-        let base = NaiveDateTime::parse_from_str("2026-07-10 10:00:00", DATETIME_FMT).unwrap();
+        let base = NaiveDateTime::parse_from_str("2026-07-10 10:00:00", DATETIME_FMT)
+            .unwrap()
+            .and_utc();
         let mut pts = Vec::new();
         // 100 s moving at 3 m/s
         for s in 0..=100 {
-            let t = (base + chrono::Duration::seconds(s))
-                .format(DATETIME_FMT)
-                .to_string();
+            let t = format_instant_utc(base + chrono::Duration::seconds(s));
             pts.push(tp(&t, 3.0 * s as f64 / 1000.0, 3.0, 140.0));
         }
         // 60 s stopped
         for s in 101..=160 {
-            let t = (base + chrono::Duration::seconds(s))
-                .format(DATETIME_FMT)
-                .to_string();
+            let t = format_instant_utc(base + chrono::Duration::seconds(s));
             pts.push(tp(&t, 0.3, 0.0, 120.0));
         }
         // 100 s moving again
         for s in 161..=260 {
-            let t = (base + chrono::Duration::seconds(s))
-                .format(DATETIME_FMT)
-                .to_string();
+            let t = format_instant_utc(base + chrono::Duration::seconds(s));
             let dist = 0.3 + 3.0 * (s - 160) as f64 / 1000.0;
             pts.push(tp(&t, dist, 3.0, 145.0));
         }
@@ -1002,7 +999,9 @@ mod tests {
     fn gps_square_is_loop() {
         // Rough ~1 km sides near equator: 1/111 deg ≈ 0.009 deg lat
         let step = 0.009;
-        let base = NaiveDateTime::parse_from_str("2026-07-10 10:00:00", DATETIME_FMT).unwrap();
+        let base = NaiveDateTime::parse_from_str("2026-07-10 10:00:00", DATETIME_FMT)
+            .unwrap()
+            .and_utc();
         let corners = [
             (0.0, 0.0),
             (step, 0.0),
@@ -1012,9 +1011,7 @@ mod tests {
         ];
         let mut pts = Vec::new();
         for (i, (lat, lon)) in corners.iter().enumerate() {
-            let t = (base + chrono::Duration::seconds(i as i64 * 300))
-                .format(DATETIME_FMT)
-                .to_string();
+            let t = format_instant_utc(base + chrono::Duration::seconds(i as i64 * 300));
             let mut p = tp(&t, i as f64, 3.0, 140.0);
             p.latitude = Some(*lat);
             p.longitude = Some(*lon);
@@ -1029,13 +1026,13 @@ mod tests {
 
     #[test]
     fn hr_drift_positive_when_second_half_harder() {
-        let base = NaiveDateTime::parse_from_str("2026-07-10 10:00:00", DATETIME_FMT).unwrap();
+        let base = NaiveDateTime::parse_from_str("2026-07-10 10:00:00", DATETIME_FMT)
+            .unwrap()
+            .and_utc();
         let mut pts = Vec::new();
         // 200 s at speed 3, HR 140 then 200 s speed 3, HR 170
         for s in 0..=400 {
-            let t = (base + chrono::Duration::seconds(s))
-                .format(DATETIME_FMT)
-                .to_string();
+            let t = format_instant_utc(base + chrono::Duration::seconds(s));
             let hr = if s <= 200 { 140.0 } else { 170.0 };
             pts.push(tp(&t, 3.0 * s as f64 / 1000.0, 3.0, hr));
         }
@@ -1046,13 +1043,13 @@ mod tests {
 
     #[test]
     fn elevation_smoothed_ignores_noise() {
-        let base = NaiveDateTime::parse_from_str("2026-07-10 10:00:00", DATETIME_FMT).unwrap();
+        let base = NaiveDateTime::parse_from_str("2026-07-10 10:00:00", DATETIME_FMT)
+            .unwrap()
+            .and_utc();
         let alts = [100.0, 100.5, 101.0, 110.0, 110.3, 120.0]; // +10 +10 real after noise floor
         let mut pts = Vec::new();
         for (i, alt) in alts.iter().enumerate() {
-            let t = (base + chrono::Duration::seconds(i as i64 * 10))
-                .format(DATETIME_FMT)
-                .to_string();
+            let t = format_instant_utc(base + chrono::Duration::seconds(i as i64 * 10));
             let mut p = tp(&t, i as f64 * 0.05, 3.0, 140.0);
             p.altitude_m = Some(*alt);
             pts.push(p);

@@ -38,7 +38,10 @@ This document defines the coding standards for the unified `recomplog` project.
 6. **Database**
    - All changes via migrations in `migrations/`.
    - Foreign keys on.
-   - UTC timestamps.
+   - Instants: UTC RFC3339 (`YYYY-MM-DDTHH:MM:SSZ`) only — write via `format_instant_utc` /
+     `now_utc` / `parse_rfc3339_instant_for_db` + `validate_instant_for_db`.
+   - Calendar days: `YYYY-MM-DD` only.
+   - Never rely on SQLite `datetime('now')` for new rows; always set timestamps from Rust.
    - Keep the model pragmatic.
 
 7. **Testing**

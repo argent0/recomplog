@@ -154,12 +154,12 @@ fn fetch_html_nutrition_daily(conn: &Connection, since: &str, until: &str) -> Re
     // Aggregate in Rust so discrete units (bar, cup, serving) use the same
     // consumption_scale rules as `report nutrition` / `report brief`.
     let mut stmt = conn.prepare(
-        "SELECT date(c.consumed_at) AS d,
+        "SELECT date(c.consumed_at, 'localtime') AS d,
                 c.quantity, c.unit, pn.reference_quantity, pn.reference_unit,
                 pn.energy_kcal, pn.protein_g, pn.carbohydrates_g, pn.fat_g, pn.fiber_g, pn.sugars_g
          FROM consumptions c
          LEFT JOIN product_nutritions pn ON pn.product_id = c.product_id
-         WHERE date(c.consumed_at) >= date(?1) AND date(c.consumed_at) <= date(?2)
+         WHERE date(c.consumed_at, 'localtime') >= date(?1) AND date(c.consumed_at, 'localtime') <= date(?2)
          ORDER BY d ASC",
     )?;
     let mut by_day: std::collections::BTreeMap<String, NutDay> = std::collections::BTreeMap::new();

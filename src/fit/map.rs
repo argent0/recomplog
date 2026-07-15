@@ -241,10 +241,9 @@ pub fn compute_hr_zones(
 }
 
 fn timestamp_delta_seconds(a: &str, b: &str) -> Option<i64> {
-    use crate::utils::DATETIME_FMT;
-    use chrono::NaiveDateTime;
-    let da = NaiveDateTime::parse_from_str(a, DATETIME_FMT).ok()?;
-    let db = NaiveDateTime::parse_from_str(b, DATETIME_FMT).ok()?;
+    use crate::utils::parse_stored_instant;
+    let da = parse_stored_instant(a).ok()?;
+    let db = parse_stored_instant(b).ok()?;
     Some((db - da).num_seconds())
 }
 

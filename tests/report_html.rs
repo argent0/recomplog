@@ -159,7 +159,7 @@ fn setup_full_fixture(db: &str) {
             "--quantity",
             "100",
             "--date",
-            "2026-07-05",
+            "2026-07-05T12:00:00-03:00",
         ])
         .assert()
         .success();
@@ -177,7 +177,7 @@ fn setup_full_fixture(db: &str) {
             "--quantity",
             "500",
             "--date",
-            "2026-07-08",
+            "2026-07-08T12:00:00-03:00",
         ])
         .assert()
         .success();

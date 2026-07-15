@@ -16,7 +16,7 @@ This document describes the unified command structure.
 
 ```bash
 recomplog workout create --type Push
-recomplog workout create --type Push --started-at "2026-07-10 17:00" --finished-at "2026-07-10 18:30"
+recomplog workout create --type Push --started-at "2026-07-10T17:00:00-03:00" --finished-at "2026-07-10T18:30:00-03:00"
 recomplog workout update 1 --finished-at "2026-07-10 19:00"
 recomplog workout list --days 14
 recomplog workout show 42
@@ -100,7 +100,9 @@ recomplog --json report nutrition spending --since 2026-01-01 --by product
 5. Focal-day workouts **in full detail** (same shape as `workout show`: exercises + sets)
 6. Previous N days workout overview (session/volume stats + compact list)
 
-`--date` accepts flexible forms (`today`, `yesterday`, `YYYY-MM-DD`, `last monday`, …). Lookback (`--days`) is inclusive of the anchor day for nutrition/body/sleep; previous workouts use the N days *before* the anchor.
+Query `--date` / `--since` / `--until` accept flexible forms (`today`, `yesterday`, `YYYY-MM-DD`, `last monday`, …). Lookback (`--days`) is inclusive of the anchor day for nutrition/body/sleep; previous workouts use the N days *before* the anchor.
+
+**Create/update instants** (workout `--started-at` / `--finished-at`, nutrition purchase/consumption `--date`) require **RFC3339** (any offset; stored as UTC `…Z`). Consumption at local midnight is refused unless `--allow-midnight` (discouraged).
 
 Nutrition report date flags: `--days N` cannot be combined with `--since` / `--until`.
 

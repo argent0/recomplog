@@ -87,7 +87,7 @@ fn store_product_micro_purchase() {
             "--store",
             "1",
             "--date",
-            "today",
+            "2026-07-14T15:30:00-03:00",
         ])
         .assert()
         .success();

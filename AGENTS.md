@@ -40,8 +40,13 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
 - All schema changes go through numbered migrations in `migrations/`.
 - One SQLite file (`recomplog.db`).
 - Use `rusqlite`. Prefer explicit queries over heavy ORMs.
-- Date storage: `TEXT 'YYYY-MM-DD'` for calendar days, full datetimes where needed.
-- Timestamps stored as UTC (or SQLite `datetime('now')`).
+- Date storage: `TEXT 'YYYY-MM-DD'` for calendar days (`measurements.date`, `sleep.date`, DOB).
+- Instants (points in time) stored as UTC RFC3339 with `Z` only: `YYYY-MM-DDTHH:MM:SSZ`
+  (`started_at`, `finished_at`, `recorded_at`, `created_at`/`updated_at`/`imported_at`,
+  `purchased_at`, `consumed_at`). Legacy naive values are Buenos Aires (UTC−3).
+- Create/update CLI for instants accepts **RFC3339 only** (any offset → stored as `…Z`).
+  Queries (`--since`, `--until`, `--days`, body `--date`) stay flexible (`today`, …).
+- Nutrition consumption refuses local midnight unless `--allow-midnight` (discouraged).
 
 ## Import / Migration from Legacy Tools
 
@@ -87,9 +92,10 @@ recomplog --json nutrition product create "Oats" --tags breakfast
 # Nutrition units: g (mass), ml (volume), unit (package) — consumption must match product kind.
 # unit = whole discrete item (bar, capsule); pourables (oil, bulk) use g and log the portion only.
 recomplog --json nutrition product nutrition set 3 --reference-quantity 1 --reference-unit unit --energy-kcal 180
-recomplog --json nutrition consumption create --product 3 --quantity 1 --unit unit
-recomplog --json nutrition consumption create --product 12 --quantity 80 --unit g
-recomplog --json nutrition consumption create --product 16 --quantity 7 --unit g
+recomplog --json nutrition consumption create --product 3 --quantity 1 --unit unit --date 2026-07-14T13:45:00-03:00
+recomplog --json nutrition consumption create --product 12 --quantity 80 --unit g --date 2026-07-14T08:30:00-03:00
+recomplog --json nutrition purchase create --product 3 --quantity 2 --date 2026-07-14T18:00:00-03:00
+recomplog --json workout create --type Push --started-at 2026-07-14T17:00:00-03:00
 recomplog --json workout list --days 14
 recomplog --json workout set add --workout 1 --exercise "bench press" --reps 5 --weight 100 --phase full
 recomplog --json workout set add-cluster --workout 1 --exercise "bench press" --reps "10,5,5" --weight 100 --phase full --rir "0,0,1" --effective-reps "6,4,3" --rest 15

@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
-/// Inclusive calendar window bind for `date(started_at) >= date('now', ?)`.
+/// Inclusive calendar window bind for `date(started_at, 'localtime') >= date('now', 'localtime', ?)`.
 fn since_bind(days: i64) -> String {
     format!("-{} days", days.saturating_sub(1))
 }
@@ -137,7 +137,7 @@ pub fn handle_volume(
          JOIN workout_exercises we ON s.workout_exercise_id = we.id
          JOIN exercises e ON we.exercise_id = e.id
          JOIN workouts w ON we.workout_id = w.id
-         WHERE date(w.started_at) >= date('now', ?1)",
+         WHERE date(w.started_at, 'localtime') >= date('now', 'localtime', ?1)",
     );
     if exercise_name.is_some() {
         sql.push_str(" AND e.name = ?2");
@@ -219,9 +219,9 @@ pub fn handle_summary(conn: &Connection, days: i64, json: bool) -> Result<()> {
     let since = since_bind(days);
 
     let mut stmt = conn.prepare(
-        "SELECT id, duration_minutes, date(started_at)
+        "SELECT id, duration_minutes, date(started_at, 'localtime')
          FROM workouts
-         WHERE date(started_at) >= date('now', ?1)
+         WHERE date(started_at, 'localtime') >= date('now', 'localtime', ?1)
          ORDER BY started_at DESC",
     )?;
     let workouts: Vec<(i64, Option<i32>, String)> = stmt
@@ -247,7 +247,7 @@ pub fn handle_summary(conn: &Connection, days: i64, json: bool) -> Result<()> {
              FROM exercise_sets s
              JOIN workout_exercises we ON s.workout_exercise_id = we.id
              JOIN workouts w ON we.workout_id = w.id
-             WHERE date(w.started_at) >= date('now', ?1)",
+             WHERE date(w.started_at, 'localtime') >= date('now', 'localtime', ?1)",
             params![since],
             |r| r.get(0),
         )
@@ -301,7 +301,7 @@ pub fn handle_history(conn: &Connection, exercise: &str, days: i64, json: bool) 
          JOIN workout_exercises we ON s.workout_exercise_id = we.id
          JOIN exercises e ON we.exercise_id = e.id
          JOIN workouts w ON we.workout_id = w.id
-         WHERE e.name = ?1 AND date(w.started_at) >= date('now', ?2)
+         WHERE e.name = ?1 AND date(w.started_at, 'localtime') >= date('now', 'localtime', ?2)
          ORDER BY w.started_at ASC, s.set_number ASC",
     )?;
 

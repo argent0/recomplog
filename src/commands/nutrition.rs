@@ -6,7 +6,10 @@ use crate::cli::{
 };
 use crate::db;
 use crate::models::Success;
-use crate::utils::{parse_date_to_ymd, print_error_json, print_json, quiet_print};
+use crate::utils::{
+    parse_date_to_ymd, parse_rfc3339_instant_for_db, parse_rfc3339_to_utc, print_error_json,
+    print_json, quiet_print, refuse_consumption_midnight,
+};
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use strsim::jaro_winkler;
@@ -681,7 +684,7 @@ fn handle_purchase(
             store,
             date,
         } => {
-            let when = parse_date_to_ymd(&date)?;
+            let when = parse_rfc3339_instant_for_db(&date)?;
             let now = db::now_utc();
             let price_cents: Option<i64> = price
                 .and_then(|p| p.replace(['$', ','], "").parse::<f64>().ok())
@@ -710,11 +713,11 @@ fn handle_purchase(
             );
             let mut binds: Vec<String> = vec![];
             if let Some(s) = since {
-                sql.push_str(" AND date(pu.purchased_at) >= date(?)");
+                sql.push_str(" AND date(pu.purchased_at, 'localtime') >= date(?)");
                 binds.push(parse_date_to_ymd(&s)?);
             }
             if let Some(u) = until {
-                sql.push_str(" AND date(pu.purchased_at) <= date(?)");
+                sql.push_str(" AND date(pu.purchased_at, 'localtime') <= date(?)");
                 binds.push(parse_date_to_ymd(&u)?);
             }
             if let Some(pid) = product {
@@ -806,8 +809,11 @@ fn handle_consumption(
             quantity,
             unit,
             date,
+            allow_midnight,
         } => {
-            let when = parse_date_to_ymd(&date)?;
+            let when_dt = parse_rfc3339_to_utc(&date)?;
+            refuse_consumption_midnight(when_dt, allow_midnight)?;
+            let when = parse_rfc3339_instant_for_db(&date)?;
             let now = db::now_utc();
             let product_name: Option<String> = conn
                 .query_row("SELECT name FROM products WHERE id = ?1", [product], |r| {
@@ -878,11 +884,11 @@ fn handle_consumption(
             );
             let mut binds: Vec<String> = vec![];
             if let Some(s) = since {
-                sql.push_str(" AND date(c.consumed_at) >= date(?)");
+                sql.push_str(" AND date(c.consumed_at, 'localtime') >= date(?)");
                 binds.push(parse_date_to_ymd(&s)?);
             }
             if let Some(u) = until {
-                sql.push_str(" AND date(c.consumed_at) <= date(?)");
+                sql.push_str(" AND date(c.consumed_at, 'localtime') <= date(?)");
                 binds.push(parse_date_to_ymd(&u)?);
             }
             if let Some(pid) = product {

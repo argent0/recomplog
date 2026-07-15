@@ -1,7 +1,7 @@
 use crate::error::{RecomplogError, Result};
 use crate::models::Trackpoint;
-use crate::utils::DATETIME_FMT;
-use chrono::{DateTime, Local, NaiveDateTime};
+use crate::utils::{format_instant_utc, parse_stored_instant, DATETIME_FMT};
+use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use fitparser::profile::MesgNum;
 use fitparser::Value;
 use std::fs::File;
@@ -304,8 +304,8 @@ pub fn parse_fit_bytes(bytes: &[u8]) -> Result<FitActivity> {
         }
     }
 
-    // Prefer session.start_time (true activity start in local TZ). Fall back to
-    // activity.timestamp. Both format as naive local wall clock via DATETIME_FMT.
+    // Prefer session.start_time (true activity start). Fall back to activity.timestamp.
+    // Stored as UTC RFC3339 (`…Z`).
     activity.started_at = session_start.or(local_timestamp).ok_or_else(|| {
         RecomplogError::Import("FIT file has no session.start_time or activity.timestamp".into())
     })?;
@@ -359,26 +359,26 @@ fn value_as_string(v: &Value) -> Option<String> {
 
 fn value_as_datetime_string(v: &Value) -> Option<String> {
     match v {
-        Value::Timestamp(dt) => Some(format_local_dt(dt)),
+        Value::Timestamp(dt) => Some(format_fit_dt_utc(dt)),
         Value::String(s) => {
-            // Try common formats
+            if let Ok(canonical) = parse_stored_instant(s).map(format_instant_utc) {
+                return Some(canonical);
+            }
             if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-                return Some(dt.with_timezone(&Local).format(DATETIME_FMT).to_string());
+                return Some(format_instant_utc(dt.with_timezone(&Utc)));
             }
             if let Ok(ndt) = NaiveDateTime::parse_from_str(s, DATETIME_FMT) {
-                return Some(ndt.format(DATETIME_FMT).to_string());
+                // Legacy string: treat as UTC wall clock for FIT text rare path.
+                return Some(format_instant_utc(ndt.and_utc()));
             }
-            Some(s.clone())
-        }
-        _ => {
-            // Numeric FIT epoch seconds? Unlikely after profile decode.
             None
         }
+        _ => None,
     }
 }
 
-fn format_local_dt(dt: &DateTime<Local>) -> String {
-    dt.format(DATETIME_FMT).to_string()
+fn format_fit_dt_utc(dt: &DateTime<Local>) -> String {
+    format_instant_utc(dt.with_timezone(&Utc))
 }
 
 fn lat_lon_degrees(v: &Value, units: &str) -> Option<f64> {
@@ -442,17 +442,17 @@ mod tests {
             path.display()
         );
         let act = parse_fit_path(&path).expect("parse sample");
+        // Session start is 2026-07-10 19:49:35 UTC (filename 16:49:35 is UTC-3 wall).
         assert!(
-            act.started_at.starts_with("2026-07-10"),
-            "started_at={}",
+            act.started_at.starts_with("2026-07-10T") && act.started_at.ends_with('Z'),
+            "started_at should be UTC RFC3339, got {}",
             act.started_at
         );
-        // Session start is 2026-07-10 19:49:35 UTC → 16:49:35 in UTC-3 (filename)
         assert!(
-            act.started_at.contains("16:49:35")
-                || act.started_at.contains("19:49:35")
-                || act.started_at.contains("15:49:35")
-                || act.started_at.contains("18:49:35"),
+            act.started_at.contains("19:49:35")
+                || act.started_at.contains("16:49:35")
+                || act.started_at.contains("18:49:35")
+                || act.started_at.contains("15:49:35"),
             "unexpected started_at={}",
             act.started_at
         );

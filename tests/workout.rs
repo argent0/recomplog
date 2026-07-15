@@ -245,9 +245,9 @@ fn finished_at_create_update_list_show() {
             "--type",
             "Push",
             "--started-at",
-            "2026-07-10 17:00:00",
+            "2026-07-10T17:00:00Z",
             "--finished-at",
-            "2026-07-10 18:30:00",
+            "2026-07-10T18:30:00Z",
         ])
         .assert()
         .success()
@@ -276,7 +276,7 @@ fn finished_at_create_update_list_show() {
             "update",
             "1",
             "--finished-at",
-            "2026-07-10 19:00:00",
+            "2026-07-10T19:00:00Z",
         ])
         .assert()
         .success()
@@ -298,7 +298,7 @@ fn finished_at_create_update_list_show() {
             "update",
             "1",
             "--finished-at",
-            "2026-07-10 20:00:00",
+            "2026-07-10T20:00:00Z",
             "--dry-run",
         ])
         .assert()

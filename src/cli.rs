@@ -118,10 +118,10 @@ pub enum Commands {
 pub enum WorkoutAction {
     /// Create a new workout session (container for exercises/sets).
     Create {
-        /// Start time (YYYY-MM-DD HH:MM:SS or flexible)
+        /// Start time as RFC3339 (e.g. 2026-07-14T18:30:00-03:00). Default: now (UTC Z).
         #[arg(long)]
         started_at: Option<String>,
-        /// End time (YYYY-MM-DD HH:MM:SS or flexible)
+        /// End time as RFC3339 (e.g. 2026-07-14T19:45:00-03:00). Stored as UTC Z.
         #[arg(long = "finished-at")]
         finished_at: Option<String>,
         /// e.g. Push, Pull, Run, Full Body
@@ -153,9 +153,10 @@ pub enum WorkoutAction {
         duration: Option<i32>,
         #[arg(long)]
         feeling: Option<i32>,
+        /// Start time as RFC3339 (stored as UTC Z).
         #[arg(long)]
         started_at: Option<String>,
-        /// End time (YYYY-MM-DD HH:MM:SS or flexible)
+        /// End time as RFC3339 (stored as UTC Z).
         #[arg(long = "finished-at")]
         finished_at: Option<String>,
         /// Validate and show what would be updated without writing.
@@ -948,12 +949,15 @@ pub enum PurchaseAction {
         price: Option<String>,
         #[arg(long)]
         store: Option<i64>,
-        #[arg(long, default_value = "today")]
+        /// Purchase instant as RFC3339 (e.g. 2026-07-14T18:30:00-03:00). Required.
+        #[arg(long)]
         date: String,
     },
     List {
+        /// Flexible calendar day: today, yesterday, YYYY-MM-DD, …
         #[arg(long)]
         since: Option<String>,
+        /// Flexible calendar day: today, yesterday, YYYY-MM-DD, …
         #[arg(long)]
         until: Option<String>,
         #[arg(long)]
@@ -981,12 +985,18 @@ pub enum ConsumptionAction {
         /// Omit to use the product’s reference unit. Aliases: bar, cup, capsule → unit.
         #[arg(long)]
         unit: Option<String>,
-        #[arg(long, default_value = "today")]
+        /// Consumption instant as RFC3339 (e.g. 2026-07-14T13:45:00-03:00). Required.
+        #[arg(long)]
         date: String,
+        /// Allow logging at local midnight (discouraged; usually a missing time-of-day).
+        #[arg(long = "allow-midnight")]
+        allow_midnight: bool,
     },
     List {
+        /// Flexible calendar day: today, yesterday, YYYY-MM-DD, …
         #[arg(long)]
         since: Option<String>,
+        /// Flexible calendar day: today, yesterday, YYYY-MM-DD, …
         #[arg(long)]
         until: Option<String>,
         #[arg(long)]

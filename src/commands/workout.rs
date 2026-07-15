@@ -13,8 +13,8 @@ use crate::track_metrics::{
     compute, compute_with_zones, RouteKind, TrackMetrics, ZoneRecomputeContext,
 };
 use crate::utils::{
-    format_duration, format_hr_zones_bar, format_pace, parse_flexible_datetime, print_error_json,
-    print_json, print_table, quiet_print,
+    format_duration, format_hr_zones_bar, format_pace, parse_rfc3339_instant_for_db,
+    print_error_json, print_json, print_table, quiet_print,
 };
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -49,13 +49,14 @@ pub fn handle(
         } => {
             let conn = db::open_db(db_override)?;
             let started = match started_at {
-                Some(s) => parse_flexible_datetime(&s)?,
+                Some(s) => parse_rfc3339_instant_for_db(&s)?,
                 None => db::now_utc(),
             };
             let finished = finished_at
                 .as_ref()
-                .map(|s| parse_flexible_datetime(s))
+                .map(|s| parse_rfc3339_instant_for_db(s))
                 .transpose()?;
+            let created = db::now_utc();
             if dry_run {
                 return emit_dry_run(
                     json,
@@ -70,8 +71,9 @@ pub fn handle(
                 );
             }
             conn.execute(
-                "INSERT INTO workouts (started_at, finished_at, workout_type, notes) VALUES (?1, ?2, ?3, ?4)",
-                params![started, finished, workout_type, notes],
+                "INSERT INTO workouts (started_at, finished_at, workout_type, notes, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![started, finished, workout_type, notes, created],
             )?;
             let id = conn.last_insert_rowid();
             if json {
@@ -90,7 +92,7 @@ pub fn handle(
             );
             let mut binds: Vec<String> = vec![];
             if let Some(d) = days {
-                sql.push_str(" AND date(started_at) >= date('now', ?)");
+                sql.push_str(" AND date(started_at, 'localtime') >= date('now', 'localtime', ?)");
                 binds.push(format!("-{} days", d.saturating_sub(1)));
             }
             sql.push_str(" ORDER BY started_at DESC LIMIT ?");
@@ -172,11 +174,11 @@ pub fn handle(
             }
             let started = started_at
                 .as_ref()
-                .map(|s| parse_flexible_datetime(s))
+                .map(|s| parse_rfc3339_instant_for_db(s))
                 .transpose()?;
             let finished = finished_at
                 .as_ref()
-                .map(|s| parse_flexible_datetime(s))
+                .map(|s| parse_rfc3339_instant_for_db(s))
                 .transpose()?;
             // Dynamic partial update
             let mut sets = vec![];
@@ -1249,9 +1251,9 @@ fn handle_exercise(
                 );
             }
             conn.execute(
-                "INSERT INTO exercises (name, category, equipment, load_type, muscle_groups, description, is_custom)
-                 VALUES (?1,?2,?3,?4,?5,?6,1)",
-                params![name, category, eq, lt, muscles, description],
+                "INSERT INTO exercises (name, category, equipment, load_type, muscle_groups, description, is_custom, created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,1,?7)",
+                params![name, category, eq, lt, muscles, description, db::now_utc()],
             )?;
             let id = conn.last_insert_rowid();
             if json {
@@ -1609,8 +1611,8 @@ fn insert_set(
           distance_km, duration_seconds, rpe, rir, effective_reps, cluster_id, rest_seconds,
           notes, side, phase, avg_heart_rate_bpm, max_heart_rate_bpm, avg_pace_min_per_km,
           calories_burned, avg_cadence_spm, total_ascent_m, total_descent_m,
-          heart_rate_zones, laps)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
+          heart_rate_zones, laps, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
         params![
             we_id,
             set_number,
@@ -1636,6 +1638,7 @@ fn insert_set(
             total_descent_m,
             zones_json,
             laps_json,
+            db::now_utc(),
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -2830,9 +2833,9 @@ pub fn seed_default_exercises(conn: &Connection) -> Result<Vec<String>> {
             .optional()?;
         if exists.is_none() {
             conn.execute(
-                "INSERT INTO exercises (name, category, muscle_groups, equipment, load_type, description, is_custom)
-                 VALUES (?1,?2,?3,?4,?5,?6,0)",
-                params![name, cat, muscles, eq, lt, desc],
+                "INSERT INTO exercises (name, category, muscle_groups, equipment, load_type, description, is_custom, created_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,0,?7)",
+                params![name, cat, muscles, eq, lt, desc, db::now_utc()],
             )?;
             added.push(name.to_string());
         }

@@ -44,7 +44,7 @@ pub fn open_db(override_path: Option<&str>) -> Result<Connection> {
 }
 
 /// Current schema version. Bump when adding a new migration block.
-const CURRENT_VERSION: i32 = 4;
+const CURRENT_VERSION: i32 = 5;
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i32 = conn
@@ -76,7 +76,93 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         promote_whole_package_products(conn)?;
         conn.execute("PRAGMA user_version = 4", [])?;
     }
+    if current < 5 {
+        normalize_instants_to_rfc3339(conn)?;
+        conn.execute("PRAGMA user_version = 5", [])?;
+    }
 
+    Ok(())
+}
+
+/// Re-run instant normalization (also used after legacy import of naive timestamps).
+pub fn normalize_instants_to_rfc3339_public(conn: &Connection) -> Result<()> {
+    normalize_instants_to_rfc3339(conn)
+}
+
+/// Rewrite all instant TEXT columns to canonical UTC RFC3339 (`…Z`).
+/// Legacy naive datetimes are interpreted as Buenos Aires (UTC−3).
+fn normalize_instants_to_rfc3339(conn: &Connection) -> Result<()> {
+    use crate::utils::normalize_stored_instant_to_db;
+
+    /// (table, id_column, value_column)
+    const COLUMNS: &[(&str, &str, &str)] = &[
+        ("exercises", "id", "created_at"),
+        ("workouts", "id", "started_at"),
+        ("workouts", "id", "finished_at"),
+        ("workouts", "id", "created_at"),
+        ("exercise_sets", "id", "created_at"),
+        ("activity_imports", "id", "imported_at"),
+        ("activity_trackpoints", "id", "recorded_at"),
+        ("measurements", "id", "created_at"),
+        ("measurements", "id", "updated_at"),
+        ("sleep", "id", "created_at"),
+        ("sleep", "id", "updated_at"),
+        ("user_profile", "id", "updated_at"),
+        ("products", "id", "created_at"),
+        ("products", "id", "updated_at"),
+        ("nutrients", "id", "created_at"),
+        ("product_tags", "id", "created_at"),
+        ("store_tags", "id", "created_at"),
+        ("stores", "id", "created_at"),
+        ("purchases", "id", "purchased_at"),
+        ("purchases", "id", "created_at"),
+        ("consumptions", "id", "consumed_at"),
+        ("consumptions", "id", "created_at"),
+    ];
+
+    for &(table, id_col, value_col) in COLUMNS {
+        // Table may be missing on partial schemas; skip quietly.
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !exists {
+            continue;
+        }
+
+        let select_sql = format!("SELECT {id_col}, {value_col} FROM {table}");
+        let rows: Vec<(i64, Option<String>)> = {
+            let mut stmt = conn
+                .prepare(&select_sql)
+                .with_context(|| format!("prepare select for {table}.{value_col}"))?;
+            let mapped = stmt
+                .query_map([], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            mapped
+        };
+
+        let update_sql = format!("UPDATE {table} SET {value_col} = ?1 WHERE {id_col} = ?2");
+        for (id, value) in rows {
+            let Some(raw) = value else {
+                continue;
+            };
+            if raw.trim().is_empty() {
+                continue;
+            }
+            let canonical = normalize_stored_instant_to_db(&raw)
+                .with_context(|| format!("normalize {table}.{value_col} id={id} value={raw:?}"))?;
+            if canonical != raw {
+                conn.execute(&update_sql, rusqlite::params![canonical, id])
+                    .with_context(|| format!("update {table}.{value_col} id={id}"))?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -701,11 +787,14 @@ pub fn open_legacy_db_readonly(path: &str) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Common timestamp helper (UTC ISO-ish string).
+/// Current UTC instant in canonical DB form (`YYYY-MM-DDTHH:MM:SSZ`).
 pub fn now_utc() -> String {
-    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+    crate::utils::format_instant_utc(chrono::Utc::now())
 }
 
-/// Re-export flexible date helpers for convenience.
+/// Re-export date helpers for convenience.
 #[allow(unused_imports)]
-pub use crate::utils::{parse_date_to_ymd, parse_flexible_date, parse_flexible_datetime};
+pub use crate::utils::{
+    parse_date_to_ymd, parse_flexible_date, parse_rfc3339_instant_for_db, parse_rfc3339_to_utc,
+    validate_instant_for_db,
+};

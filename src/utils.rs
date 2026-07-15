@@ -1,19 +1,132 @@
 //! Shared helpers: tables, durations, flexible dates, JSON output.
+/// Legacy naive wall-clock format (`YYYY-MM-DD HH:MM:SS`) still present in old DBs / fixtures.
 pub const DATETIME_FMT: &str = "%Y-%m-%d %H:%M:%S";
 
 use crate::error::RecomplogError;
 use anyhow::{anyhow, Result as AnyResult};
-use chrono::{DateTime, Datelike, Local, NaiveDate, Weekday};
+use chrono::{
+    DateTime, Datelike, FixedOffset, Local, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone,
+    Timelike, Utc, Weekday,
+};
 use comfy_table::Table;
 use serde::Serialize;
 
 /// Header underline only — no outer borders, column dividers, or row separators.
 const HEADER_ONLY_PRESET: &str = "    ──              ";
 
-/// Normalize a stored datetime string for display (`YYYY-MM-DD HH:MM:SS`).
+/// Buenos Aires / Argentina fixed offset (UTC−3, no DST). Used only to interpret
+/// **legacy** naive datetimes already stored in the database.
+pub fn legacy_local_tz() -> FixedOffset {
+    FixedOffset::west_opt(3 * 3600).expect("UTC-3 is a valid fixed offset")
+}
+
+/// Canonical DB/API form for instants: `YYYY-MM-DDTHH:MM:SSZ`.
+pub fn format_instant_utc(dt: DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// Parse create/update CLI input: RFC3339 only (any offset), as UTC.
+pub fn parse_rfc3339_to_utc(s: &str) -> AnyResult<DateTime<Utc>> {
+    let s = s.trim();
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| {
+            anyhow!(
+                "invalid instant '{}': expected RFC3339 (e.g. 2026-07-14T18:30:00-03:00 or …Z): {}",
+                s,
+                e
+            )
+        })
+}
+
+/// Parse RFC3339 create input and return canonical DB string (`…Z`).
+pub fn parse_rfc3339_instant_for_db(s: &str) -> AnyResult<String> {
+    Ok(format_instant_utc(parse_rfc3339_to_utc(s)?))
+}
+
+/// Accept **only** the canonical stored form `YYYY-MM-DDTHH:MM:SSZ`.
+/// Use after `format_instant_utc` / `parse_rfc3339_instant_for_db` on write paths.
+pub fn validate_instant_for_db(s: &str) -> AnyResult<String> {
+    let s = s.trim();
+    let Ok(dt) = DateTime::parse_from_rfc3339(s) else {
+        return Err(anyhow!(
+            "instant must be canonical UTC RFC3339 (YYYY-MM-DDTHH:MM:SSZ), got '{}'",
+            s
+        ));
+    };
+    let utc = dt.with_timezone(&Utc);
+    let canonical = format_instant_utc(utc);
+    if s != canonical {
+        return Err(anyhow!(
+            "instant must be canonical UTC RFC3339 (…Z with second precision), got '{}'; use '{}'",
+            s,
+            canonical
+        ));
+    }
+    Ok(canonical)
+}
+
+/// Dual-read helper for values already in the DB (or legacy import): RFC3339, naive
+/// wall clock in Buenos Aires, or date-only (legacy nutrition → BA noon).
+pub fn parse_stored_instant(s: &str) -> AnyResult<DateTime<Utc>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(anyhow!("empty instant"));
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    let tz = legacy_local_tz();
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(s, DATETIME_FMT) {
+        return naive_local_to_utc(ndt, tz);
+    }
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+        return naive_local_to_utc(ndt, tz);
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let ndt = d
+            .and_hms_opt(12, 0, 0)
+            .ok_or_else(|| anyhow!("invalid date '{}'", s))?;
+        return naive_local_to_utc(ndt, tz);
+    }
+    Err(anyhow!("unrecognized stored instant '{}'", s))
+}
+
+fn naive_local_to_utc(ndt: NaiveDateTime, tz: FixedOffset) -> AnyResult<DateTime<Utc>> {
+    tz.from_local_datetime(&ndt)
+        .single()
+        .map(|dt| dt.with_timezone(&Utc))
+        .ok_or_else(|| anyhow!("ambiguous or invalid local datetime {}", ndt))
+}
+
+/// Normalize any readable stored/legacy instant to canonical `…Z` for DB write-back.
+pub fn normalize_stored_instant_to_db(s: &str) -> AnyResult<String> {
+    let canonical = format_instant_utc(parse_stored_instant(s)?);
+    validate_instant_for_db(&canonical)
+}
+
+/// True when the instant falls on local wall-clock midnight (00:00:00).
+pub fn is_local_midnight(dt: DateTime<Utc>) -> bool {
+    let local = dt.with_timezone(&Local);
+    local.hour() == 0 && local.minute() == 0 && local.second() == 0
+}
+
+/// Refuse consumption at local midnight unless `--allow-midnight` (discouraged).
+pub fn refuse_consumption_midnight(dt: DateTime<Utc>, allow_midnight: bool) -> AnyResult<()> {
+    if allow_midnight || !is_local_midnight(dt) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "refusing consumption at local midnight (often a missing time-of-day). \
+         Pass a real local time as RFC3339 (e.g. 2026-07-14T13:45:00-03:00), \
+         or --allow-midnight if you really mean midnight (discouraged)."
+    ))
+}
+
+/// Normalize a stored datetime string for display (`YYYY-MM-DD HH:MM:SS` local).
 pub fn format_datetime(s: &str) -> String {
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, DATETIME_FMT) {
-        return dt.format(DATETIME_FMT).to_string();
+    if let Ok(dt) = parse_stored_instant(s) {
+        return dt.with_timezone(&Local).format(DATETIME_FMT).to_string();
     }
     if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
         return format!("{} 00:00:00", d.format("%Y-%m-%d"));
@@ -394,9 +507,10 @@ fn most_recent_weekday(from: NaiveDate, target: Weekday, strict_previous: bool) 
 }
 
 pub fn format_local(ts: &str) -> String {
-    if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
-        let local = dt.with_timezone(&Local);
-        local.format("%Y-%m-%d %H:%M:%S %Z").to_string()
+    if let Ok(dt) = parse_stored_instant(ts) {
+        dt.with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S %Z")
+            .to_string()
     } else {
         ts.to_string()
     }
@@ -409,51 +523,32 @@ pub struct TimestampInfo {
 }
 
 pub fn make_timestamp_info(ts: &str) -> TimestampInfo {
-    let utc = ts.to_string();
-    let local = if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
-        dt.with_timezone(&Local)
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    if let Ok(dt) = parse_stored_instant(ts) {
+        TimestampInfo {
+            utc: format_instant_utc(dt),
+            local: dt
+                .with_timezone(&Local)
+                .to_rfc3339_opts(SecondsFormat::Secs, true),
+        }
     } else {
-        ts.to_string()
-    };
-    TimestampInfo { utc, local }
+        TimestampInfo {
+            utc: ts.to_string(),
+            local: ts.to_string(),
+        }
+    }
 }
 
 pub fn parse_date_to_ymd(input: &str) -> AnyResult<String> {
     let d = parse_flexible_date(input)?;
-    Ok(d.format("%Y-%m-%d").to_string())
+    validate_date_ymd(&d.format("%Y-%m-%d").to_string())
 }
 
-/// Parse flexible datetime for workout started_at etc.
-/// Accepts date-only (assumes local midnight) or "YYYY-MM-DD HH:MM:SS".
-pub fn parse_flexible_datetime(s: &str) -> AnyResult<String> {
+/// Strict calendar-day form for DB columns (`YYYY-MM-DD`).
+pub fn validate_date_ymd(s: &str) -> AnyResult<String> {
     let s = s.trim();
-    let lower = s.to_lowercase();
-    if lower == "now" {
-        return Ok(crate::db::now_utc());
-    }
-    if lower == "today"
-        || lower == "yesterday"
-        || lower.contains("ago")
-        || lower.starts_with("last ")
-    {
-        let d = parse_flexible_date(s)?;
-        return Ok(format!("{} 12:00:00", d.format("%Y-%m-%d")));
-    }
-    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        return Ok(format!("{} 12:00:00", d.format("%Y-%m-%d")));
-    }
-    // already datetime-like
-    if chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").is_ok() {
-        return Ok(s.to_string());
-    }
-    if chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").is_ok() {
-        return Ok(s.replace('T', " "));
-    }
-    Err(anyhow!(
-        "unrecognized datetime '{}'; use now, today, YYYY-MM-DD, or YYYY-MM-DD HH:MM:SS",
-        s
-    ))
+    let d = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .map_err(|_| anyhow!("date must be YYYY-MM-DD, got '{}'", s))?;
+    Ok(d.format("%Y-%m-%d").to_string())
 }
 
 /// Resolve since/until/days into optional YYYY-MM-DD bounds (inclusive).
@@ -562,5 +657,69 @@ mod tests {
         let y = parse_flexible_date("yesterday").unwrap();
         assert_eq!(y, Local::now().date_naive() - chrono::Duration::days(1));
         assert!(parse_flexible_date("2026-07-05").is_ok());
+    }
+
+    #[test]
+    fn format_instant_utc_canonical_z() {
+        let dt = DateTime::parse_from_rfc3339("2026-07-14T18:30:00-03:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(format_instant_utc(dt), "2026-07-14T21:30:00Z");
+    }
+
+    #[test]
+    fn validate_instant_for_db_accepts_only_canonical() {
+        assert_eq!(
+            validate_instant_for_db("2026-07-14T21:30:00Z").unwrap(),
+            "2026-07-14T21:30:00Z"
+        );
+        assert!(validate_instant_for_db("2026-07-14 21:30:00").is_err());
+        assert!(validate_instant_for_db("2026-07-14").is_err());
+        assert!(validate_instant_for_db("2026-07-14T21:30:00+00:00").is_err());
+        assert!(validate_instant_for_db("2026-07-14T21:30:00.000Z").is_err());
+    }
+
+    #[test]
+    fn parse_rfc3339_normalizes_to_z() {
+        assert_eq!(
+            parse_rfc3339_instant_for_db("2026-07-14T18:30:00-03:00").unwrap(),
+            "2026-07-14T21:30:00Z"
+        );
+    }
+
+    #[test]
+    fn parse_stored_instant_ba_legacy_naive() {
+        // 18:00 Buenos Aires (UTC-3) → 21:00Z
+        let dt = parse_stored_instant("2020-06-14 18:00:00").unwrap();
+        assert_eq!(format_instant_utc(dt), "2020-06-14T21:00:00Z");
+    }
+
+    #[test]
+    fn parse_stored_instant_date_only_ba_noon() {
+        // 12:00 BA → 15:00Z
+        let dt = parse_stored_instant("2020-06-14").unwrap();
+        assert_eq!(format_instant_utc(dt), "2020-06-14T15:00:00Z");
+    }
+
+    #[test]
+    fn refuse_consumption_midnight_guard() {
+        // Construct UTC that is local midnight for the running machine.
+        let local_midnight = Local::now().date_naive().and_hms_opt(0, 0, 0).unwrap();
+        let utc = local_midnight
+            .and_local_timezone(Local)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(refuse_consumption_midnight(utc, false).is_err());
+        assert!(refuse_consumption_midnight(utc, true).is_ok());
+        let noon_local = Local::now()
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(refuse_consumption_midnight(noon_local, false).is_ok());
     }
 }

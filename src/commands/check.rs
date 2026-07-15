@@ -127,8 +127,8 @@ fn list_sleep_dates(conn: &Connection, since: &str, until: &str) -> Result<HashS
 fn list_consumption_dates(conn: &Connection, since: &str, until: &str) -> Result<HashSet<String>> {
     distinct_dates(
         conn,
-        "SELECT DISTINCT date(consumed_at) FROM consumptions
-         WHERE date(consumed_at) >= date(?1) AND date(consumed_at) <= date(?2)
+        "SELECT DISTINCT date(consumed_at, 'localtime') FROM consumptions
+         WHERE date(consumed_at, 'localtime') >= date(?1) AND date(consumed_at, 'localtime') <= date(?2)
          ORDER BY 1",
         since,
         until,

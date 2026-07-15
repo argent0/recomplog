@@ -171,7 +171,7 @@ fn fetch_brief_consumptions(conn: &Connection, today_ymd: &str) -> Result<Vec<Br
         "SELECT c.id, c.product_id, p.name, c.quantity, c.unit, c.consumed_at
          FROM consumptions c
          LEFT JOIN products p ON p.id = c.product_id
-         WHERE date(c.consumed_at) = date(?1)
+         WHERE date(c.consumed_at, 'localtime') = date(?1)
          ORDER BY c.consumed_at DESC
          LIMIT 100",
     )?;
@@ -533,11 +533,11 @@ fn fetch_nutrition_consumptions(
     );
     let mut bind: Vec<String> = vec![];
     if let Some(ref s) = resolved.since_ymd {
-        sql.push_str(" AND date(c.consumed_at) >= date(?)");
+        sql.push_str(" AND date(c.consumed_at, 'localtime') >= date(?)");
         bind.push(s.clone());
     }
     if let Some(ref u) = resolved.until_ymd {
-        sql.push_str(" AND date(c.consumed_at) <= date(?)");
+        sql.push_str(" AND date(c.consumed_at, 'localtime') <= date(?)");
         bind.push(u.clone());
     }
     sql.push_str(" ORDER BY c.consumed_at ASC");
@@ -663,7 +663,11 @@ fn apply_value_filter(totals: MacroTotals, value: NutritionReportValue) -> Macro
 }
 
 fn consumption_day(consumed_at: &str) -> Result<NaiveDate> {
-    // recomplog stores YYYY-MM-DD; tolerate longer datetime prefixes.
+    // Instants are UTC RFC3339; bucket by local civil day.
+    if let Ok(dt) = crate::utils::parse_stored_instant(consumed_at) {
+        return Ok(dt.with_timezone(&chrono::Local).date_naive());
+    }
+    // Legacy date-only / prefix fallback.
     let date_part = consumed_at.get(..10).unwrap_or(consumed_at);
     NaiveDate::parse_from_str(date_part, "%Y-%m-%d")
         .map_err(|e| anyhow!("invalid consumed_at '{consumed_at}': {e}"))

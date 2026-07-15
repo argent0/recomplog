@@ -20,6 +20,11 @@ fn ymd_offset(days_ago: i64) -> String {
     d.format("%Y-%m-%d").to_string()
 }
 
+/// BA noon for a calendar day as RFC3339 (create-path instant).
+fn day_noon_rfc3339(ymd: &str) -> String {
+    format!("{ymd}T12:00:00-03:00")
+}
+
 fn seed_product(db: &str) {
     bin()
         .args([
@@ -57,6 +62,7 @@ fn seed_product(db: &str) {
 }
 
 fn seed_consumption(db: &str, date: &str) {
+    let at = day_noon_rfc3339(date);
     bin()
         .args([
             "--db",
@@ -72,7 +78,7 @@ fn seed_consumption(db: &str, date: &str) {
             "--unit",
             "g",
             "--date",
-            date,
+            &at,
         ])
         .assert()
         .success();
@@ -183,7 +189,7 @@ fn missing_complete_window_exits_ok() {
     let yesterday = ymd_offset(1);
     seed_daily(&db, &today);
     seed_daily(&db, &yesterday);
-    seed_workout_on(&db, &format!("{today} 12:00:00"));
+    seed_workout_on(&db, &format!("{today}T15:00:00Z")); // BA noon
 
     let assert = bin()
         .args([

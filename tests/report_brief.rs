@@ -1,6 +1,7 @@
 //! Integration tests for `report brief`.
 
 use assert_cmd::Command;
+use chrono::Local;
 use predicates::prelude::*;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -15,7 +16,18 @@ fn setup_db() -> (TempDir, String) {
     (dir, db)
 }
 
+fn day_noon_rfc3339(ymd: &str) -> String {
+    format!("{ymd}T12:00:00-03:00")
+}
+
+fn today_noon_rfc3339() -> String {
+    let ymd = Local::now().date_naive().format("%Y-%m-%d");
+    format!("{ymd}T12:00:00-03:00")
+}
+
 fn seed_brief_fixture(db: &str) {
+    let today_at = today_noon_rfc3339();
+
     bin()
         .args([
             "--db",
@@ -72,7 +84,7 @@ fn seed_brief_fixture(db: &str) {
             "--unit",
             "g",
             "--date",
-            "today",
+            &today_at,
         ])
         .assert()
         .success();
@@ -166,7 +178,7 @@ fn seed_brief_fixture(db: &str) {
             "--type",
             "Pull",
             "--started-at",
-            "2020-01-15 10:00:00",
+            "2020-01-15T13:00:00Z",
         ])
         .assert()
         .success();
@@ -316,6 +328,7 @@ fn brief_empty_db_still_succeeds() {
 
 /// Seed product + logs on a fixed historical day (and one workout the day before).
 fn seed_brief_on_date(db: &str, date: &str, prev_workout_started: &str) {
+    let at = day_noon_rfc3339(date);
     bin()
         .args([
             "--db",
@@ -368,7 +381,7 @@ fn seed_brief_on_date(db: &str, date: &str, prev_workout_started: &str) {
             "--quantity",
             "150",
             "--date",
-            date,
+            &at,
         ])
         .assert()
         .success();
@@ -417,7 +430,7 @@ fn seed_brief_on_date(db: &str, date: &str, prev_workout_started: &str) {
             "--type",
             "Legs",
             "--started-at",
-            &format!("{date} 09:00:00"),
+            &format!("{date}T12:00:00Z"),
         ])
         .assert()
         .success();
@@ -479,7 +492,7 @@ fn seed_brief_on_date(db: &str, date: &str, prev_workout_started: &str) {
 #[test]
 fn brief_date_anchors_json_window() {
     let (_dir, db) = setup_db();
-    seed_brief_on_date(&db, "2020-06-15", "2020-06-14 18:00:00");
+    seed_brief_on_date(&db, "2020-06-15", "2020-06-14T21:00:00Z");
 
     let out = bin()
         .args([
@@ -535,7 +548,7 @@ fn brief_date_anchors_json_window() {
 #[test]
 fn brief_date_human_uses_ymd_label() {
     let (_dir, db) = setup_db();
-    seed_brief_on_date(&db, "2020-06-15", "2020-06-14 18:00:00");
+    seed_brief_on_date(&db, "2020-06-15", "2020-06-14T21:00:00Z");
 
     bin()
         .args([

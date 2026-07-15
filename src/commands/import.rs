@@ -246,14 +246,18 @@ fn handle_fit(
     }
 
     let tx = conn.unchecked_transaction()?;
+    let now = crate::db::now_utc();
+    let started_at = crate::utils::validate_instant_for_db(&plan.started_at)
+        .or_else(|_| crate::utils::normalize_stored_instant_to_db(&plan.started_at))?;
     tx.execute(
-        "INSERT INTO workouts (started_at, workout_type, notes, duration_minutes)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO workouts (started_at, workout_type, notes, duration_minutes, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
-            plan.started_at,
+            started_at,
             plan.workout_type,
             plan.notes,
-            plan.duration_minutes
+            plan.duration_minutes,
+            now,
         ],
     )?;
     let workout_id = tx.last_insert_rowid();
@@ -273,8 +277,8 @@ fn handle_fit(
          (workout_exercise_id, set_number, distance_km, duration_seconds,
           avg_heart_rate_bpm, max_heart_rate_bpm, avg_pace_min_per_km, calories_burned,
           avg_cadence_spm, total_ascent_m, total_descent_m, heart_rate_zones, laps,
-          date_of_birth, resting_hr_bpm, phase)
-         VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'full')",
+          date_of_birth, resting_hr_bpm, phase, created_at)
+         VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'full', ?15)",
         params![
             we_id,
             plan.distance_km,
@@ -290,10 +294,13 @@ fn handle_fit(
             laps_json,
             plan.date_of_birth,
             plan.resting_hr_bpm,
+            now,
         ],
     )?;
     let set_id = tx.last_insert_rowid();
     for tp in &plan.trackpoints {
+        let recorded_at = crate::utils::validate_instant_for_db(&tp.recorded_at)
+            .or_else(|_| crate::utils::normalize_stored_instant_to_db(&tp.recorded_at))?;
         tx.execute(
             "INSERT INTO activity_trackpoints
              (exercise_set_id, recorded_at, latitude, longitude, altitude_m,
@@ -301,7 +308,7 @@ fn handle_fit(
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 set_id,
-                tp.recorded_at,
+                recorded_at,
                 tp.latitude,
                 tp.longitude,
                 tp.altitude_m,
@@ -322,8 +329,8 @@ fn handle_fit(
     tx.execute(
         "INSERT INTO activity_imports
          (workout_id, source_format, source_filename, file_sha256, device_name,
-          manufacturer_id, product_id, fit_sport, fit_sub_sport)
-         VALUES (?1, 'fit', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+          manufacturer_id, product_id, fit_sport, fit_sub_sport, imported_at)
+         VALUES (?1, 'fit', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             workout_id,
             path_obj.file_name().and_then(|s| s.to_str()),
@@ -333,6 +340,7 @@ fn handle_fit(
             plan.product_id,
             plan.fit_sport,
             plan.fit_sub_sport,
+            now,
         ],
     )?;
     tx.commit()?;
@@ -436,6 +444,11 @@ fn handle_legacy_import(
         let n = copy_workout(&src, &mut target)?;
         counts.insert("workout".into(), serde_json::json!(n));
         copied.push("workout");
+    }
+
+    // Legacy sources store naive BA wall times / date-only nutrition; normalize to UTC Z.
+    if !copied.is_empty() {
+        db::normalize_instants_to_rfc3339_public(&target)?;
     }
 
     if json {

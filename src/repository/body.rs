@@ -843,7 +843,7 @@ impl Repository {
                s.avg_heart_rate_bpm, s.max_heart_rate_bpm, s.avg_pace_min_per_km,
                s.calories_burned, s.avg_cadence_spm, s.total_ascent_m, s.total_descent_m,
                s.heart_rate_zones, s.laps,
-               date(w.started_at), e.name
+               date(w.started_at, 'localtime'), e.name
         FROM exercise_sets s
         JOIN workout_exercises we ON we.id = s.workout_exercise_id
         JOIN workouts w ON w.id = we.workout_id
@@ -886,14 +886,14 @@ impl Repository {
         let base = Self::SET_AUDIT_SELECT;
         let rows = match (since, until) {
             (None, None) => {
-                let sql = format!("{} ORDER BY date(w.started_at), s.id", base);
+                let sql = format!("{} ORDER BY date(w.started_at, 'localtime'), s.id", base);
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([], Self::row_to_set_audit)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (Some(s), None) => {
                 let sql = format!(
-                    "{} WHERE date(w.started_at) >= ?1 ORDER BY date(w.started_at), s.id",
+                    "{} WHERE date(w.started_at, 'localtime') >= ?1 ORDER BY date(w.started_at, 'localtime'), s.id",
                     base
                 );
                 let mut stmt = self.conn.prepare(&sql)?;
@@ -902,7 +902,7 @@ impl Repository {
             }
             (None, Some(u)) => {
                 let sql = format!(
-                    "{} WHERE date(w.started_at) <= ?1 ORDER BY date(w.started_at), s.id",
+                    "{} WHERE date(w.started_at, 'localtime') <= ?1 ORDER BY date(w.started_at, 'localtime'), s.id",
                     base
                 );
                 let mut stmt = self.conn.prepare(&sql)?;
@@ -911,8 +911,8 @@ impl Repository {
             }
             (Some(s), Some(u)) => {
                 let sql = format!(
-                    "{} WHERE date(w.started_at) >= ?1 AND date(w.started_at) <= ?2 \
-                     ORDER BY date(w.started_at), s.id",
+                    "{} WHERE date(w.started_at, 'localtime') >= ?1 AND date(w.started_at, 'localtime') <= ?2 \
+                     ORDER BY date(w.started_at, 'localtime'), s.id",
                     base
                 );
                 let mut stmt = self.conn.prepare(&sql)?;
@@ -948,7 +948,7 @@ pub struct SetAuditRow {
     pub heart_rate_zones: Option<String>,
     /// Raw JSON from DB; parse in the check handler.
     pub laps: Option<String>,
-    /// Calendar day of the parent workout (`date(w.started_at)`).
+    /// Calendar day of the parent workout (`date(w.started_at, 'localtime')`).
     pub workout_date: String,
     pub exercise_name: String,
 }
