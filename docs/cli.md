@@ -146,7 +146,16 @@ recomplog init
 
 Completions are **dynamic**: the shell registers a small function that calls
 `recomplog` again under `COMPLETE=$shell`. Prefer re-sourcing on shell startup
-(not a stale file on disk) so the protocol stays aligned with the binary:
+(not a stale file on disk) so the protocol stays aligned with the binary.
+
+**Bash (one-shot install):**
+
+```bash
+recomplog config bash-completion   # appends to ~/.bashrc (idempotent)
+source ~/.bashrc
+```
+
+Or manually:
 
 ```bash
 # Bash

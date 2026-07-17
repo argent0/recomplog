@@ -39,14 +39,14 @@ See `PKGBUILD` for depends/makedepends and install layout.
 
 ## Shell completion
 
-Dynamic completions re-invoke the binary at tab time (subcommands, flags, and
-value candidates). Re-source on each shell start so registration stays in sync
-with the installed binary:
+```bash
+recomplog config bash-completion   # bash: append to ~/.bashrc (idempotent)
+source ~/.bashrc
+```
+
+Dynamic completions re-invoke the binary at tab time. Other shells:
 
 ```bash
-# Bash
-echo 'source <(COMPLETE=bash recomplog)' >> ~/.bashrc
-
 # Zsh
 echo 'source <(COMPLETE=zsh recomplog)' >> ~/.zshrc
 

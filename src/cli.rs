@@ -1361,6 +1361,12 @@ pub enum ConfigAction {
         force: bool,
     },
     Path,
+    /// Enable bash tab-completion by appending a line to `~/.bashrc`.
+    ///
+    /// Adds: `source <(COMPLETE=bash recomplog)` (idempotent if already present).
+    /// Restart the shell or `source ~/.bashrc` afterward.
+    #[command(name = "bash-completion")]
+    BashCompletion,
 }
 
 /// Top-level `check` command: optional subcommand, else sanity-limit audit.
