@@ -39,6 +39,7 @@ pub struct MissingReport {
     pub ok: bool,
     pub days: u32,
     pub workout_days: u32,
+    pub skip_today: bool,
     pub period: Period,
     pub measurement: DomainPresence,
     pub sleep: DomainPresence,
@@ -46,20 +47,28 @@ pub struct MissingReport {
     pub workout: WorkoutInactivity,
 }
 
-/// Inclusive local calendar window ending today: `today - (days-1) … today`.
-fn calendar_window(days: u32) -> Result<(NaiveDate, NaiveDate, Vec<String>)> {
+/// Inclusive local calendar window of `days` length.
+///
+/// Ends at **today** by default, or **yesterday** when `skip_today` is set:
+/// `until - (days-1) … until`.
+fn calendar_window(days: u32, skip_today: bool) -> Result<(NaiveDate, NaiveDate, Vec<String>)> {
     if days == 0 {
         return Err(anyhow!("--days / --workout-days must be >= 1"));
     }
     let today = Local::now().date_naive();
-    let since = today - Duration::days(i64::from(days) - 1);
+    let until = if skip_today {
+        today - Duration::days(1)
+    } else {
+        today
+    };
+    let since = until - Duration::days(i64::from(days) - 1);
     let mut dates = Vec::with_capacity(days as usize);
     let mut d = since;
-    while d <= today {
+    while d <= until {
         dates.push(d.format("%Y-%m-%d").to_string());
         d += Duration::days(1);
     }
-    Ok((since, today, dates))
+    Ok((since, until, dates))
 }
 
 fn period_from_window(since: NaiveDate, until: NaiveDate, days: u32) -> Period {
@@ -178,12 +187,12 @@ pub fn handle_check_missing(
         return Err(anyhow!("--workout-days must be >= 1"));
     }
 
-    let (since_d, until_d, expected) = calendar_window(args.days)?;
+    let (since_d, until_d, expected) = calendar_window(args.days, args.skip_today)?;
     let since_s = since_d.format("%Y-%m-%d").to_string();
     let until_s = until_d.format("%Y-%m-%d").to_string();
     let period = period_from_window(since_d, until_d, args.days);
 
-    let (w_since_d, w_until_d, _) = calendar_window(args.workout_days)?;
+    let (w_since_d, w_until_d, _) = calendar_window(args.workout_days, args.skip_today)?;
     let w_since_s = w_since_d.format("%Y-%m-%d").to_string();
     let w_until_s = w_until_d.format("%Y-%m-%d").to_string();
     let workout_period = period_from_window(w_since_d, w_until_d, args.workout_days);
@@ -225,6 +234,7 @@ pub fn handle_check_missing(
         ok,
         days: args.days,
         workout_days: args.workout_days,
+        skip_today: args.skip_today,
         period,
         measurement,
         sleep,
@@ -263,8 +273,13 @@ fn print_domain_line(name: &str, d: &DomainPresence) {
 fn print_missing_human(report: &MissingReport) {
     let since = report.period.since.as_deref().unwrap_or("?");
     let until = report.period.until.as_deref().unwrap_or("?");
+    let skip_note = if report.skip_today {
+        ", skip-today"
+    } else {
+        ""
+    };
     println!(
-        "Missing-entry check — daily window {since} … {until} ({} days)",
+        "Missing-entry check — daily window {since} … {until} ({} days{skip_note})",
         report.days
     );
     print_domain_line("measurement", &report.measurement);
@@ -274,7 +289,7 @@ fn print_missing_human(report: &MissingReport) {
     let w_since = report.workout.period.since.as_deref().unwrap_or("?");
     let w_until = report.workout.period.until.as_deref().unwrap_or("?");
     println!(
-        "Workout inactivity — window {w_since} … {w_until} ({} days)",
+        "Workout inactivity — window {w_since} … {w_until} ({} days{skip_note})",
         report.workout.window_days
     );
     if report.workout.ok {

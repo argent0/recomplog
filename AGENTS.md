@@ -124,6 +124,7 @@ recomplog --json report brief --days 7
 recomplog --json report brief --date yesterday --days 7
 recomplog report html --days 14 --name dashboard.html
 recomplog --json check missing --days 7 --workout-days 3
+recomplog --json check missing --days 7 --workout-days 3 --skip-today
 ```
 
 Update this file when agent interaction patterns evolve.

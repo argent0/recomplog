@@ -1318,12 +1318,15 @@ pub enum CheckAction {
 /// Args for `recomplog check missing`.
 #[derive(Args, Debug, Clone)]
 pub struct CheckMissingArgs {
-    /// Calendar days to scan for measurement / sleep / nutrition (includes today).
+    /// Calendar days to scan for measurement / sleep / nutrition (includes today unless `--skip-today`).
     #[arg(long, default_value_t = 7)]
     pub days: u32,
-    /// Fail if no workout session falls in this many calendar days (includes today).
+    /// Fail if no workout session falls in this many calendar days (includes today unless `--skip-today`).
     #[arg(long = "workout-days", default_value_t = 3)]
     pub workout_days: u32,
+    /// End the check window at yesterday (local); do not require today's logs.
+    #[arg(long = "skip-today")]
+    pub skip_today: bool,
 }
 
 /// Args for bare `recomplog check` (sanity-limit audit).

@@ -313,3 +313,135 @@ fn missing_human_output_mentions_incomplete() {
         .stdout(predicate::str::contains("measurement:"))
         .stdout(predicate::str::contains("INCOMPLETE"));
 }
+
+#[test]
+fn missing_skip_today_succeeds_with_yesterday_only() {
+    let dir = TempDir::new().unwrap();
+    let db = db_path(&dir);
+
+    bin().args(["--db", &db, "init"]).assert().success();
+    seed_product(&db);
+
+    let today = ymd_offset(0);
+    let yesterday = ymd_offset(1);
+    seed_daily(&db, &yesterday);
+    seed_workout_on(&db, &format!("{yesterday}T15:00:00Z"));
+
+    let assert = bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "check",
+            "missing",
+            "--days",
+            "1",
+            "--workout-days",
+            "1",
+            "--skip-today",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let v: Value = serde_json::from_str(&stdout).expect(&stdout);
+
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["skip_today"], true);
+    assert_eq!(v["period"]["until"], yesterday);
+    assert_ne!(v["period"]["until"], today);
+    assert!(v["measurement"]["missing_dates"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(v["sleep"]["missing_dates"].as_array().unwrap().is_empty());
+    assert!(v["nutrition"]["missing_dates"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(v["workout"]["ok"], true);
+}
+
+#[test]
+fn missing_without_skip_today_fails_when_today_empty() {
+    let dir = TempDir::new().unwrap();
+    let db = db_path(&dir);
+
+    bin().args(["--db", &db, "init"]).assert().success();
+    seed_product(&db);
+
+    let today = ymd_offset(0);
+    let yesterday = ymd_offset(1);
+    seed_daily(&db, &yesterday);
+    seed_workout_on(&db, &format!("{yesterday}T15:00:00Z"));
+
+    let assert = bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "check",
+            "missing",
+            "--days",
+            "1",
+            "--workout-days",
+            "1",
+        ])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let v: Value = serde_json::from_str(&stdout).expect(&stdout);
+
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["skip_today"], false);
+    assert_eq!(v["period"]["until"], today);
+    let missing = v["measurement"]["missing_dates"].as_array().unwrap();
+    assert!(
+        missing.iter().any(|d| d.as_str() == Some(today.as_str())),
+        "today should be missing: {missing:?}"
+    );
+}
+
+#[test]
+fn missing_skip_today_preserves_window_length() {
+    let dir = TempDir::new().unwrap();
+    let db = db_path(&dir);
+
+    bin().args(["--db", &db, "init"]).assert().success();
+
+    let today = ymd_offset(0);
+    let yesterday = ymd_offset(1);
+    let day_before = ymd_offset(2);
+
+    let assert = bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "check",
+            "missing",
+            "--days",
+            "2",
+            "--workout-days",
+            "2",
+            "--skip-today",
+        ])
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    let v: Value = serde_json::from_str(&stdout).expect(&stdout);
+
+    assert_eq!(v["skip_today"], true);
+    assert_eq!(v["measurement"]["expected_days"], 2);
+    assert_eq!(v["period"]["until"], yesterday);
+    assert_eq!(v["period"]["since"], day_before);
+
+    let missing = v["measurement"]["missing_dates"].as_array().unwrap();
+    assert_eq!(missing.len(), 2);
+    let missing_strs: Vec<&str> = missing.iter().filter_map(|d| d.as_str()).collect();
+    assert!(missing_strs.contains(&yesterday.as_str()));
+    assert!(missing_strs.contains(&day_before.as_str()));
+    assert!(!missing_strs.contains(&today.as_str()));
+}

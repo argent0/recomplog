@@ -135,6 +135,8 @@ recomplog check --variations
 # (includes today), plus workout inactivity over last M days.
 recomplog check missing --days 7 --workout-days 3
 recomplog --json check missing --days 7 --workout-days 3
+# End window at yesterday (do not require today's logs yet):
+recomplog --json check missing --days 7 --workout-days 3 --skip-today
 
 recomplog config generate
 recomplog init
