@@ -115,6 +115,8 @@ recomplog --json nutrition purchase create --product 3 --quantity 2 --purchased-
 recomplog --json workout create --type Push --started-at 2026-07-14T17:00:00-03:00
 recomplog --json workout list --days 14
 recomplog --json workout set add --workout 1 --exercise "bench press" --reps 5 --weight 100 --phase full
+# body_mass: --weight optional when a body measurement exists
+recomplog --json workout set add --workout 1 --exercise "pull up" --reps 8
 recomplog --json workout set add-cluster --workout 1 --exercise "bench press" --reps "10,5,5" --weight 100 --phase full --rir "0,0,1" --effective-reps "6,4,3" --rest 15
 recomplog import fit activity.fit --exercise running
 recomplog import legacy --from-db ../bodylog/bodylog.db --dry-run

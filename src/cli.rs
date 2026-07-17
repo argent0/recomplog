@@ -298,10 +298,12 @@ pub enum SetAction {
         workout_exercise: Option<i64>,
         #[arg(long)]
         reps: Option<i32>,
+        /// Load in kg. For body_mass exercises: body mass (defaults to latest body measurement when omitted).
         #[arg(long)]
         weight: Option<f64>,
         #[arg(long = "external-load")]
         external_load: Option<f64>,
+        /// Skip recording body weight (body_mass only; excludes set from volume stats). Prefer a measurement or --weight.
         #[arg(long = "no-weight-recorded")]
         no_weight_recorded: bool,
         #[arg(long)]
@@ -401,10 +403,12 @@ pub enum SetAction {
         exercise: Option<String>,
         #[arg(long = "workout-exercise")]
         workout_exercise: Option<i64>,
+        /// Load in kg. For body_mass exercises: body mass (defaults to latest body measurement when omitted).
         #[arg(long)]
         weight: Option<f64>,
         #[arg(long = "external-load")]
         external_load: Option<f64>,
+        /// Skip recording body weight (body_mass only; excludes set from volume stats). Prefer a measurement or --weight.
         #[arg(long = "no-weight-recorded")]
         no_weight_recorded: bool,
         /// Comma-separated reps e.g. "10,5,5"
@@ -440,10 +444,12 @@ pub enum SetAction {
         /// Comma-separated reps
         #[arg(long)]
         reps: String,
+        /// Load in kg. For body_mass exercises: body mass (defaults to latest body measurement when omitted).
         #[arg(long)]
         weight: Option<f64>,
         #[arg(long = "external-load")]
         external_load: Option<f64>,
+        /// Skip recording body weight (body_mass only; excludes set from volume stats). Prefer a measurement or --weight.
         #[arg(long = "no-weight-recorded")]
         no_weight_recorded: bool,
         #[arg(long)]
@@ -475,10 +481,12 @@ pub enum SetAction {
         exercise: String,
         #[arg(long)]
         reps: Option<i32>,
+        /// Load in kg. For body_mass exercises: body mass (defaults to latest body measurement when omitted).
         #[arg(long)]
         weight: Option<f64>,
         #[arg(long = "external-load")]
         external_load: Option<f64>,
+        /// Skip recording body weight (body_mass only; excludes set from volume stats). Prefer a measurement or --weight.
         #[arg(long = "no-weight-recorded")]
         no_weight_recorded: bool,
         #[arg(long)]

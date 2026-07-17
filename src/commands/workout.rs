@@ -1502,6 +1502,63 @@ fn next_set_number(conn: &Connection, we_id: i64) -> i64 {
     .unwrap_or(1)
 }
 
+/// Calendar day (YYYY-MM-DD) from workout `started_at` for body-weight lookup.
+fn workout_event_date(conn: &Connection, workout_id: Option<i64>) -> Result<Option<String>> {
+    let Some(id) = workout_id else {
+        return Ok(None);
+    };
+    let started: String = conn
+        .query_row("SELECT started_at FROM workouts WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .map_err(|_| anyhow!("workout not found: {id}"))?;
+    Ok(Some(activity_date_prefix(&started)))
+}
+
+/// Resolve body-mass load, defaulting `--weight` from the latest body measurement when omitted.
+#[allow(clippy::too_many_arguments)]
+fn resolve_set_load(
+    conn: &Connection,
+    exercise_name: &str,
+    load_type: &str,
+    weight: Option<f64>,
+    external_load: Option<f64>,
+    no_weight_recorded: bool,
+    requires_body_weight: bool,
+    workout_id: Option<i64>,
+    quiet: bool,
+    json: bool,
+) -> Result<(Option<f64>, Option<f64>)> {
+    let measured = if weight.is_none()
+        && !no_weight_recorded
+        && load_type::is_body_mass(load_type)
+        && requires_body_weight
+    {
+        let on_or_before = workout_event_date(conn, workout_id)?;
+        bodyweight::lookup_measured_body_weight(conn, on_or_before.as_deref())
+            .map_err(|e| anyhow!("{e}"))?
+    } else {
+        None
+    };
+
+    if let Some((meas_date, kg)) = &measured {
+        if weight.is_none() && !quiet && !json {
+            eprintln!("Using body weight {kg:.1} kg from measurement on {meas_date}");
+        }
+    }
+
+    bodyweight::resolve_bodyweight_load(
+        exercise_name,
+        load_type,
+        weight,
+        external_load,
+        no_weight_recorded,
+        requires_body_weight,
+        measured.map(|(_, kg)| kg),
+    )
+    .map_err(|e| anyhow!("{e}"))
+}
+
 fn next_cluster_id(conn: &Connection) -> i64 {
     conn.query_row(
         "SELECT COALESCE(MAX(cluster_id), 0) + 1 FROM exercise_sets",
@@ -1751,15 +1808,18 @@ fn handle_set(
             let resolved_phase = phase::normalize_phase(&phase).map_err(|e| anyhow!("{e}"))?;
             let requires =
                 reps.is_some() || weight.is_some() || duration.is_some() || external_load.is_some();
-            let (w, el) = bodyweight::resolve_bodyweight_load(
+            let (w, el) = resolve_set_load(
+                &conn,
                 &ex.name,
                 &ex.load_type,
                 weight,
                 external_load,
                 no_weight_recorded,
                 requires,
-            )
-            .map_err(|e| anyhow!("{e}"))?;
+                resolved.workout_id,
+                quiet,
+                json,
+            )?;
             if reps.is_none()
                 && w.is_none()
                 && duration.is_none()
@@ -2029,15 +2089,18 @@ fn handle_set(
                     "reps, rir, and effective-reps must have the same number of values"
                 ));
             }
-            let (w, el) = bodyweight::resolve_bodyweight_load(
+            let (w, el) = resolve_set_load(
+                &conn,
                 &ex.name,
                 &ex.load_type,
                 weight,
                 external_load,
                 no_weight_recorded,
                 true,
-            )
-            .map_err(|e| anyhow!("{e}"))?;
+                resolved.workout_id,
+                quiet,
+                json,
+            )?;
             // Validate each planned set before any writes
             for (i, ((r, ri), eff)) in reps_list
                 .iter()
@@ -2196,15 +2259,18 @@ fn handle_set(
             if rir_list.len() != reps_list.len() || eff_list.len() != reps_list.len() {
                 return Err(anyhow!("rir/effective-reps length must match reps"));
             }
-            let (w, el) = bodyweight::resolve_bodyweight_load(
+            let (w, el) = resolve_set_load(
+                &conn,
                 &ex.name,
                 &ex.load_type,
                 weight,
                 external_load,
                 no_weight_recorded,
                 true,
-            )
-            .map_err(|e| anyhow!("{e}"))?;
+                resolved.workout_id,
+                quiet,
+                json,
+            )?;
             let sides: Vec<&str> = match side.as_str() {
                 "both" => vec!["left", "right"],
                 s => vec![s],
@@ -2422,15 +2488,18 @@ fn handle_set(
                 .transpose()
                 .map_err(|e| anyhow!("{e}"))?
                 .unwrap_or(phase::FULL);
-            let (w, el) = bodyweight::resolve_bodyweight_load(
+            let (w, el) = resolve_set_load(
+                &conn,
                 &ex.name,
                 &ex.load_type,
                 weight,
                 external_load,
                 no_weight_recorded,
                 true,
-            )
-            .map_err(|e| anyhow!("{e}"))?;
+                resolved.workout_id,
+                quiet,
+                json,
+            )?;
             validate_set_payload(
                 reps, w, el, None, duration, None, None, None, None, None, None, None, None, None,
                 None, None, None, None, limits,

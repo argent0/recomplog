@@ -290,6 +290,261 @@ fn dry_run_validation_failure() {
 }
 
 #[test]
+fn body_mass_set_uses_measurement_weight_when_weight_omitted() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+    bin().args(["--db", &db, "init"]).assert().success();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "body",
+            "measurement",
+            "create",
+            "--date",
+            "2026-07-10",
+            "--weight-kg",
+            "81.2",
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "create",
+            "--type",
+            "Pull",
+            "--started-at",
+            "2026-07-14T17:00:00Z",
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "workout",
+            "exercise",
+            "create",
+            "pull up",
+            "--category",
+            "pull",
+            "--load-type",
+            "body_mass",
+        ])
+        .assert()
+        .success();
+
+    // No --weight: should take 81.2 from body measurement
+    let out = bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "set",
+            "add",
+            "--workout",
+            "1",
+            "--exercise",
+            "pull up",
+            "--reps",
+            "8",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(
+        (v["would"]["weight_kg"].as_f64().unwrap() - 81.2).abs() < 1e-9,
+        "expected measured body weight 81.2, got {}",
+        v
+    );
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "set",
+            "add",
+            "--workout",
+            "1",
+            "--exercise",
+            "pull up",
+            "--reps",
+            "8",
+            "--quiet",
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args(["--db", &db, "workout", "show", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("81.2 kg BW"));
+}
+
+#[test]
+fn body_mass_set_errors_without_weight_or_measurement() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+    bin().args(["--db", &db, "init"]).assert().success();
+
+    bin()
+        .args(["--db", &db, "workout", "create", "--type", "Pull"])
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "workout",
+            "exercise",
+            "create",
+            "pull up",
+            "--category",
+            "pull",
+            "--load-type",
+            "body_mass",
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "workout",
+            "set",
+            "add",
+            "--workout",
+            "1",
+            "--exercise",
+            "pull up",
+            "--reps",
+            "8",
+            "--quiet",
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("body measurement")
+                .or(predicate::str::contains("requires --weight")),
+        );
+}
+
+#[test]
+fn body_mass_set_prefers_measurement_on_or_before_workout_day() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+    bin().args(["--db", &db, "init"]).assert().success();
+
+    // Older measurement (should be used for a workout on 2026-07-10)
+    bin()
+        .args([
+            "--db",
+            &db,
+            "body",
+            "measurement",
+            "create",
+            "--date",
+            "2026-07-05",
+            "--weight-kg",
+            "80.0",
+        ])
+        .assert()
+        .success();
+    // Newer measurement after the workout day
+    bin()
+        .args([
+            "--db",
+            &db,
+            "body",
+            "measurement",
+            "create",
+            "--date",
+            "2026-07-15",
+            "--weight-kg",
+            "82.0",
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "create",
+            "--type",
+            "Pull",
+            "--started-at",
+            "2026-07-10T17:00:00Z",
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "workout",
+            "exercise",
+            "create",
+            "chin up",
+            "--category",
+            "pull",
+            "--load-type",
+            "body_mass",
+        ])
+        .assert()
+        .success();
+
+    let out = bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "set",
+            "add",
+            "--workout",
+            "1",
+            "--exercise",
+            "chin up",
+            "--reps",
+            "5",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(
+        (v["would"]["weight_kg"].as_f64().unwrap() - 80.0).abs() < 1e-9,
+        "expected on-or-before measurement 80.0, got {}",
+        v
+    );
+}
+
+#[test]
 fn cardio_cadence_ascent_and_update_zones() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("t.db").display().to_string();

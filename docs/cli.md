@@ -25,6 +25,8 @@ recomplog workout exercise list --search bench
 recomplog workout exercise create "incline dumbbell press" --category strength --equipment dumbbell
 
 recomplog workout set add --workout 42 --exercise "bench press" --reps 5 --weight 100
+# body_mass exercises: --weight is optional when a body measurement exists
+recomplog workout set add --workout 42 --exercise "pull up" --reps 8
 # Preview without writing (also on set/workout/exercise mutators)
 recomplog --json workout set add --workout 42 --exercise "bench press" --reps 5 --weight 100 --dry-run
 ```
