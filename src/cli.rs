@@ -1,4 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap_complete::ArgValueCompleter;
+
+use crate::completion;
 
 /// recomplog - unified CLI for body recomposition tracking.
 ///
@@ -248,7 +251,7 @@ pub enum ExerciseAction {
         category: String,
         #[arg(short, long)]
         equipment: Option<String>,
-        #[arg(long = "load-type")]
+        #[arg(long = "load-type", add = ArgValueCompleter::new(completion::complete_load_type))]
         load_type: Option<String>,
         #[arg(short, long)]
         muscles: Option<String>,
@@ -269,7 +272,7 @@ pub enum ExerciseAction {
         equipment: Option<String>,
         #[arg(long = "clear-equipment")]
         clear_equipment: bool,
-        #[arg(long = "load-type")]
+        #[arg(long = "load-type", add = ArgValueCompleter::new(completion::complete_load_type))]
         load_type: Option<String>,
         #[arg(short, long)]
         muscles: Option<String>,
@@ -320,9 +323,17 @@ pub enum SetAction {
         rest_seconds: Option<i32>,
         #[arg(long)]
         notes: Option<String>,
-        #[arg(long, value_parser = ["left", "right", "both"])]
+        #[arg(
+            long,
+            value_parser = ["left", "right", "both"],
+            add = ArgValueCompleter::new(completion::complete_side)
+        )]
         side: Option<String>,
-        #[arg(long, default_value = "full")]
+        #[arg(
+            long,
+            default_value = "full",
+            add = ArgValueCompleter::new(completion::complete_phase)
+        )]
         phase: String,
         #[arg(long = "avg-heart-rate")]
         avg_heart_rate: Option<f64>,
@@ -388,7 +399,11 @@ pub enum SetAction {
         require_zones_laps: bool,
         #[arg(long)]
         notes: Option<String>,
-        #[arg(long, default_value = "full")]
+        #[arg(
+            long,
+            default_value = "full",
+            add = ArgValueCompleter::new(completion::complete_phase)
+        )]
         phase: String,
         /// Validate and show resolved payload without writing.
         #[arg(long)]
@@ -424,9 +439,17 @@ pub enum SetAction {
         rest_seconds: i32,
         #[arg(long)]
         notes: Option<String>,
-        #[arg(long, value_parser = ["left", "right", "both"])]
+        #[arg(
+            long,
+            value_parser = ["left", "right", "both"],
+            add = ArgValueCompleter::new(completion::complete_side)
+        )]
         side: Option<String>,
-        #[arg(long, default_value = "full")]
+        #[arg(
+            long,
+            default_value = "full",
+            add = ArgValueCompleter::new(completion::complete_phase)
+        )]
         phase: String,
         /// Validate and show resolved payload without writing.
         #[arg(long)]
@@ -460,9 +483,18 @@ pub enum SetAction {
         rest_seconds: Option<i32>,
         #[arg(long)]
         notes: Option<String>,
-        #[arg(long, value_parser = ["left", "right", "both"], default_value = "both")]
+        #[arg(
+            long,
+            value_parser = ["left", "right", "both"],
+            default_value = "both",
+            add = ArgValueCompleter::new(completion::complete_side)
+        )]
         side: String,
-        #[arg(long, default_value = "full")]
+        #[arg(
+            long,
+            default_value = "full",
+            add = ArgValueCompleter::new(completion::complete_phase)
+        )]
         phase: String,
         /// Validate and show resolved payload without writing.
         #[arg(long)]
@@ -493,7 +525,7 @@ pub enum SetAction {
         duration: Option<i32>,
         #[arg(long)]
         notes: Option<String>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_phase))]
         phase: Option<String>,
         /// Validate and show resolved payload without writing.
         #[arg(long)]
@@ -522,9 +554,13 @@ pub enum SetAction {
         rest_seconds: Option<i32>,
         #[arg(long)]
         notes: Option<String>,
-        #[arg(long, value_parser = ["left", "right", "both"])]
+        #[arg(
+            long,
+            value_parser = ["left", "right", "both"],
+            add = ArgValueCompleter::new(completion::complete_side)
+        )]
         side: Option<String>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_phase))]
         phase: Option<String>,
         #[arg(long = "avg-heart-rate")]
         avg_heart_rate: Option<f64>,
@@ -626,7 +662,11 @@ pub enum MeasurementAction {
 pub struct CreateMeasurementArgs {
     /// Calendar day this measurement is **for** (event day), not when you typed the command.
     /// Flexible: today, yesterday, YYYY-MM-DD, … Storage time is always `created_at` = now.
-    #[arg(long, default_value = "today")]
+    #[arg(
+        long,
+        default_value = "today",
+        add = ArgValueCompleter::new(completion::complete_date_shortcut)
+    )]
     pub date: String,
     #[arg(long)]
     pub weight_kg: Option<f64>,
@@ -649,9 +689,9 @@ pub struct CreateMeasurementArgs {
 pub struct ListArgs {
     #[arg(long)]
     pub days: Option<i64>,
-    #[arg(long)]
+    #[arg(long, add = ArgValueCompleter::new(completion::complete_date_shortcut))]
     pub since: Option<String>,
-    #[arg(long)]
+    #[arg(long, add = ArgValueCompleter::new(completion::complete_date_shortcut))]
     pub until: Option<String>,
 }
 
@@ -673,7 +713,7 @@ pub struct MediansArgs {
 pub struct ShowArgs {
     #[arg(long)]
     pub id: Option<i64>,
-    #[arg(long)]
+    #[arg(long, add = ArgValueCompleter::new(completion::complete_date_shortcut))]
     pub date: Option<String>,
 }
 
@@ -681,7 +721,7 @@ pub struct ShowArgs {
 pub struct UpdateMeasurementArgs {
     #[arg(long)]
     pub id: Option<i64>,
-    #[arg(long)]
+    #[arg(long, add = ArgValueCompleter::new(completion::complete_date_shortcut))]
     pub date: Option<String>,
     #[arg(long)]
     pub weight_kg: Option<f64>,
@@ -703,7 +743,7 @@ pub struct UpdateMeasurementArgs {
 pub struct DeleteArgs {
     #[arg(long)]
     pub id: Option<i64>,
-    #[arg(long)]
+    #[arg(long, add = ArgValueCompleter::new(completion::complete_date_shortcut))]
     pub date: Option<String>,
 }
 
@@ -725,7 +765,11 @@ pub enum SleepAction {
 pub struct SleepCreateArgs {
     /// Wake-up **calendar day** this sleep log is for (event day), not when you typed the command.
     /// Flexible: today, yesterday, YYYY-MM-DD, … Storage time is always `created_at` = now.
-    #[arg(long, default_value = "today")]
+    #[arg(
+        long,
+        default_value = "today",
+        add = ArgValueCompleter::new(completion::complete_date_shortcut)
+    )]
     pub date: String,
     #[arg(long)]
     pub bedtime: Option<String>,
@@ -764,7 +808,7 @@ pub struct SleepCreateArgs {
 #[derive(Args, Debug, Clone)]
 pub struct SleepUpdateArgs {
     pub id: Option<i64>,
-    #[arg(long)]
+    #[arg(long, add = ArgValueCompleter::new(completion::complete_date_shortcut))]
     pub date: Option<String>,
     #[arg(long)]
     pub bedtime: Option<String>,
@@ -878,7 +922,11 @@ pub enum ProductAction {
         #[arg(long, default_value = "100")]
         reference_quantity: f64,
         /// `g` (mass), `ml` (volume), or `unit` (package).
-        #[arg(long, default_value = "g")]
+        #[arg(
+            long,
+            default_value = "g",
+            add = ArgValueCompleter::new(completion::complete_nutrition_unit)
+        )]
         reference_unit: String,
         #[arg(long)]
         energy_kcal: Option<f64>,
@@ -914,7 +962,7 @@ pub enum ProductNutritionAction {
         reference_quantity: Option<f64>,
         /// How the reference amount is measured: `g` (mass), `ml` (volume),
         /// or `unit` (one package/item). Aliases like `bar`/`capsule` → `unit`.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_nutrition_unit))]
         reference_unit: Option<String>,
         #[arg(long)]
         energy_kcal: Option<f64>,
@@ -996,7 +1044,7 @@ pub enum ConsumptionAction {
         quantity: f64,
         /// Must match the product unit kind: `g`/`ml`/`unit` (package).
         /// Omit to use the product’s reference unit. Aliases: bar, cup, capsule → unit.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_nutrition_unit))]
         unit: Option<String>,
         /// When the meal/portion **happened** (event time, RFC3339). Storage time is always now.
         /// Alias: `--date` (deprecated name; still accepted).
@@ -1106,7 +1154,7 @@ pub enum ReportAction {
         days: u32,
         /// Anchor day for the brief (consumption + workouts that day; lookback ends here).
         /// Flexible: today, yesterday, YYYY-MM-DD, last monday, …
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_date_shortcut))]
         date: Option<String>,
     },
     /// Generate a self-contained mobile-friendly HTML dashboard report.
@@ -1277,7 +1325,7 @@ pub enum ImportAction {
         #[arg(long, value_name = "PATH")]
         from_db: String,
         /// Only import this domain (workout|body|nutrition). Default: all that are detected.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_import_domain))]
         domain: Option<String>,
         /// Dry-run: show what would be imported without writing.
         #[arg(long)]

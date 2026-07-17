@@ -1,6 +1,7 @@
 mod bodyweight;
 mod cli;
 mod commands;
+mod completion;
 mod config;
 mod db;
 mod error;

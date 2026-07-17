@@ -48,3 +48,43 @@ fn complete_bash_top_level_subcommands() {
         .stdout(predicate::str::contains("body"))
         .stdout(predicate::str::contains("nutrition"));
 }
+
+/// Static value completer for `--phase` after `workout set add`.
+#[test]
+fn complete_bash_phase_values() {
+    // words: recomplog workout set add --phase <cursor>
+    // indices: 0=recomplog 1=workout 2=set 3=add 4=--phase 5=<empty>
+    bin()
+        .env("COMPLETE", "bash")
+        .env("_CLAP_COMPLETE_INDEX", "5")
+        .args(["--", "recomplog", "workout", "set", "add", "--phase", ""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("full"))
+        .stdout(predicate::str::contains("eccentric"))
+        .stdout(predicate::str::contains("concentric"));
+}
+
+/// Static nutrition unit completer.
+#[test]
+fn complete_bash_nutrition_unit() {
+    bin()
+        .env("COMPLETE", "bash")
+        .env("_CLAP_COMPLETE_INDEX", "7")
+        .args([
+            "--",
+            "recomplog",
+            "nutrition",
+            "consumption",
+            "create",
+            "--product",
+            "1",
+            "--unit",
+            "",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("g"))
+        .stdout(predicate::str::contains("ml"))
+        .stdout(predicate::str::contains("unit"));
+}
