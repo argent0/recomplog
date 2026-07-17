@@ -145,9 +145,13 @@ pub enum WorkoutAction {
         limit: i64,
     },
     /// Show a workout with its exercises and sets.
-    Show { id: i64 },
+    Show {
+        #[arg(add = ArgValueCompleter::new(completion::complete_workout))]
+        id: i64,
+    },
     /// Update workout fields (partial).
     Update {
+        #[arg(add = ArgValueCompleter::new(completion::complete_workout))]
         id: i64,
         #[arg(long = "type")]
         workout_type: Option<String>,
@@ -169,6 +173,7 @@ pub enum WorkoutAction {
     },
     /// Delete a workout (cascades exercises/sets).
     Delete {
+        #[arg(add = ArgValueCompleter::new(completion::complete_workout))]
         id: i64,
         /// Show what would be deleted without writing.
         #[arg(long)]
@@ -203,12 +208,12 @@ pub enum WorkoutAction {
 pub enum WorkoutStatsAction {
     /// Personal records: max weight (body-mass aware) and max reps per exercise.
     Prs {
-        #[arg(short, long)]
+        #[arg(short, long, add = ArgValueCompleter::new(completion::complete_exercise))]
         exercise: Option<String>,
     },
     /// Training volume (body-mass aware kg·reps + effective reps).
     Volume {
-        #[arg(short, long)]
+        #[arg(short, long, add = ArgValueCompleter::new(completion::complete_exercise))]
         exercise: Option<String>,
         /// Period string: `30d`, `90d`, or `1y` (mutually exclusive with `--days`).
         #[arg(short, long)]
@@ -223,14 +228,14 @@ pub enum WorkoutStatsAction {
     },
     /// Per-set history for an exercise across workouts in a date range.
     History {
-        #[arg(short, long)]
+        #[arg(short, long, add = ArgValueCompleter::new(completion::complete_exercise))]
         exercise: String,
         #[arg(short, long, default_value_t = 30)]
         days: i64,
     },
     /// Load progression for an exercise (sets with recorded weight only).
     Weight {
-        #[arg(short, long)]
+        #[arg(short, long, add = ArgValueCompleter::new(completion::complete_exercise))]
         exercise: String,
     },
 }
@@ -265,6 +270,7 @@ pub enum ExerciseAction {
     },
     Update {
         /// Exercise id or name
+        #[arg(add = ArgValueCompleter::new(completion::complete_exercise))]
         exercise: String,
         #[arg(short, long)]
         category: Option<String>,
@@ -292,9 +298,9 @@ pub enum ExerciseAction {
 pub enum SetAction {
     /// Add a strength (or general) set.
     Add {
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_workout))]
         workout: Option<i64>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_exercise))]
         exercise: Option<String>,
         /// Direct workout_exercise id (alternative to --workout + --exercise)
         #[arg(long = "workout-exercise")]
@@ -363,9 +369,9 @@ pub enum SetAction {
     /// Add a cardio-focused set (distance, duration, HR, pace).
     #[command(name = "add-cardio")]
     AddCardio {
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_workout))]
         workout: Option<i64>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_exercise))]
         exercise: Option<String>,
         #[arg(long = "workout-exercise")]
         workout_exercise: Option<i64>,
@@ -412,9 +418,9 @@ pub enum SetAction {
     /// Add a rest-pause/cluster sequence (comma-separated reps/rir/effective-reps).
     #[command(name = "add-cluster")]
     AddCluster {
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_workout))]
         workout: Option<i64>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_exercise))]
         exercise: Option<String>,
         #[arg(long = "workout-exercise")]
         workout_exercise: Option<i64>,
@@ -458,9 +464,9 @@ pub enum SetAction {
     /// Add left/right (or both) sets for unilateral work.
     #[command(name = "add-unilateral")]
     AddUnilateral {
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_workout))]
         workout: Option<i64>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_exercise))]
         exercise: Option<String>,
         #[arg(long = "workout-exercise")]
         workout_exercise: Option<i64>,
@@ -507,9 +513,9 @@ pub enum SetAction {
     },
     /// Add exercise to workout and optionally log the first set.
     Quick {
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_workout))]
         workout: i64,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_exercise))]
         exercise: String,
         #[arg(long)]
         reps: Option<i32>,
@@ -894,14 +900,17 @@ pub enum ProductAction {
         tag: Option<String>,
     },
     Show {
+        #[arg(add = ArgValueCompleter::new(completion::complete_product))]
         id: i64,
     },
     Rename {
+        #[arg(add = ArgValueCompleter::new(completion::complete_product))]
         id: i64,
         #[arg(long)]
         name: String,
     },
     Delete {
+        #[arg(add = ArgValueCompleter::new(completion::complete_product))]
         id: i64,
         #[arg(long)]
         force: bool,
@@ -918,6 +927,7 @@ pub enum ProductAction {
     /// Back-compat aliases
     #[command(name = "set")]
     SetLegacy {
+        #[arg(add = ArgValueCompleter::new(completion::complete_product))]
         id: i64,
         #[arg(long, default_value = "100")]
         reference_quantity: f64,
@@ -956,6 +966,7 @@ pub enum ProductAction {
 #[derive(Subcommand, Debug, Clone)]
 pub enum ProductNutritionAction {
     Set {
+        #[arg(add = ArgValueCompleter::new(completion::complete_product))]
         id: i64,
         /// Amount of food the macros describe (e.g. 100 for 100 g, 1 for one package).
         #[arg(long)]
@@ -987,11 +998,13 @@ pub enum ProductNutritionAction {
 #[derive(Subcommand, Debug, Clone)]
 pub enum TagModifyAction {
     Add {
+        #[arg(add = ArgValueCompleter::new(completion::complete_product))]
         id: i64,
         #[arg(long)]
         tag: String,
     },
     Remove {
+        #[arg(add = ArgValueCompleter::new(completion::complete_product))]
         id: i64,
         #[arg(long)]
         tag: String,
@@ -1001,13 +1014,13 @@ pub enum TagModifyAction {
 #[derive(Subcommand, Debug, Clone)]
 pub enum PurchaseAction {
     Create {
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_product))]
         product: i64,
         #[arg(long, default_value_t = 1.0)]
         quantity: f64,
         #[arg(long)]
         price: Option<String>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_store))]
         store: Option<i64>,
         /// When the purchase **happened** (event time, RFC3339). Storage time is always now.
         /// Alias: `--date` (deprecated name; still accepted).
@@ -1021,9 +1034,9 @@ pub enum PurchaseAction {
         /// Flexible calendar day: today, yesterday, YYYY-MM-DD, …
         #[arg(long)]
         until: Option<String>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_product))]
         product: Option<i64>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_store))]
         store: Option<i64>,
     },
     Show {
@@ -1037,7 +1050,7 @@ pub enum PurchaseAction {
 #[derive(Subcommand, Debug, Clone)]
 pub enum ConsumptionAction {
     Create {
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_product))]
         product: i64,
         /// Amount consumed, in `--unit` (defaults to the product’s reference unit).
         #[arg(long)]
@@ -1061,7 +1074,7 @@ pub enum ConsumptionAction {
         /// Flexible calendar day: today, yesterday, YYYY-MM-DD, …
         #[arg(long)]
         until: Option<String>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_product))]
         product: Option<i64>,
     },
     Delete {
@@ -1108,14 +1121,17 @@ pub enum StoreAction {
     },
     List,
     Show {
+        #[arg(add = ArgValueCompleter::new(completion::complete_store))]
         id: i64,
     },
     Rename {
+        #[arg(add = ArgValueCompleter::new(completion::complete_store))]
         id: i64,
         #[arg(long)]
         name: String,
     },
     Delete {
+        #[arg(add = ArgValueCompleter::new(completion::complete_store))]
         id: i64,
     },
     Tag {
@@ -1296,7 +1312,7 @@ pub enum ImportAction {
         /// Path to the .fit file
         path: String,
         /// Override exercise name (default: FIT session.sport). Must exist in catalog.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_exercise))]
         exercise: Option<String>,
         /// Workout type label (default: Run)
         #[arg(long = "type")]

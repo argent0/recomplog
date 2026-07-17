@@ -2,6 +2,7 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use tempfile::TempDir;
 
 fn bin() -> Command {
     Command::cargo_bin("recomplog").unwrap()
@@ -87,4 +88,65 @@ fn complete_bash_nutrition_unit() {
         .stdout(predicate::str::contains("g"))
         .stdout(predicate::str::contains("ml"))
         .stdout(predicate::str::contains("unit"));
+}
+
+/// Dynamic exercise-name completer reads the default DB (via XDG_DATA_HOME).
+#[test]
+fn complete_bash_exercise_from_db() {
+    let dir = TempDir::new().unwrap();
+    let xdg = dir.path().join("share");
+    let db_dir = xdg.join("recomplog");
+    std::fs::create_dir_all(&db_dir).unwrap();
+    let db = db_dir.join("recomplog.db");
+    let db_s = db.display().to_string();
+
+    // Seed via normal CLI (creates schema + exercise).
+    bin()
+        .env("XDG_DATA_HOME", &xdg)
+        .args([
+            "--db",
+            &db_s,
+            "workout",
+            "exercise",
+            "create",
+            "bench press",
+            "--category",
+            "strength",
+        ])
+        .assert()
+        .success();
+    bin()
+        .env("XDG_DATA_HOME", &xdg)
+        .args([
+            "--db",
+            &db_s,
+            "workout",
+            "exercise",
+            "create",
+            "pull up",
+            "--category",
+            "strength",
+            "--load-type",
+            "body_mass",
+        ])
+        .assert()
+        .success();
+
+    // Completer uses default path from XDG_DATA_HOME (not --db on the partial line).
+    bin()
+        .env("COMPLETE", "bash")
+        .env("XDG_DATA_HOME", &xdg)
+        .env("_CLAP_COMPLETE_INDEX", "5")
+        .args([
+            "--",
+            "recomplog",
+            "workout",
+            "set",
+            "add",
+            "--exercise",
+            "ben",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bench press"));
 }

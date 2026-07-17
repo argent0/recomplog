@@ -43,6 +43,23 @@ pub fn open_db(override_path: Option<&str>) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Read-only open for shell completion: no directory creation, no migrations.
+///
+/// Returns `None` if the file is missing or cannot be opened. Completers must
+/// treat that as "no candidates" and never write diagnostics to stdout.
+pub fn open_db_readonly_for_completion(override_path: Option<&str>) -> Option<Connection> {
+    let path = match override_path {
+        Some(p) => PathBuf::from(p),
+        None => default_db_path(),
+    };
+    if !path.is_file() {
+        return None;
+    }
+    let flags =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    Connection::open_with_flags(&path, flags).ok()
+}
+
 /// Current schema version. Bump when adding a new migration block.
 const CURRENT_VERSION: i32 = 5;
 
