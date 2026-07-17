@@ -37,6 +37,23 @@ makepkg -si
 
 See `PKGBUILD` for depends/makedepends and install layout.
 
+## Shell completion
+
+Dynamic completions re-invoke the binary at tab time (subcommands, flags, and
+value candidates). Re-source on each shell start so registration stays in sync
+with the installed binary:
+
+```bash
+# Bash
+echo 'source <(COMPLETE=bash recomplog)' >> ~/.bashrc
+
+# Zsh
+echo 'source <(COMPLETE=zsh recomplog)' >> ~/.zshrc
+
+# Fish
+echo 'COMPLETE=fish recomplog | source' >> ~/.config/fish/completions/recomplog.fish
+```
+
 ## Data locations
 
 | What   | Default path                                      |

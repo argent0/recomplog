@@ -17,11 +17,16 @@ mod track_metrics;
 mod utils;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::CompleteEnv;
 
 use cli::Cli;
 
 fn main() {
+    // Dynamic shell completion: when COMPLETE=$shell is set, print registration
+    // or candidates and exit. Must run before any stdout and before normal parse.
+    CompleteEnv::with_factory(Cli::command).complete();
+
     if let Err(e) = run() {
         eprintln!("Error: {}", e);
         std::process::exit(1);

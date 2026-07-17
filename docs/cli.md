@@ -142,6 +142,28 @@ recomplog config generate
 recomplog init
 ```
 
+## Shell completion
+
+Completions are **dynamic**: the shell registers a small function that calls
+`recomplog` again under `COMPLETE=$shell`. Prefer re-sourcing on shell startup
+(not a stale file on disk) so the protocol stays aligned with the binary:
+
+```bash
+# Bash
+source <(COMPLETE=bash recomplog)
+
+# Zsh
+source <(COMPLETE=zsh recomplog)
+
+# Fish
+COMPLETE=fish recomplog | source
+```
+
+With this enabled, tab-complete top-level groups (`workout`, `body`, …), nested
+actions, flags, fixed enums (e.g. `--phase`), and live DB values (exercise
+names, product/workout/store ids). Dynamic values use the **default** DB path
+during completion (global `--db` on the partial line is not consulted yet).
+
 ## Global Flags
 
 All commands accept:
