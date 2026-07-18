@@ -8,6 +8,12 @@
 //!
 //! Product nutrition is always stored as `g`, `ml`, or `unit`.
 //! Consumptions must use a unit of the **same kind** as the product.
+//!
+//! **Append-only:** after insert, `consumptions.quantity` / `consumptions.unit`
+//! are treated as immutable event payload. Normalize aliases at write time
+//! (`normalize_to_canonical` / CLI create). Do not bulk-rewrite settled rows
+//! on open or import. One-time schema migrations that rewrote units (v3/v4)
+//! are gated by `user_version` and must not re-run.
 
 use anyhow::{anyhow, Result};
 

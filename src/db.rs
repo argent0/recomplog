@@ -83,6 +83,9 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         apply_v2_cardio_json(conn)?;
         conn.execute("PRAGMA user_version = 2", [])?;
     }
+    // v3/v4 bulk-mutate historical consumptions.quantity/unit. One-shot only:
+    // never re-export these helpers for import or "fix on open". After v4,
+    // event units are immutable except explicit user/agent corrections.
     if current < 3 {
         normalize_nutrition_units(conn)?;
         conn.execute("PRAGMA user_version = 3", [])?;

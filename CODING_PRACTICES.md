@@ -30,6 +30,10 @@ This document defines the coding standards for the unified `recomplog` project.
    - Design new domain concepts so corrections do not require silent rewrites of past events.
    - Imports append and stay idempotent where possible; never replace an entire domain’s history as a side effect.
    - Keep event time vs storage time distinct when appending late entries.
+   - **Consumption quantity/unit:** canonicalize at insert only. Do not re-run
+     migration heuristics (`normalize_nutrition_units`, `promote_whole_package_products`)
+     on open, import, or as a silent repair path. Those run once under `user_version`
+     gates; further unit fixes are explicit user/agent corrections, not migrate-on-open.
 
 4. **Data quality and actionable reports**
    - Protect event-time integrity and refuse garbage on write when possible.
