@@ -492,6 +492,104 @@ fn legacy_import_body_domain_still_works() {
     assert_eq!(sleep_min, 450);
 }
 
+/// Re-import body must not overwrite local corrections (INSERT OR IGNORE, not REPLACE).
+#[test]
+fn legacy_import_body_idempotent_preserves_corrections() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("body_min.db");
+    let dst = dir.path().join("target.db");
+    let src_s = src.display().to_string();
+    let db_s = dst.display().to_string();
+    build_bodylog_min(&src);
+    init_target(&db_s);
+
+    bin()
+        .args([
+            "--db",
+            &db_s,
+            "--json",
+            "import",
+            "legacy",
+            "--from-db",
+            &src_s,
+            "--domain",
+            "body",
+        ])
+        .assert()
+        .success();
+
+    // Local correction after first import.
+    let target = Connection::open(&dst).unwrap();
+    target
+        .execute(
+            "UPDATE measurements SET weight_kg = 81.2, body_fat_pct = 15.0 WHERE date = '2026-07-01'",
+            [],
+        )
+        .unwrap();
+    target
+        .execute(
+            "UPDATE sleep SET total_sleep_minutes = 480 WHERE date = '2026-07-01'",
+            [],
+        )
+        .unwrap();
+
+    let out = bin()
+        .args([
+            "--db",
+            &db_s,
+            "--json",
+            "import",
+            "legacy",
+            "--from-db",
+            &src_s,
+            "--domain",
+            "body",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["success"], true);
+    let body = &v["counts"]["body"];
+    assert_eq!(body["measurements"], 0);
+    assert_eq!(body["measurements_skipped"], 1);
+    assert_eq!(body["sleep"], 0);
+    assert_eq!(body["sleep_skipped"], 1);
+
+    let (w, bf): (f64, Option<f64>) = target
+        .query_row(
+            "SELECT weight_kg, body_fat_pct FROM measurements WHERE date = '2026-07-01'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        (w - 81.2).abs() < 1e-9,
+        "weight must stay corrected, got {w}"
+    );
+    assert_eq!(bf, Some(15.0));
+
+    let sleep_min: i64 = target
+        .query_row(
+            "SELECT total_sleep_minutes FROM sleep WHERE date = '2026-07-01'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(sleep_min, 480);
+
+    let m_count: i64 = target
+        .query_row("SELECT COUNT(*) FROM measurements", [], |r| r.get(0))
+        .unwrap();
+    let s_count: i64 = target
+        .query_row("SELECT COUNT(*) FROM sleep", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(m_count, 1);
+    assert_eq!(s_count, 1);
+}
+
 #[test]
 fn legacy_import_nutrition_domain() {
     let dir = TempDir::new().unwrap();

@@ -733,8 +733,12 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
 fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value> {
     let tx = dst.transaction()?;
     let mut measurements = 0i64;
+    let mut measurements_skipped = 0i64;
     let mut sleeps = 0i64;
+    let mut sleep_skipped = 0i64;
 
+    // Event rows: INSERT OR IGNORE only (append-only idempotency). Never REPLACE —
+    // re-import must not overwrite local corrections or richer rows with slim payloads.
     if let Ok(mut stmt) = src.prepare(
         "SELECT id, date, weight_kg, body_fat_pct, skeletal_muscle_pct, visceral_fat_level, bmi, resting_metabolism_kcal, created_at, updated_at FROM measurements",
     ) {
@@ -753,13 +757,18 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
             ))
         })? {
             let (id, date, w, bf, sm, vf, bmi, rmr, ca, ua) = row?;
-            measurements += tx.execute(
-                r#"INSERT OR REPLACE INTO measurements
+            let n = tx.execute(
+                r#"INSERT OR IGNORE INTO measurements
                    (id, date, weight_kg, body_fat_pct, skeletal_muscle_pct,
                     visceral_fat_level, bmi, resting_metabolism_kcal, created_at, updated_at)
                    VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"#,
                 params![id, date, w, bf, sm, vf, bmi, rmr, ca, ua],
             )? as i64;
+            if n > 0 {
+                measurements += n;
+            } else {
+                measurements_skipped += 1;
+            }
         }
     } else if let Ok(mut stmt) = src.prepare(
         "SELECT id, date, weight_kg, body_fat_pct, skeletal_muscle_pct, created_at, updated_at FROM measurements",
@@ -776,13 +785,18 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
             ))
         })? {
             let (id, date, w, bf, sm, ca, ua) = row?;
-            measurements += tx.execute(
-                r#"INSERT OR REPLACE INTO measurements
+            let n = tx.execute(
+                r#"INSERT OR IGNORE INTO measurements
                    (id, date, weight_kg, body_fat_pct, skeletal_muscle_pct,
                     visceral_fat_level, bmi, resting_metabolism_kcal, created_at, updated_at)
                    VALUES (?1,?2,?3,?4,?5, NULL, NULL, NULL, ?6, ?7)"#,
                 params![id, date, w, bf, sm, ca, ua],
             )? as i64;
+            if n > 0 {
+                measurements += n;
+            } else {
+                measurements_skipped += 1;
+            }
         }
     }
 
@@ -845,8 +859,8 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
                 ca,
                 ua,
             ) = row?;
-            sleeps += tx.execute(
-                "INSERT OR REPLACE INTO sleep
+            let n = tx.execute(
+                "INSERT OR IGNORE INTO sleep
                  (id, date, bedtime, wake_time, time_in_bed_minutes, total_sleep_minutes,
                   rem_minutes, deep_minutes, light_minutes, awake_minutes,
                   sleep_efficiency_pct, sleep_score, subjective_quality, awakenings,
@@ -857,6 +871,11 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
                     awakenings, hr, hyp, resp, notes, ca, ua
                 ],
             )? as i64;
+            if n > 0 {
+                sleeps += n;
+            } else {
+                sleep_skipped += 1;
+            }
         }
     } else if let Ok(mut stmt) = src.prepare(&format!(
         "SELECT id, date, total_sleep_minutes, created_at, updated_at FROM {sleep_table}"
@@ -871,14 +890,19 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
             ))
         })? {
             let (id, date, total, ca, ua) = row?;
-            sleeps += tx.execute(
-                "INSERT OR REPLACE INTO sleep (id, date, total_sleep_minutes, created_at, updated_at) VALUES (?1,?2,?3,?4,?5)",
+            let n = tx.execute(
+                "INSERT OR IGNORE INTO sleep (id, date, total_sleep_minutes, created_at, updated_at) VALUES (?1,?2,?3,?4,?5)",
                 params![id, date, total, ca, ua],
             )? as i64;
+            if n > 0 {
+                sleeps += n;
+            } else {
+                sleep_skipped += 1;
+            }
         }
     }
 
-    // user_profile
+    // user_profile is catalog/config (single row) — REPLACE is intentional.
     if let Ok(mut stmt) =
         src.prepare("SELECT height_cm, date_of_birth, updated_at FROM user_profile WHERE id = 1")
     {
@@ -900,7 +924,12 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
     }
 
     tx.commit()?;
-    Ok(serde_json::json!({"measurements": measurements, "sleep": sleeps}))
+    Ok(serde_json::json!({
+        "measurements": measurements,
+        "measurements_skipped": measurements_skipped,
+        "sleep": sleeps,
+        "sleep_skipped": sleep_skipped,
+    }))
 }
 
 /// Preferred columns for parent workout tables. Copied when present on both DBs.
