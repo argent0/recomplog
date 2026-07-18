@@ -1359,6 +1359,7 @@ fn handle_purchase(
             store,
             purchased_at,
         } => {
+            crate::product_resolve::require_active_product(&conn, product)?;
             let when = parse_rfc3339_instant_for_db(&purchased_at)?;
             let now = db::now_utc();
             let price_cents: Option<i64> = price
@@ -1507,14 +1508,7 @@ fn handle_consumption(
             refuse_consumption_midnight(when_dt, allow_midnight)?;
             let when = parse_rfc3339_instant_for_db(&consumed_at)?;
             let now = db::now_utc();
-            let product_name: Option<String> = conn
-                .query_row("SELECT name FROM products WHERE id = ?1", [product], |r| {
-                    r.get(0)
-                })
-                .optional()?;
-            if product_name.is_none() {
-                return Err(anyhow!("product {product} not found"));
-            }
+            crate::product_resolve::require_active_product(&conn, product)?;
             // Ref + classic six for consumption gate.
             struct ProductNutritionGate {
                 ref_qty: f64,
