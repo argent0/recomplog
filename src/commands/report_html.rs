@@ -166,6 +166,17 @@ fn fetch_html_sleep(conn: &Connection, since: &str, until: &str) -> Result<Vec<S
     Ok(rows)
 }
 
+struct ClassicNutritionRow {
+    reference_quantity: f64,
+    reference_unit: String,
+    energy_kcal: Option<f64>,
+    protein_g: Option<f64>,
+    carbohydrates_g: Option<f64>,
+    fat_g: Option<f64>,
+    fiber_g: Option<f64>,
+    sugars_g: Option<f64>,
+}
+
 fn fetch_html_nutrition_daily(conn: &Connection, since: &str, until: &str) -> Result<Vec<NutDay>> {
     // Aggregate in Rust so discrete units (bar, cup, serving) use the same
     // consumption_scale rules as `report nutrition` / `report brief`.
@@ -185,32 +196,34 @@ fn fetch_html_nutrition_daily(conn: &Connection, since: &str, until: &str) -> Re
         let qty: f64 = r.get(1)?;
         let unit: Option<String> = r.get(2)?;
         let logged_pid: i64 = r.get(3)?;
-        let effective =
-            crate::product_resolve::resolve_effective_product_id(conn, logged_pid)?;
-        let nutrition: Option<(f64, String, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>)> =
-            conn.query_row(
+        let effective = crate::product_resolve::resolve_effective_product_id(conn, logged_pid)?;
+        let nutrition: Option<ClassicNutritionRow> = conn
+            .query_row(
                 "SELECT reference_quantity, reference_unit,
                         energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g
                  FROM product_nutritions WHERE product_id = ?1",
                 [effective],
                 |nr| {
-                    Ok((
-                        nr.get(0)?,
-                        nr.get(1)?,
-                        nr.get(2)?,
-                        nr.get(3)?,
-                        nr.get(4)?,
-                        nr.get(5)?,
-                        nr.get(6)?,
-                        nr.get(7)?,
-                    ))
+                    Ok(ClassicNutritionRow {
+                        reference_quantity: nr.get(0)?,
+                        reference_unit: nr.get(1)?,
+                        energy_kcal: nr.get(2)?,
+                        protein_g: nr.get(3)?,
+                        carbohydrates_g: nr.get(4)?,
+                        fat_g: nr.get(5)?,
+                        fiber_g: nr.get(6)?,
+                        sugars_g: nr.get(7)?,
+                    })
                 },
             )
             .optional()?;
         let scale = match &nutrition {
-            Some((rq, ru, ..)) => {
-                crate::nutrition_units::consumption_scale(qty, *rq, unit.as_deref(), ru)
-            }
+            Some(n) => crate::nutrition_units::consumption_scale(
+                qty,
+                n.reference_quantity,
+                unit.as_deref(),
+                &n.reference_unit,
+            ),
             None => 0.0,
         };
         let day = by_day.entry(date.clone()).or_insert(NutDay {
@@ -222,23 +235,23 @@ fn fetch_html_nutrition_daily(conn: &Connection, since: &str, until: &str) -> Re
             fiber_g: 0.0,
             sugars_g: 0.0,
         });
-        if let Some((_, _, energy, protein, carbs, fat, fiber, sugars)) = nutrition {
-            if let Some(v) = energy {
+        if let Some(n) = nutrition {
+            if let Some(v) = n.energy_kcal {
                 day.energy_kcal += v * scale;
             }
-            if let Some(v) = protein {
+            if let Some(v) = n.protein_g {
                 day.protein_g += v * scale;
             }
-            if let Some(v) = carbs {
+            if let Some(v) = n.carbohydrates_g {
                 day.carbohydrates_g += v * scale;
             }
-            if let Some(v) = fat {
+            if let Some(v) = n.fat_g {
                 day.fat_g += v * scale;
             }
-            if let Some(v) = fiber {
+            if let Some(v) = n.fiber_g {
                 day.fiber_g += v * scale;
             }
-            if let Some(v) = sugars {
+            if let Some(v) = n.sugars_g {
                 day.sugars_g += v * scale;
             }
         }

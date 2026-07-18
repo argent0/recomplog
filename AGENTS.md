@@ -117,9 +117,10 @@ recomplog --json body measurement create --date today --weight-kg 81.2
 recomplog --json body measurement medians --window 7 --days 7
 recomplog --json body sleep create --date today --total-sleep "7h 45m"
 recomplog --json nutrition product create "Oats" --tags breakfast
-# Merge duplicates: re-point purchases/consumptions onto --into, copy tags + nutrition gaps, delete sources
+# Merge duplicates as aliases: retire sources onto --into (event product_ids stay; tags/nutrition gaps copy)
 recomplog --json nutrition product merge --into 14 61
 recomplog --json nutrition product merge --into 14 61 --name "Morixe Instant Oats" --dry-run
+recomplog --json nutrition product show 61
 # Nutrition units: g (mass), ml (volume), unit (package) — consumption must match product kind.
 # unit = whole discrete item (bar, capsule); pourables (oil, bulk) use g and log the portion only.
 recomplog --json nutrition product nutrition set 3 --reference-quantity 1 --reference-unit unit --energy-kcal 180 --protein-g 15 --carbohydrates-g 18 --fat-g 7 --fiber-g 0 --sugars-g 2

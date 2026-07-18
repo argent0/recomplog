@@ -13,11 +13,9 @@ const MAX_MERGE_DEPTH: usize = 32;
 /// True when the product exists and is not retired (`retired_at IS NULL`).
 pub fn is_active_product(conn: &Connection, id: i64) -> Result<bool> {
     let row: Option<(Option<String>,)> = conn
-        .query_row(
-            "SELECT retired_at FROM products WHERE id = ?1",
-            [id],
-            |r| Ok((r.get(0)?,)),
-        )
+        .query_row("SELECT retired_at FROM products WHERE id = ?1", [id], |r| {
+            Ok((r.get(0)?,))
+        })
         .optional()?;
     Ok(matches!(row, Some((None,))))
 }
@@ -174,14 +172,18 @@ mod tests {
             [],
         )
         .unwrap();
-        let err = resolve_effective_product_id(&conn, 1).unwrap_err().to_string();
+        let err = resolve_effective_product_id(&conn, 1)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("cycle"), "{err}");
     }
 
     #[test]
     fn missing_product() {
         let conn = mem_products();
-        let err = resolve_effective_product_id(&conn, 42).unwrap_err().to_string();
+        let err = resolve_effective_product_id(&conn, 42)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not found"), "{err}");
     }
 }

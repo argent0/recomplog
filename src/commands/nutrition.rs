@@ -434,9 +434,8 @@ fn handle_product(
         }
         ProductAction::Search { name, tag } => {
             if let Some(n) = name {
-                let mut stmt = conn.prepare(
-                    "SELECT id, name FROM products WHERE retired_at IS NULL",
-                )?;
+                let mut stmt =
+                    conn.prepare("SELECT id, name FROM products WHERE retired_at IS NULL")?;
                 let cands: Vec<_> = stmt
                     .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
                     .filter_map(|r| r.ok())
@@ -736,9 +735,7 @@ fn merge_products(
     let Some((into_name, into_retired)) = into_row else {
         return Err(anyhow!("product {into} not found (--into)"));
     };
-    if into_retired.is_some()
-        || !crate::product_resolve::is_active_product(conn, into)?
-    {
+    if into_retired.is_some() || !crate::product_resolve::is_active_product(conn, into)? {
         return Err(anyhow!(
             "product {into} ({into_name}) is retired; merge into an active product"
         ));
@@ -1441,14 +1438,8 @@ fn handle_purchase(
                                 [effective],
                                 |r| r.get(0),
                             )?;
-                            obj.insert(
-                                "effective_product_id".into(),
-                                serde_json::json!(effective),
-                            );
-                            obj.insert(
-                                "effective_product_name".into(),
-                                serde_json::json!(ename),
-                            );
+                            obj.insert("effective_product_id".into(), serde_json::json!(effective));
+                            obj.insert("effective_product_name".into(), serde_json::json!(ename));
                         }
                     }
                 }
@@ -1667,19 +1658,15 @@ fn handle_consumption(
                     let effective =
                         crate::product_resolve::resolve_effective_product_id(&conn, pid)?;
                     if effective != pid {
-                        let ename: String = conn.query_row(
-                            "SELECT name FROM products WHERE id = ?1",
-                            [effective],
-                            |r| r.get(0),
-                        )?;
-                        row.as_object_mut().unwrap().insert(
-                            "effective_product_id".into(),
-                            serde_json::json!(effective),
-                        );
-                        row.as_object_mut().unwrap().insert(
-                            "effective_product_name".into(),
-                            serde_json::json!(ename),
-                        );
+                        if let Some(obj) = row.as_object_mut() {
+                            let ename: String = conn.query_row(
+                                "SELECT name FROM products WHERE id = ?1",
+                                [effective],
+                                |r| r.get(0),
+                            )?;
+                            obj.insert("effective_product_id".into(), serde_json::json!(effective));
+                            obj.insert("effective_product_name".into(), serde_json::json!(ename));
+                        }
                     }
                 }
             }

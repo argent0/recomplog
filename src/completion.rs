@@ -243,7 +243,11 @@ mod tests {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
                 "CREATE TABLE exercises (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
-                 CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+                 CREATE TABLE products (
+                   id INTEGER PRIMARY KEY,
+                   name TEXT NOT NULL,
+                   retired_at TEXT
+                 );
                  CREATE TABLE stores (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
                  CREATE TABLE workouts (
                    id INTEGER PRIMARY KEY,

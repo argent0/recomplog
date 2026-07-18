@@ -489,6 +489,58 @@ struct NutritionConsumptionRow {
     added_sugars_g: Option<f64>,
 }
 
+/// Product nutrition facts loaded for report scaling (effective product after merge).
+struct ProductNutritionFacts {
+    reference_quantity: f64,
+    reference_unit: String,
+    energy_kcal: Option<f64>,
+    protein_g: Option<f64>,
+    carbohydrates_g: Option<f64>,
+    fat_g: Option<f64>,
+    fiber_g: Option<f64>,
+    sugars_g: Option<f64>,
+    saturated_fat_g: Option<f64>,
+    trans_fat_g: Option<f64>,
+    monounsaturated_fat_g: Option<f64>,
+    polyunsaturated_fat_g: Option<f64>,
+    cholesterol_mg: Option<f64>,
+    added_sugars_g: Option<f64>,
+}
+
+fn load_product_nutrition_facts(
+    conn: &Connection,
+    product_id: i64,
+) -> Result<Option<ProductNutritionFacts>> {
+    conn.query_row(
+        "SELECT reference_quantity, reference_unit,
+                energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g,
+                saturated_fat_g, trans_fat_g, monounsaturated_fat_g, polyunsaturated_fat_g,
+                cholesterol_mg, added_sugars_g
+         FROM product_nutritions WHERE product_id = ?1",
+        [product_id],
+        |r| {
+            Ok(ProductNutritionFacts {
+                reference_quantity: r.get(0)?,
+                reference_unit: r.get(1)?,
+                energy_kcal: r.get(2)?,
+                protein_g: r.get(3)?,
+                carbohydrates_g: r.get(4)?,
+                fat_g: r.get(5)?,
+                fiber_g: r.get(6)?,
+                sugars_g: r.get(7)?,
+                saturated_fat_g: r.get(8)?,
+                trans_fat_g: r.get(9)?,
+                monounsaturated_fat_g: r.get(10)?,
+                polyunsaturated_fat_g: r.get(11)?,
+                cholesterol_mg: r.get(12)?,
+                added_sugars_g: r.get(13)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 fn resolve_nutrition_report_period(args: &NutritionPeriodArgs) -> Result<ResolvedNutritionPeriod> {
     let today = Local::now().date_naive();
 
@@ -579,88 +631,29 @@ fn fetch_nutrition_consumptions(
     for (qty, unit, logged_product_id, consumed_at) in raw {
         let effective_id =
             crate::product_resolve::resolve_effective_product_id(conn, logged_product_id)?;
-        let nutrition: Option<(
-            f64,
-            String,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-        )> = conn
-            .query_row(
-                "SELECT reference_quantity, reference_unit,
-                        energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g,
-                        saturated_fat_g, trans_fat_g, monounsaturated_fat_g, polyunsaturated_fat_g,
-                        cholesterol_mg, added_sugars_g
-                 FROM product_nutritions WHERE product_id = ?1",
-                [effective_id],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                        r.get(7)?,
-                        r.get(8)?,
-                        r.get(9)?,
-                        r.get(10)?,
-                        r.get(11)?,
-                        r.get(12)?,
-                        r.get(13)?,
-                    ))
-                },
-            )
-            .optional()?;
         // Same as former INNER JOIN: skip rows with no nutrition on effective product.
-        let Some((
-            ref_q,
-            ref_unit,
-            energy_kcal,
-            protein_g,
-            carbohydrates_g,
-            fat_g,
-            fiber_g,
-            sugars_g,
-            saturated_fat_g,
-            trans_fat_g,
-            monounsaturated_fat_g,
-            polyunsaturated_fat_g,
-            cholesterol_mg,
-            added_sugars_g,
-        )) = nutrition
-        else {
+        let Some(n) = load_product_nutrition_facts(conn, effective_id)? else {
             continue;
         };
         rows.push(NutritionConsumptionRow {
             scale: crate::nutrition_units::consumption_scale(
                 qty,
-                ref_q,
+                n.reference_quantity,
                 unit.as_deref(),
-                &ref_unit,
+                &n.reference_unit,
             ),
-            energy_kcal,
-            protein_g,
-            carbohydrates_g,
-            fat_g,
-            fiber_g,
-            sugars_g,
-            saturated_fat_g,
-            trans_fat_g,
-            monounsaturated_fat_g,
-            polyunsaturated_fat_g,
-            cholesterol_mg,
-            added_sugars_g,
+            energy_kcal: n.energy_kcal,
+            protein_g: n.protein_g,
+            carbohydrates_g: n.carbohydrates_g,
+            fat_g: n.fat_g,
+            fiber_g: n.fiber_g,
+            sugars_g: n.sugars_g,
+            saturated_fat_g: n.saturated_fat_g,
+            trans_fat_g: n.trans_fat_g,
+            monounsaturated_fat_g: n.monounsaturated_fat_g,
+            polyunsaturated_fat_g: n.polyunsaturated_fat_g,
+            cholesterol_mg: n.cholesterol_mg,
+            added_sugars_g: n.added_sugars_g,
             // Micros and scale use the effective (keeper) product.
             product_id: effective_id,
             consumed_at,
@@ -1109,7 +1102,7 @@ fn nutrition_spending(
                 purchase_count,
             });
         }
-        prods.sort_by(|a, b| b.cents.cmp(&a.cents));
+        prods.sort_by_key(|b| std::cmp::Reverse(b.cents));
         Some(prods)
     } else {
         None

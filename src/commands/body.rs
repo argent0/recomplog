@@ -669,9 +669,7 @@ fn list_consumptions_with_incomplete_macros(
             "SELECT COUNT(*) FROM product_nutritions pn
              WHERE pn.product_id = ?1 AND ({INCOMPLETE_CLASSIC_MACROS_SQL})"
         );
-        let incomplete: i64 = conn
-            .query_row(&sql, [effective], |r| r.get(0))
-            .unwrap_or(0);
+        let incomplete: i64 = conn.query_row(&sql, [effective], |r| r.get(0)).unwrap_or(0);
         // Prior path used INNER JOIN nutrition: no row → not listed.
         if incomplete == 0 {
             continue;
