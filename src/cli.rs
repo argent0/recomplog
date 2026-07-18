@@ -950,6 +950,32 @@ pub enum ProductAction {
         #[arg(long)]
         force: bool,
     },
+    /// Merge one or more products into a keeper.
+    ///
+    /// Re-points purchases and consumptions, copies missing tags and
+    /// nutrition gaps onto `--into`, then deletes the source products.
+    ///
+    /// Example: merge duplicate oats into the better-named product:
+    ///   recomplog nutrition product merge --into 14 61
+    ///   recomplog --json nutrition product merge --into 14 61 --name "Morixe Instant Oats"
+    Merge {
+        /// Product ID to keep (all history re-points here).
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_product))]
+        into: i64,
+        /// Product ID(s) to absorb and delete.
+        #[arg(
+            required = true,
+            num_args = 1..,
+            add = ArgValueCompleter::new(completion::complete_product)
+        )]
+        from: Vec<i64>,
+        /// Optional final name for the kept product.
+        #[arg(long)]
+        name: Option<String>,
+        /// Report what would change without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Set macros + micronutrients for a product.
     Nutrition {
         #[command(subcommand)]

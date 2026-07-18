@@ -51,6 +51,11 @@ recomplog nutrition product create "Rolled Oats 1kg" --tags bulk,breakfast --jso
 recomplog nutrition product list --json
 recomplog nutrition product search --name oats
 
+# Merge duplicate products (re-points purchases/consumptions, copies tags + nutrition gaps, deletes sources)
+recomplog nutrition product merge --into 14 61
+recomplog --json nutrition product merge --into 14 61 --name "Morixe Instant Oats"
+recomplog --json nutrition product merge --into 14 61 --dry-run
+
 recomplog nutrition purchase create --product 12 --quantity 1 --price 4.99
 
 # Product nutrition: three unit kinds only — g (mass), ml (volume), unit (package)

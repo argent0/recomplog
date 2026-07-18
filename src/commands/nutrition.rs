@@ -520,6 +520,14 @@ fn handle_product(
                 quiet_print(quiet, format!("Deleted product {id}"));
             }
         }
+        ProductAction::Merge {
+            into,
+            from,
+            name,
+            dry_run,
+        } => {
+            merge_products(&conn, into, &from, name.as_deref(), dry_run, json, quiet)?;
+        }
         ProductAction::Nutrition {
             action:
                 ProductNutritionAction::Set {
@@ -674,6 +682,412 @@ fn handle_product(
         ProductAction::TagRemove { id, tag } => tag_remove_product(&conn, id, &tag, json, quiet)?,
     }
     Ok(())
+}
+
+/// Per-source summary for product merge output.
+#[derive(Debug, Clone)]
+struct MergeSourceReport {
+    id: i64,
+    name: String,
+    purchases: i64,
+    consumptions: i64,
+    tags_copied: i64,
+    nutrition_copied: bool,
+    micronutrients_filled: i64,
+}
+
+/// Merge `from` product IDs into keeper `into`.
+///
+/// - Re-points purchases and consumptions onto the keeper.
+/// - Copies tags the keeper does not already have.
+/// - If the keeper has no `product_nutritions` row, copies nutrition from the
+///   first source that has one (macros + micronutrients).
+/// - If the keeper already has nutrition, fills missing micronutrient rows only
+///   (does not overwrite macros or existing micro amounts).
+/// - Deletes source products (cascade cleans their nutrition/tags/micros).
+fn merge_products(
+    conn: &Connection,
+    into: i64,
+    from: &[i64],
+    rename: Option<&str>,
+    dry_run: bool,
+    json: bool,
+    quiet: bool,
+) -> Result<()> {
+    if from.is_empty() {
+        return Err(anyhow!("provide at least one source product id to merge"));
+    }
+
+    let into_name: String = conn
+        .query_row("SELECT name FROM products WHERE id = ?1", [into], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .ok_or_else(|| anyhow!("product {into} not found (--into)"))?;
+
+    // Deduplicate sources while preserving order; reject into-in-from.
+    let mut seen = std::collections::HashSet::new();
+    let mut sources: Vec<i64> = Vec::new();
+    for &id in from {
+        if id == into {
+            return Err(anyhow!(
+                "cannot merge product {id} into itself; omit it from the source list"
+            ));
+        }
+        if seen.insert(id) {
+            sources.push(id);
+        }
+    }
+
+    for &id in &sources {
+        let exists: Option<i64> = conn
+            .query_row("SELECT id FROM products WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?;
+        if exists.is_none() {
+            return Err(anyhow!("product {id} not found (source)"));
+        }
+    }
+
+    let mut warnings: Vec<SanityWarning> = Vec::new();
+    let into_has_nutrition = product_has_nutrition(conn, into)?;
+    let into_unit_kind = product_unit_kind(conn, into)?;
+
+    let mut reports: Vec<MergeSourceReport> = Vec::new();
+    let mut nutrition_copied_from: Option<i64> = None;
+    let mut total_purchases = 0i64;
+    let mut total_consumptions = 0i64;
+    let mut total_tags = 0i64;
+    let mut total_micros_filled = 0i64;
+    // Tracks whether keeper gained nutrition during this merge (dry-run or live).
+    let mut keeper_has_nutrition = into_has_nutrition;
+
+    if !dry_run {
+        conn.execute("BEGIN IMMEDIATE", [])?;
+    }
+
+    let result = (|| -> Result<()> {
+        for &src in &sources {
+            let src_name: String =
+                conn.query_row("SELECT name FROM products WHERE id = ?1", [src], |r| {
+                    r.get(0)
+                })?;
+            let purchases: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM purchases WHERE product_id = ?1",
+                [src],
+                |r| r.get(0),
+            )?;
+            let consumptions: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM consumptions WHERE product_id = ?1",
+                [src],
+                |r| r.get(0),
+            )?;
+
+            let src_has_nutrition = product_has_nutrition(conn, src)?;
+            let src_unit_kind = product_unit_kind(conn, src)?;
+
+            // Unit-kind mismatch can make historical consumptions scale wrong under
+            // the keeper's macros — surface it, but still allow the merge.
+            if let (Some(into_k), Some(src_k)) = (into_unit_kind, src_unit_kind) {
+                if into_k != src_k && consumptions > 0 {
+                    warnings.push(SanityWarning {
+                        field: "reference_unit".into(),
+                        kind: "unit_kind_mismatch".into(),
+                        message: format!(
+                            "source {src} ({src_name}) unit kind `{src_k}` differs from \
+                             keeper {into} `{into_k}`; {consumptions} consumption(s) re-pointed \
+                             — review historical quantities vs keeper macros"
+                        ),
+                        previous_value: None,
+                        previous_date: None,
+                        new_value: None,
+                        delta: None,
+                        allowed_delta: None,
+                        days_gap: None,
+                    });
+                }
+            }
+
+            // Count tags that would be newly associated on the keeper.
+            let tags_copied: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM product_tag_associations s
+                 WHERE s.product_id = ?1
+                   AND NOT EXISTS (
+                     SELECT 1 FROM product_tag_associations t
+                     WHERE t.product_id = ?2 AND t.tag_id = s.tag_id
+                   )",
+                params![src, into],
+                |r| r.get(0),
+            )?;
+
+            let mut nutrition_copied = false;
+            let mut micronutrients_filled = 0i64;
+
+            if !keeper_has_nutrition && src_has_nutrition {
+                // Copy full nutrition from the first source that has it.
+                if !dry_run {
+                    copy_product_nutrition(conn, src, into)?;
+                    copy_all_product_micronutrients(conn, src, into)?;
+                }
+                nutrition_copied = true;
+                keeper_has_nutrition = true;
+                nutrition_copied_from = Some(src);
+                // All micros from source are new on the keeper.
+                micronutrients_filled = conn.query_row(
+                    "SELECT COUNT(*) FROM product_micronutrients WHERE product_id = ?1",
+                    [src],
+                    |r| r.get(0),
+                )?;
+            } else if keeper_has_nutrition && src_has_nutrition {
+                // Keeper already has macros; only fill missing micronutrient rows.
+                if !dry_run {
+                    micronutrients_filled = fill_missing_product_micronutrients(conn, src, into)?;
+                } else {
+                    micronutrients_filled = count_fillable_micronutrients(conn, src, into)?;
+                }
+                // Source nutrition is discarded when the keeper already had macros
+                // (pre-merge or copied from an earlier source in this run).
+                if into_has_nutrition || nutrition_copied_from.is_some_and(|id| id != src) {
+                    warnings.push(SanityWarning {
+                        field: "nutrition".into(),
+                        kind: "nutrition_kept_from_into".into(),
+                        message: format!(
+                            "source {src} ({src_name}) had nutrition; keeper {into} macros \
+                             retained (source nutrition discarded after merge)"
+                        ),
+                        previous_value: None,
+                        previous_date: None,
+                        new_value: None,
+                        delta: None,
+                        allowed_delta: None,
+                        days_gap: None,
+                    });
+                }
+            }
+
+            if !dry_run {
+                conn.execute(
+                    "UPDATE purchases SET product_id = ?1 WHERE product_id = ?2",
+                    params![into, src],
+                )?;
+                conn.execute(
+                    "UPDATE consumptions SET product_id = ?1 WHERE product_id = ?2",
+                    params![into, src],
+                )?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO product_tag_associations (product_id, tag_id)
+                     SELECT ?1, tag_id FROM product_tag_associations WHERE product_id = ?2",
+                    params![into, src],
+                )?;
+                // Cascade removes source nutrition, tags, micros.
+                let n = conn.execute("DELETE FROM products WHERE id = ?1", [src])?;
+                if n == 0 {
+                    return Err(anyhow!("product {src} disappeared during merge"));
+                }
+            }
+
+            total_purchases += purchases;
+            total_consumptions += consumptions;
+            total_tags += tags_copied;
+            total_micros_filled += micronutrients_filled;
+            reports.push(MergeSourceReport {
+                id: src,
+                name: src_name,
+                purchases,
+                consumptions,
+                tags_copied,
+                nutrition_copied,
+                micronutrients_filled,
+            });
+        }
+
+        if let Some(new_name) = rename {
+            if !dry_run {
+                conn.execute(
+                    "UPDATE products SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![new_name, db::now_utc(), into],
+                )?;
+            }
+        } else if !dry_run {
+            conn.execute(
+                "UPDATE products SET updated_at = ?1 WHERE id = ?2",
+                params![db::now_utc(), into],
+            )?;
+        }
+        Ok(())
+    })();
+
+    if !dry_run {
+        match result {
+            Ok(()) => {
+                conn.execute("COMMIT", [])?;
+            }
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", []);
+                return Err(e);
+            }
+        }
+    } else {
+        result?;
+    }
+
+    let final_name = rename.unwrap_or(&into_name).to_string();
+    let deleted_ids: Vec<i64> = reports.iter().map(|r| r.id).collect();
+    let message = if dry_run {
+        format!(
+            "dry-run: would merge {} product(s) into {into} ({final_name})",
+            reports.len()
+        )
+    } else {
+        format!(
+            "merged {} product(s) into {into} ({final_name})",
+            reports.len()
+        )
+    };
+
+    emit_nutrition_warnings(&warnings, quiet);
+
+    if json {
+        let merged: Vec<_> = reports
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "name": r.name,
+                    "purchases": r.purchases,
+                    "consumptions": r.consumptions,
+                    "tags_copied": r.tags_copied,
+                    "nutrition_copied": r.nutrition_copied,
+                    "micronutrients_filled": r.micronutrients_filled,
+                })
+            })
+            .collect();
+        print_json(&serde_json::json!({
+            "success": true,
+            "id": into,
+            "into_id": into,
+            "into_name": final_name,
+            "merged_ids": deleted_ids,
+            "merged": merged,
+            "purchases_moved": total_purchases,
+            "consumptions_moved": total_consumptions,
+            "tags_copied": total_tags,
+            "nutrition_copied_from": nutrition_copied_from,
+            "micronutrients_filled": total_micros_filled,
+            "deleted_ids": if dry_run { serde_json::Value::Null } else {
+                serde_json::json!(deleted_ids)
+            },
+            "dry_run": dry_run,
+            "message": message,
+            "warnings": if warnings.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(warnings)
+            },
+        }));
+    } else if !quiet {
+        println!("{message}");
+        for r in &reports {
+            println!(
+                "  {} ({}): {} purchase(s), {} consumption(s), {} tag(s){}",
+                r.id,
+                r.name,
+                r.purchases,
+                r.consumptions,
+                r.tags_copied,
+                if r.nutrition_copied {
+                    ", nutrition copied"
+                } else if r.micronutrients_filled > 0 {
+                    ", micros filled"
+                } else {
+                    ""
+                }
+            );
+        }
+        if let Some(src) = nutrition_copied_from {
+            println!("  nutrition: copied from product {src}");
+        }
+        if !dry_run {
+            println!("  kept product {into}: {final_name}");
+        }
+    }
+
+    Ok(())
+}
+
+fn product_has_nutrition(conn: &Connection, product_id: i64) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM product_nutritions WHERE product_id = ?1",
+        [product_id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+fn product_unit_kind(conn: &Connection, product_id: i64) -> Result<Option<&'static str>> {
+    let unit: Option<String> = conn
+        .query_row(
+            "SELECT reference_unit FROM product_nutritions WHERE product_id = ?1",
+            [product_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(unit
+        .as_deref()
+        .and_then(|u| crate::nutrition_units::parse_unit(u).ok())
+        .map(|p| p.kind.as_str()))
+}
+
+fn copy_product_nutrition(conn: &Connection, from: i64, into: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO product_nutritions (
+            product_id, reference_quantity, reference_unit,
+            energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g,
+            saturated_fat_g, trans_fat_g, monounsaturated_fat_g, polyunsaturated_fat_g,
+            cholesterol_mg, added_sugars_g
+         )
+         SELECT ?1, reference_quantity, reference_unit,
+            energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g,
+            saturated_fat_g, trans_fat_g, monounsaturated_fat_g, polyunsaturated_fat_g,
+            cholesterol_mg, added_sugars_g
+         FROM product_nutritions WHERE product_id = ?2",
+        params![into, from],
+    )?;
+    Ok(())
+}
+
+fn copy_all_product_micronutrients(conn: &Connection, from: i64, into: i64) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO product_micronutrients
+         (product_id, micronutrient_id, amount, unit)
+         SELECT ?1, micronutrient_id, amount, unit
+         FROM product_micronutrients WHERE product_id = ?2",
+        params![into, from],
+    )?;
+    Ok(())
+}
+
+fn fill_missing_product_micronutrients(conn: &Connection, from: i64, into: i64) -> Result<i64> {
+    let n = conn.execute(
+        "INSERT OR IGNORE INTO product_micronutrients
+         (product_id, micronutrient_id, amount, unit)
+         SELECT ?1, micronutrient_id, amount, unit
+         FROM product_micronutrients WHERE product_id = ?2",
+        params![into, from],
+    )?;
+    Ok(n as i64)
+}
+
+fn count_fillable_micronutrients(conn: &Connection, from: i64, into: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM product_micronutrients s
+         WHERE s.product_id = ?1
+           AND NOT EXISTS (
+             SELECT 1 FROM product_micronutrients t
+             WHERE t.product_id = ?2 AND t.micronutrient_id = s.micronutrient_id
+           )",
+        params![from, into],
+        |r| r.get(0),
+    )?)
 }
 
 fn tag_add_product(conn: &Connection, id: i64, tag: &str, json: bool, quiet: bool) -> Result<()> {
