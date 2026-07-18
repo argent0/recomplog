@@ -11,6 +11,8 @@ Single-user, local-first, and agent-friendly. One SQLite database for:
 
 Successor to `repslog`, `bodylog`, `nutlog`, and `bodydashboard`.
 
+**Append only** for event history: workouts, sets, meals, purchases, measurements, and sleep grow by logging new facts. Catalog data (products, exercises, profile) can be edited; log corrections exist, but the primary path is insert, not rewrite.
+
 **Quality data produces quality reports. Quality reports are actionable reports.** The tool favors trustworthy logging (sanity checks, event-vs-storage time, gap detection) so reports can drive decisions, not just display numbers.
 
 ## Status

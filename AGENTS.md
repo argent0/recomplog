@@ -10,6 +10,12 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
 - Agent-friendly by design — consistent `entity action`, excellent `--json`, predictable behavior.
 - One database for everything (no more fragile subprocess + JSON glue between tools).
 - Preserve the spirit of the original four tools.
+- **Append only (event history grows by insertion).**
+  - Event logs (workouts, sets, consumptions, purchases, measurements, sleep, imports) are a growing record of what was logged — prefer `create` / `add` over rewriting the past.
+  - Catalog and config (products, exercises, tags, profile, micronutrients, nutrition facts) may be updated or merged; that is not “rewriting history.”
+  - `update` / `delete` on log rows exist for honest corrections (typos, wrong weight, abandoned workout), not as the primary logging path.
+  - New features must not depend on silent bulk mutation of historical events. Imports append (idempotently where possible); reports read the log as stored.
+  - Event time and storage time stay independent: appending a late log never backdates `created_at` (see time model below).
 - **Quality data produces quality reports. Quality reports are actionable reports.**
   - Logging, imports, sanity checks, and `db check` exist so the data is trustworthy.
   - Reports (`report brief`, domain summaries, HTML) exist so the user (or agent) can act — not just stare at numbers.
@@ -96,6 +102,7 @@ When adding or improving import:
 - Introducing unnecessary async / web / complex abstractions.
 - Using `unwrap()` / `expect()` / `panic!` on normal paths.
 - Silent data loss during legacy imports.
+- Features that treat bulk rewrite of historical event rows as the normal path (violates append-only).
 
 ## Quick Commands
 
