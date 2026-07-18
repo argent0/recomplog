@@ -51,10 +51,12 @@ recomplog nutrition product create "Rolled Oats 1kg" --tags bulk,breakfast --jso
 recomplog nutrition product list --json
 recomplog nutrition product search --name oats
 
-# Merge duplicate products (re-points purchases/consumptions, copies tags + nutrition gaps, deletes sources)
+# Merge duplicate products as catalog aliases (sources soft-retired; event product_ids unchanged)
+# Tags + nutrition gaps copy onto --into; list/search hide retired sources; show still works.
 recomplog nutrition product merge --into 14 61
 recomplog --json nutrition product merge --into 14 61 --name "Morixe Instant Oats"
 recomplog --json nutrition product merge --into 14 61 --dry-run
+recomplog --json nutrition product show 61   # retired alias → effective keeper
 
 recomplog nutrition purchase create --product 12 --quantity 1 --price 4.99
 
