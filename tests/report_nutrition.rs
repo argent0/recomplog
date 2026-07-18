@@ -91,6 +91,10 @@ fn setup_fixture(db: &str) {
             "3.5",
             "--fat-g",
             "0.4",
+            "--fiber-g",
+            "0",
+            "--sugars-g",
+            "0",
             "--micronutrient",
             "Magnesium",
             "200",
@@ -124,6 +128,8 @@ fn setup_fixture(db: &str) {
             "7",
             "--fiber-g",
             "11",
+            "--sugars-g",
+            "0",
         ])
         .assert()
         .success();
@@ -579,6 +585,10 @@ fn package_and_mass_units_are_explicit() {
             "18",
             "--fat-g",
             "7",
+            "--fiber-g",
+            "0",
+            "--sugars-g",
+            "0",
         ])
         .assert()
         .success();
@@ -605,6 +615,10 @@ fn package_and_mass_units_are_explicit() {
             "9",
             "--fat-g",
             "4.5",
+            "--fiber-g",
+            "0",
+            "--sugars-g",
+            "0",
         ])
         .assert()
         .success();
@@ -627,6 +641,14 @@ fn package_and_mass_units_are_explicit() {
             "389",
             "--protein-g",
             "17",
+            "--carbohydrates-g",
+            "10",
+            "--fat-g",
+            "5",
+            "--fiber-g",
+            "0",
+            "--sugars-g",
+            "0",
         ])
         .assert()
         .success();

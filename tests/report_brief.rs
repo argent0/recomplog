@@ -65,6 +65,8 @@ fn seed_brief_fixture(db: &str) {
             "7",
             "--fiber-g",
             "11",
+            "--sugars-g",
+            "0",
         ])
         .assert()
         .success();
@@ -364,6 +366,10 @@ fn seed_brief_on_date(db: &str, date: &str, prev_workout_started: &str) {
             "28",
             "--fat-g",
             "0.3",
+            "--fiber-g",
+            "0",
+            "--sugars-g",
+            "0",
         ])
         .assert()
         .success();

@@ -56,12 +56,15 @@ recomplog nutrition purchase create --product 12 --quantity 1 --price 4.99
 # Product nutrition: three unit kinds only — g (mass), ml (volume), unit (package)
 # - g / ml: bulk & pourables (oil, oats, yogurt) — log the portion eaten, not the package
 # - unit: discrete whole items only (protein bar, capsule, one prepared drink)
+# Classic six macros all required (energy/protein/carbs/fat/fiber/sugars). Explicit 0 is ok (warns).
+# Inspect rare zeros later: recomplog db check --zero-macros
 recomplog nutrition product nutrition set 12 --reference-quantity 100 --reference-unit g \
-  --energy-kcal 389 --protein-g 17
+  --energy-kcal 389 --protein-g 17 --carbohydrates-g 66 --fat-g 7 --fiber-g 11 --sugars-g 1
 recomplog nutrition product nutrition set 3 --reference-quantity 1 --reference-unit unit \
-  --energy-kcal 180 --protein-g 15
+  --energy-kcal 180 --protein-g 15 --carbohydrates-g 18 --fat-g 7 --fiber-g 0 --sugars-g 2
 
 # Consumption must use the same kind as the product (unit defaults to product reference)
+# Product must have complete classic six macros
 recomplog nutrition consumption create --product 12 --quantity 80 --unit g --date today
 recomplog nutrition consumption create --product 3 --quantity 1 --unit unit --date today
 # Oil / fats: weigh the pour (e.g. 5–15 g), never the whole bottle

@@ -175,11 +175,62 @@ pub struct MicronutrientWithoutInfoodsItem {
     pub unit: String,
 }
 
+/// Product with incomplete classic six macros and at least one consumption.
+#[derive(Debug, Serialize)]
+pub struct ProductIncompleteMacrosItem {
+    pub id: i64,
+    pub name: String,
+    pub consumption_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProductsWithIncompleteMacros {
+    pub count: i64,
+    pub items: Vec<ProductIncompleteMacrosItem>,
+}
+
+/// Consumption of a product with incomplete classic six macros.
+#[derive(Debug, Serialize)]
+pub struct ConsumptionIncompleteMacrosItem {
+    pub id: i64,
+    pub product_id: i64,
+    pub product_name: String,
+    pub consumed_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConsumptionsWithIncompleteMacros {
+    pub count: i64,
+    pub items: Vec<ConsumptionIncompleteMacrosItem>,
+}
+
+/// Product with one or more classic macros explicitly set to 0 (inspection only).
+#[derive(Debug, Serialize)]
+pub struct ProductZeroMacrosItem {
+    pub id: i64,
+    pub name: String,
+    /// Classic-six field names that are exactly 0.0.
+    pub zero_fields: Vec<String>,
+    pub energy_kcal: Option<f64>,
+    pub protein_g: Option<f64>,
+    pub carbohydrates_g: Option<f64>,
+    pub fat_g: Option<f64>,
+    pub fiber_g: Option<f64>,
+    pub sugars_g: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProductsWithZeroMacros {
+    pub count: i64,
+    pub items: Vec<ProductZeroMacrosItem>,
+}
+
 /// Report returned by `recomplog db check` (JSON and human summary source).
 #[derive(Debug, Serialize)]
 pub struct CheckReport {
-    /// True when no violations of the enabled checks were found and every
-    /// micronutrient has an INFOODS tag.
+    /// True when no violations of the enabled checks were found, every
+    /// micronutrient has an INFOODS tag, and no consumed products have incomplete macros.
+    /// Zero-macro products (when listed via `--zero-macros`) do **not** fail ok.
     pub ok: bool,
     pub measurement_count: i64,
     pub sleep_count: i64,
@@ -188,11 +239,20 @@ pub struct CheckReport {
     /// Whether measurement variation checks were run (`--variations`).
     /// Sleep and sets are absolute-only; this flag does not apply to them.
     pub checked_variations: bool,
+    /// Whether zero classic-macro products were listed (`--zero-macros`).
+    pub checked_zero_macros: bool,
     pub hard_violation_count: i64,
     pub variation_violation_count: i64,
     pub violations: Vec<CheckViolation>,
     /// User micronutrients with `infoods_tag IS NULL` (custom or unmapped).
     pub micronutrients_without_infoods: MicronutrientsWithoutInfoods,
+    /// Consumed products missing any of energy/protein/carbs/fat/fiber/sugars.
+    pub products_with_incomplete_macros: ProductsWithIncompleteMacros,
+    /// Consumptions of those incomplete products.
+    pub consumptions_with_incomplete_macros: ConsumptionsWithIncompleteMacros,
+    /// Products with any classic macro = 0 (only when `--zero-macros`; never fails ok).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub products_with_zero_macros: Option<ProductsWithZeroMacros>,
 }
 
 fn proposed_from_measurement(m: &Measurement) -> ProposedMetrics {
@@ -458,17 +518,32 @@ pub fn handle_check(
     let variation_violation_count = violations.iter().filter(|v| v.kind == "delta").count() as i64;
 
     let micronutrients_without_infoods = list_micronutrients_without_infoods(repo.conn())?;
+    let products_with_incomplete_macros = list_products_with_incomplete_macros(repo.conn())?;
+    let consumptions_with_incomplete_macros =
+        list_consumptions_with_incomplete_macros(repo.conn())?;
+    let products_with_zero_macros = if args.zero_macros {
+        Some(list_products_with_zero_macros(repo.conn())?)
+    } else {
+        None
+    };
 
     let report = CheckReport {
-        ok: violations.is_empty() && micronutrients_without_infoods.count == 0,
+        ok: violations.is_empty()
+            && micronutrients_without_infoods.count == 0
+            && products_with_incomplete_macros.count == 0
+            && consumptions_with_incomplete_macros.count == 0,
         measurement_count: measurements.len() as i64,
         sleep_count: sleeps.len() as i64,
         set_count: sets.len() as i64,
         checked_variations: args.variations,
+        checked_zero_macros: args.zero_macros,
         hard_violation_count,
         variation_violation_count,
         violations,
         micronutrients_without_infoods,
+        products_with_incomplete_macros,
+        consumptions_with_incomplete_macros,
+        products_with_zero_macros,
     };
 
     if json {
@@ -481,10 +556,12 @@ pub fn handle_check(
             println!("ok");
         } else {
             println!(
-                "fail hard={} variations={} untagged_micros={}",
+                "fail hard={} variations={} untagged_micros={} incomplete_macro_products={} incomplete_macro_consumptions={}",
                 report.hard_violation_count,
                 report.variation_violation_count,
-                report.micronutrients_without_infoods.count
+                report.micronutrients_without_infoods.count,
+                report.products_with_incomplete_macros.count,
+                report.consumptions_with_incomplete_macros.count
             );
         }
     }
@@ -519,6 +596,132 @@ fn list_micronutrients_without_infoods(
     })
 }
 
+/// SQL: any classic-six macro null on `product_nutritions` (alias `pn`).
+const INCOMPLETE_CLASSIC_MACROS_SQL: &str = "pn.energy_kcal IS NULL \
+     OR pn.protein_g IS NULL \
+     OR pn.carbohydrates_g IS NULL \
+     OR pn.fat_g IS NULL \
+     OR pn.fiber_g IS NULL \
+     OR pn.sugars_g IS NULL";
+
+/// SQL: any classic-six macro is exactly 0 (alias `pn`).
+const ZERO_CLASSIC_MACROS_SQL: &str = "pn.energy_kcal = 0 \
+     OR pn.protein_g = 0 \
+     OR pn.carbohydrates_g = 0 \
+     OR pn.fat_g = 0 \
+     OR pn.fiber_g = 0 \
+     OR pn.sugars_g = 0";
+
+fn list_products_with_incomplete_macros(
+    conn: &rusqlite::Connection,
+) -> Result<ProductsWithIncompleteMacros> {
+    let sql = format!(
+        "SELECT p.id, p.name, COUNT(c.id) AS n
+         FROM products p
+         JOIN product_nutritions pn ON pn.product_id = p.id
+         JOIN consumptions c ON c.product_id = p.id
+         WHERE {INCOMPLETE_CLASSIC_MACROS_SQL}
+         GROUP BY p.id, p.name
+         ORDER BY n DESC, p.name COLLATE NOCASE"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let items: Vec<ProductIncompleteMacrosItem> = stmt
+        .query_map([], |r| {
+            Ok(ProductIncompleteMacrosItem {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                consumption_count: r.get(2)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(ProductsWithIncompleteMacros {
+        count: items.len() as i64,
+        items,
+    })
+}
+
+fn list_consumptions_with_incomplete_macros(
+    conn: &rusqlite::Connection,
+) -> Result<ConsumptionsWithIncompleteMacros> {
+    let sql = format!(
+        "SELECT c.id, c.product_id, p.name, c.consumed_at
+         FROM consumptions c
+         JOIN products p ON p.id = c.product_id
+         JOIN product_nutritions pn ON pn.product_id = c.product_id
+         WHERE {INCOMPLETE_CLASSIC_MACROS_SQL}
+         ORDER BY c.consumed_at DESC, c.id DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let items: Vec<ConsumptionIncompleteMacrosItem> = stmt
+        .query_map([], |r| {
+            Ok(ConsumptionIncompleteMacrosItem {
+                id: r.get(0)?,
+                product_id: r.get(1)?,
+                product_name: r.get(2)?,
+                consumed_at: r.get(3)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(ConsumptionsWithIncompleteMacros {
+        count: items.len() as i64,
+        items,
+    })
+}
+
+fn list_products_with_zero_macros(conn: &rusqlite::Connection) -> Result<ProductsWithZeroMacros> {
+    let sql = format!(
+        "SELECT p.id, p.name,
+                pn.energy_kcal, pn.protein_g, pn.carbohydrates_g, pn.fat_g,
+                pn.fiber_g, pn.sugars_g
+         FROM products p
+         JOIN product_nutritions pn ON pn.product_id = p.id
+         WHERE {ZERO_CLASSIC_MACROS_SQL}
+         ORDER BY p.name COLLATE NOCASE"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let items: Vec<ProductZeroMacrosItem> = stmt
+        .query_map([], |r| {
+            let energy_kcal: Option<f64> = r.get(2)?;
+            let protein_g: Option<f64> = r.get(3)?;
+            let carbohydrates_g: Option<f64> = r.get(4)?;
+            let fat_g: Option<f64> = r.get(5)?;
+            let fiber_g: Option<f64> = r.get(6)?;
+            let sugars_g: Option<f64> = r.get(7)?;
+            let mut zero_fields = Vec::new();
+            for (name, val) in [
+                ("energy_kcal", energy_kcal),
+                ("protein_g", protein_g),
+                ("carbohydrates_g", carbohydrates_g),
+                ("fat_g", fat_g),
+                ("fiber_g", fiber_g),
+                ("sugars_g", sugars_g),
+            ] {
+                if val == Some(0.0) {
+                    zero_fields.push(name.to_string());
+                }
+            }
+            Ok(ProductZeroMacrosItem {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                zero_fields,
+                energy_kcal,
+                protein_g,
+                carbohydrates_g,
+                fat_g,
+                fiber_g,
+                sugars_g,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(ProductsWithZeroMacros {
+        count: items.len() as i64,
+        items,
+    })
+}
+
 fn print_check_human(report: &CheckReport) {
     println!(
         "Checked {} measurement(s), {} sleep entr(y/ies), and {} set(s).{}",
@@ -547,6 +750,69 @@ fn print_check_human(report: &CheckReport) {
         println!(
             "  Link with: nutrition micronutrient create … --infoods TAG  (or map existing rows later)"
         );
+    }
+
+    let incomplete_products = &report.products_with_incomplete_macros;
+    if incomplete_products.count > 0 {
+        println!(
+            "WARNING: {} product(s) with incomplete classic macros (energy/protein/carbs/fat/fiber/sugars) appear in consumptions — reports undercount:",
+            incomplete_products.count
+        );
+        for item in incomplete_products.items.iter().take(20) {
+            println!(
+                "  id={} {} ({} consumption(s))",
+                item.id, item.name, item.consumption_count
+            );
+        }
+        if incomplete_products.count > 20 {
+            println!(
+                "  … and {} more (see --json)",
+                incomplete_products.count - 20
+            );
+        }
+        println!(
+            "  Fix with: nutrition product nutrition set <id> --reference-quantity … \
+             --energy-kcal … --protein-g … --carbohydrates-g … --fat-g … --fiber-g … --sugars-g …"
+        );
+    }
+
+    let incomplete_cons = &report.consumptions_with_incomplete_macros;
+    if incomplete_cons.count > 0 {
+        println!(
+            "WARNING: {} consumption(s) of products with incomplete classic macros:",
+            incomplete_cons.count
+        );
+        for item in incomplete_cons.items.iter().take(20) {
+            println!(
+                "  consumption id={} product {} ({}) at {}",
+                item.id, item.product_id, item.product_name, item.consumed_at
+            );
+        }
+        if incomplete_cons.count > 20 {
+            println!("  … and {} more (see --json)", incomplete_cons.count - 20);
+        }
+    }
+
+    if let Some(ref zeros) = report.products_with_zero_macros {
+        if zeros.count > 0 {
+            println!(
+                "NOTE: {} product(s) have classic macro(s) set to 0 (inspection only; does not fail check):",
+                zeros.count
+            );
+            for item in zeros.items.iter().take(20) {
+                println!(
+                    "  id={} {} zero=[{}]",
+                    item.id,
+                    item.name,
+                    item.zero_fields.join(", ")
+                );
+            }
+            if zeros.count > 20 {
+                println!("  … and {} more (see --json)", zeros.count - 20);
+            }
+        } else if report.checked_zero_macros {
+            println!("NOTE: no products with classic macro value 0.");
+        }
     }
 
     if report.ok {

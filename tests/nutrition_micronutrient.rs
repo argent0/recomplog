@@ -114,6 +114,14 @@ fn reject_macro_as_product_micronutrient_flag() {
             "120",
             "--fat-g",
             "14",
+            "--protein-g",
+            "10",
+            "--carbohydrates-g",
+            "10",
+            "--fiber-g",
+            "0",
+            "--sugars-g",
+            "0",
             "--micronutrient",
             "Saturated Fat",
             "2.5",
@@ -160,6 +168,14 @@ fn extended_macros_via_columns_not_in_micro_list() {
             "120",
             "--fat-g",
             "14",
+            "--protein-g",
+            "10",
+            "--carbohydrates-g",
+            "10",
+            "--fiber-g",
+            "0",
+            "--sugars-g",
+            "0",
             "--saturated-fat-g",
             "2.5",
             "--cholesterol-mg",
@@ -492,6 +508,16 @@ fn product_set_reuses_case_and_auto_links_infoods() {
             "g",
             "--energy-kcal",
             "23",
+            "--protein-g",
+            "10",
+            "--carbohydrates-g",
+            "10",
+            "--fat-g",
+            "5",
+            "--fiber-g",
+            "0",
+            "--sugars-g",
+            "0",
             "--micronutrient",
             "magnesium",
             "79",
@@ -525,6 +551,7 @@ fn product_set_reuses_case_and_auto_links_infoods() {
         ])
         .assert()
         .success();
+    // Classic six required (explicit zeros OK for micro-focused products).
     bin()
         .args([
             "--db",
@@ -539,13 +566,26 @@ fn product_set_reuses_case_and_auto_links_infoods() {
             "100",
             "--reference-unit",
             "g",
+            "--energy-kcal",
+            "0",
+            "--protein-g",
+            "0",
+            "--carbohydrates-g",
+            "0",
+            "--fat-g",
+            "0",
+            "--fiber-g",
+            "0",
+            "--sugars-g",
+            "0",
             "--micronutrient",
             "Magnesium",
             "270",
             "mg",
         ])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("zero_macro"));
 
     let list2 = bin()
         .args(["--db", &db, "--json", "nutrition", "micronutrient", "list"])

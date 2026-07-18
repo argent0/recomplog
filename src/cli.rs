@@ -1492,6 +1492,10 @@ pub struct CheckMissingArgs {
 pub struct CheckArgs {
     #[arg(long, alias = "deltas")]
     pub variations: bool,
+    /// List products whose classic macros include an explicit 0 (energy/protein/carbs/fat/fiber/sugars).
+    /// For manual or agent inspection only — does not fail `ok` (zeros are valid known-empty).
+    #[arg(long = "zero-macros")]
+    pub zero_macros: bool,
     #[arg(long)]
     pub since: Option<String>,
     #[arg(long)]

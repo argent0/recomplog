@@ -34,6 +34,91 @@ struct ProductMacros {
     added_sugars_g: Option<f64>,
 }
 
+/// Classic six macros required on every product nutrition set (all non-null).
+/// Explicit `Some(0.0)` is allowed; `None` is not.
+fn classic_macro_fields(macros: &ProductMacros) -> [(&'static str, &'static str, Option<f64>); 6] {
+    [
+        ("energy_kcal", "--energy-kcal", macros.energy_kcal),
+        ("protein_g", "--protein-g", macros.protein_g),
+        (
+            "carbohydrates_g",
+            "--carbohydrates-g",
+            macros.carbohydrates_g,
+        ),
+        ("fat_g", "--fat-g", macros.fat_g),
+        ("fiber_g", "--fiber-g", macros.fiber_g),
+        ("sugars_g", "--sugars-g", macros.sugars_g),
+    ]
+}
+
+fn missing_classic_macro_flags(macros: &ProductMacros) -> Vec<&'static str> {
+    classic_macro_fields(macros)
+        .into_iter()
+        .filter(|(_, _, v)| v.is_none())
+        .map(|(_, flag, _)| flag)
+        .collect()
+}
+
+fn classic_macros_complete_opts(
+    energy_kcal: Option<f64>,
+    protein_g: Option<f64>,
+    carbohydrates_g: Option<f64>,
+    fat_g: Option<f64>,
+    fiber_g: Option<f64>,
+    sugars_g: Option<f64>,
+) -> bool {
+    energy_kcal.is_some()
+        && protein_g.is_some()
+        && carbohydrates_g.is_some()
+        && fat_g.is_some()
+        && fiber_g.is_some()
+        && sugars_g.is_some()
+}
+
+/// Validate classic six for nutrition set. Returns non-fatal zero warnings.
+fn validate_classic_macros_for_set(macros: &ProductMacros) -> Result<Vec<SanityWarning>> {
+    let missing = missing_classic_macro_flags(macros);
+    if !missing.is_empty() {
+        return Err(anyhow!(
+            "product nutrition requires all classic macros (energy/protein/carbs/fat/fiber/sugars); \
+             missing: {}. Use explicit 0 when truly zero (rare; emits a warning)",
+            missing.join(", ")
+        ));
+    }
+    let mut warnings = Vec::new();
+    // Explicit zero is valid but rare — warn so agents/users double-check.
+    for (field, _, val) in classic_macro_fields(macros) {
+        if let Some(v) = val {
+            if v == 0.0 {
+                warnings.push(SanityWarning {
+                    field: field.into(),
+                    kind: "zero_macro".into(),
+                    message: format!(
+                        "{field}=0 is unusual; confirm this is known-zero (not missing data). \
+                         Explicit 0 is correct when true; inspect later with `db check --zero-macros`"
+                    ),
+                    previous_value: None,
+                    previous_date: None,
+                    new_value: Some(0.0),
+                    delta: None,
+                    allowed_delta: None,
+                    days_gap: None,
+                });
+            }
+        }
+    }
+    Ok(warnings)
+}
+
+fn emit_nutrition_warnings(warnings: &[SanityWarning], quiet: bool) {
+    if quiet {
+        return;
+    }
+    for w in warnings {
+        eprintln!("Warning: {}", w.message);
+    }
+}
+
 pub fn handle(
     action: NutritionAction,
     db_override: Option<&str>,
@@ -531,9 +616,16 @@ fn handle_product(
                 };
                 (rq, ru, macros, micros)
             };
+            let warnings = validate_classic_macros_for_set(&macros)?;
             set_product_nutrition(&conn, id, rq, &ru, &macros, &micros)?;
+            emit_nutrition_warnings(&warnings, quiet);
             if json {
-                print_json(&Success::created(id, "nutrition", "product nutrition set"));
+                print_json(&Success::created_with_warnings(
+                    id,
+                    "nutrition",
+                    "product nutrition set",
+                    warnings,
+                ));
             } else {
                 quiet_print(quiet, format!("Set nutrition for product {id}"));
             }
@@ -564,9 +656,16 @@ fn handle_product(
                 sugars_g,
                 ..Default::default()
             };
+            let warnings = validate_classic_macros_for_set(&macros)?;
             set_product_nutrition(&conn, id, reference_quantity, &reference_unit, &macros, &[])?;
+            emit_nutrition_warnings(&warnings, quiet);
             if json {
-                print_json(&Success::created(id, "nutrition", "product nutrition set"));
+                print_json(&Success::created_with_warnings(
+                    id,
+                    "nutrition",
+                    "product nutrition set",
+                    warnings,
+                ));
             } else {
                 quiet_print(quiet, format!("Set nutrition for product {id}"));
             }
@@ -925,26 +1024,66 @@ fn handle_consumption(
             if product_name.is_none() {
                 return Err(anyhow!("product {product} not found"));
             }
-            let nutrition: Option<(f64, String)> = conn
+            // Ref + classic six for consumption gate.
+            struct ProductNutritionGate {
+                ref_qty: f64,
+                ref_unit: String,
+                energy_kcal: Option<f64>,
+                protein_g: Option<f64>,
+                carbohydrates_g: Option<f64>,
+                fat_g: Option<f64>,
+                fiber_g: Option<f64>,
+                sugars_g: Option<f64>,
+            }
+            let nutrition: Option<ProductNutritionGate> = conn
                 .query_row(
-                    "SELECT reference_quantity, reference_unit FROM product_nutritions
+                    "SELECT reference_quantity, reference_unit,
+                            energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g
+                     FROM product_nutritions
                      WHERE product_id = ?1",
                     [product],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| {
+                        Ok(ProductNutritionGate {
+                            ref_qty: r.get(0)?,
+                            ref_unit: r.get(1)?,
+                            energy_kcal: r.get(2)?,
+                            protein_g: r.get(3)?,
+                            carbohydrates_g: r.get(4)?,
+                            fat_g: r.get(5)?,
+                            fiber_g: r.get(6)?,
+                            sugars_g: r.get(7)?,
+                        })
+                    },
                 )
                 .optional()?;
-            let Some((ref_qty, ref_unit)) = nutrition else {
+            let Some(nutrition) = nutrition else {
                 return Err(anyhow!(
                     "product {product} has no nutrition set; run \
                      `nutrition product nutrition set {product} --reference-quantity … \
                      --reference-unit g|ml|unit` first"
                 ));
             };
+            if !classic_macros_complete_opts(
+                nutrition.energy_kcal,
+                nutrition.protein_g,
+                nutrition.carbohydrates_g,
+                nutrition.fat_g,
+                nutrition.fiber_g,
+                nutrition.sugars_g,
+            ) {
+                return Err(anyhow!(
+                    "product {product} has incomplete classic macros \
+                     (energy/protein/carbs/fat/fiber/sugars must all be set); run \
+                     `nutrition product nutrition set {product} --energy-kcal … \
+                     --protein-g … --carbohydrates-g … --fat-g … --fiber-g … --sugars-g …` \
+                     (use explicit 0 when truly zero)"
+                ));
+            }
             let resolved = crate::nutrition_units::resolve_consumption(
                 quantity,
                 unit.as_deref(),
-                ref_qty,
-                &ref_unit,
+                nutrition.ref_qty,
+                &nutrition.ref_unit,
             )?;
             conn.execute(
                 "INSERT INTO consumptions (product_id, quantity, unit, consumed_at, created_at) VALUES (?1,?2,?3,?4,?5)",
@@ -962,7 +1101,7 @@ fn handle_consumption(
                     "unit_kind": crate::nutrition_units::parse_unit(&resolved.unit)
                         .map(|p| p.kind.as_str())
                         .unwrap_or("unknown"),
-                    "product_reference_unit": ref_unit,
+                    "product_reference_unit": nutrition.ref_unit,
                     "consumed_at": when,
                     "created_at": now,
                 }));

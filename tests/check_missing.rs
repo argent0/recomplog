@@ -56,6 +56,14 @@ fn seed_product(db: &str) {
             "389",
             "--protein-g",
             "17",
+            "--carbohydrates-g",
+            "10",
+            "--fat-g",
+            "5",
+            "--fiber-g",
+            "0",
+            "--sugars-g",
+            "0",
         ])
         .assert()
         .success();
