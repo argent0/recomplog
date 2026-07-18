@@ -805,7 +805,7 @@ fn merge_products(
             let src_unit_kind = product_unit_kind(conn, src)?;
 
             // Unit-kind mismatch can make historical consumptions scale wrong under
-            // the keeper's macros — surface it, but still allow the merge.
+            // the keeper's macros (reports resolve to keeper) — surface it.
             if let (Some(into_k), Some(src_k)) = (into_unit_kind, src_unit_kind) {
                 if into_k != src_k && consumptions > 0 {
                     warnings.push(SanityWarning {
@@ -813,8 +813,9 @@ fn merge_products(
                         kind: "unit_kind_mismatch".into(),
                         message: format!(
                             "source {src} ({src_name}) unit kind `{src_k}` differs from \
-                             keeper {into} `{into_k}`; {consumptions} consumption(s) re-pointed \
-                             — review historical quantities vs keeper macros"
+                             keeper {into} `{into_k}`; {consumptions} consumption(s) still \
+                             reference the source id but reports use keeper macros — \
+                             review historical quantities"
                         ),
                         previous_value: None,
                         previous_date: None,

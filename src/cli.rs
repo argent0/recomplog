@@ -950,19 +950,20 @@ pub enum ProductAction {
         #[arg(long)]
         force: bool,
     },
-    /// Merge one or more products into a keeper.
+    /// Merge one or more products into a keeper as catalog aliases.
     ///
-    /// Re-points purchases and consumptions, copies missing tags and
-    /// nutrition gaps onto `--into`, then deletes the source products.
+    /// Sources are soft-retired (`merged_into_id` + `retired_at`) and redirect
+    /// to `--into`. Purchase/consumption rows **keep their original product_id**.
+    /// Tags and nutrition gaps copy onto the keeper; sources are not deleted.
     ///
     /// Example: merge duplicate oats into the better-named product:
     ///   recomplog nutrition product merge --into 14 61
     ///   recomplog --json nutrition product merge --into 14 61 --name "Morixe Instant Oats"
     Merge {
-        /// Product ID to keep (all history re-points here).
+        /// Active product ID to keep (sources alias here).
         #[arg(long, add = ArgValueCompleter::new(completion::complete_product))]
         into: i64,
-        /// Product ID(s) to absorb and delete.
+        /// Product ID(s) to absorb and retire as aliases.
         #[arg(
             required = true,
             num_args = 1..,
