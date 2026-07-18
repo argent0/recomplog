@@ -909,3 +909,110 @@ fn product_merge_rejects_already_retired() {
         .failure()
         .stderr(predicate::str::contains("retired"));
 }
+
+/// Upgrade from products without merge columns (user_version 8) adds alias fields.
+#[test]
+fn migration_v9_adds_product_merge_alias_columns() {
+    use rusqlite::Connection;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("v8products.db");
+    let path_s = path.display().to_string();
+
+    {
+        let conn = Connection::open(&path).unwrap();
+        // Minimal nutrition-related tables so product list/show can run after migrate.
+        conn.execute_batch(
+            r#"
+            PRAGMA user_version = 8;
+            CREATE TABLE products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE product_tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE product_tag_associations (
+                product_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                PRIMARY KEY (product_id, tag_id)
+            );
+            CREATE TABLE product_nutritions (
+                product_id INTEGER PRIMARY KEY,
+                reference_quantity REAL NOT NULL,
+                reference_unit TEXT NOT NULL,
+                energy_kcal REAL,
+                protein_g REAL,
+                carbohydrates_g REAL,
+                fat_g REAL,
+                fiber_g REAL,
+                sugars_g REAL
+            );
+            CREATE TABLE product_micronutrients (
+                product_id INTEGER NOT NULL,
+                micronutrient_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                unit TEXT NOT NULL,
+                PRIMARY KEY (product_id, micronutrient_id)
+            );
+            CREATE TABLE micronutrients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                unit TEXT NOT NULL,
+                recommended_intake REAL,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO products (id, name, created_at, updated_at)
+            VALUES (1, 'Oats', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z');
+            "#,
+        )
+        .unwrap();
+    }
+
+    // Open via CLI so migrations run.
+    bin()
+        .args(["--db", &path_s, "--json", "nutrition", "product", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Oats"));
+
+    let conn = Connection::open(&path).unwrap();
+    let ver: i32 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert!(ver >= 9, "expected user_version >= 9, got {ver}");
+
+    let mut has_merged = false;
+    let mut has_retired = false;
+    let mut stmt = conn.prepare("PRAGMA table_info(products)").unwrap();
+    let cols = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect::<Vec<_>>();
+    for c in &cols {
+        if c == "merged_into_id" {
+            has_merged = true;
+        }
+        if c == "retired_at" {
+            has_retired = true;
+        }
+    }
+    assert!(has_merged, "missing merged_into_id, cols={cols:?}");
+    assert!(has_retired, "missing retired_at, cols={cols:?}");
+
+    // Existing row is still active (null merge fields).
+    let (mid, rat): (Option<i64>, Option<String>) = conn
+        .query_row(
+            "SELECT merged_into_id, retired_at FROM products WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(mid.is_none());
+    assert!(rat.is_none());
+}
