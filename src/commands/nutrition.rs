@@ -696,15 +696,16 @@ struct MergeSourceReport {
     micronutrients_filled: i64,
 }
 
-/// Merge `from` product IDs into keeper `into`.
+/// Merge `from` product IDs into keeper `into` as catalog aliases.
 ///
-/// - Re-points purchases and consumptions onto the keeper.
+/// - Leaves purchase/consumption `product_id` unchanged (append-only event FKs).
+/// - Soft-retires each source (`merged_into_id` + `retired_at`) instead of DELETE.
 /// - Copies tags the keeper does not already have.
 /// - If the keeper has no `product_nutritions` row, copies nutrition from the
 ///   first source that has one (macros + micronutrients).
 /// - If the keeper already has nutrition, fills missing micronutrient rows only
 ///   (does not overwrite macros or existing micro amounts).
-/// - Deletes source products (cascade cleans their nutrition/tags/micros).
+/// - Source catalog rows (nutrition/tags) remain as a forensic snapshot.
 fn merge_products(
     conn: &Connection,
     into: i64,
