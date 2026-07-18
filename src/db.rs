@@ -61,7 +61,7 @@ pub fn open_db_readonly_for_completion(override_path: Option<&str>) -> Option<Co
 }
 
 /// Current schema version. Bump when adding a new migration block.
-const CURRENT_VERSION: i32 = 8;
+const CURRENT_VERSION: i32 = 9;
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i32 = conn
@@ -111,6 +111,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     if current < 8 {
         apply_v8_body_multi_sample_per_day(conn)?;
         conn.execute("PRAGMA user_version = 8", [])?;
+    }
+    if current < 9 {
+        apply_v9_product_merge_alias(conn)?;
+        conn.execute("PRAGMA user_version = 9", [])?;
     }
 
     Ok(())
@@ -764,6 +768,29 @@ fn apply_v2_cardio_json(conn: &Connection) -> Result<()> {
     if !column_exists(conn, "exercise_sets", "laps")? {
         conn.execute("ALTER TABLE exercise_sets ADD COLUMN laps TEXT", [])?;
     }
+    Ok(())
+}
+
+/// Product merge alias columns (schema v9). See migrations/009_product_merge_alias.sql
+/// and reports/append/S2-product-merge-rewrites-event-fks.md.
+fn apply_v9_product_merge_alias(conn: &Connection) -> Result<()> {
+    // Partial DBs (test fixtures without nutrition) may lack products — skip.
+    if !table_exists(conn, "products")? {
+        return Ok(());
+    }
+    if !column_exists(conn, "products", "merged_into_id")? {
+        conn.execute(
+            "ALTER TABLE products ADD COLUMN merged_into_id INTEGER REFERENCES products(id)",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "products", "retired_at")? {
+        conn.execute("ALTER TABLE products ADD COLUMN retired_at TEXT", [])?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_products_merged_into ON products(merged_into_id)",
+        [],
+    )?;
     Ok(())
 }
 
