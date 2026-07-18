@@ -1433,7 +1433,9 @@ pub enum ImportAction {
         workout_type: Option<String>,
         #[arg(short, long)]
         notes: Option<String>,
-        /// Allow re-import of a previously imported file
+        /// If this file SHA was already imported, re-print the existing workout
+        /// (no second session, no provenance delete). Default without this flag
+        /// is to refuse with an error.
         #[arg(long)]
         force: bool,
         /// HR zone upper bounds bpm zones 1-5 (comma-separated)

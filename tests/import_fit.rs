@@ -143,15 +143,15 @@ fn import_fit_zepp_running_e2e() {
         .unwrap();
     assert_eq!(imports, 1);
 
-    // Duplicate import fails
+    // Duplicate import fails without --force
     bin()
         .args(["--db", &db_s, "import", "fit", &fit, "--no-profile-hr"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("already imported"));
 
-    // Force re-import succeeds
-    bin()
+    // --force is append-strict: re-prints existing import, does not create a second workout
+    let force_out = bin()
         .args([
             "--db",
             &db_s,
@@ -164,7 +164,23 @@ fn import_fit_zepp_running_e2e() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"success\": true"));
+        .stdout(predicate::str::contains("\"success\": true"))
+        .stdout(predicate::str::contains("\"already_imported\": true"))
+        .get_output()
+        .stdout
+        .clone();
+    let force_v: serde_json::Value = serde_json::from_slice(&force_out).unwrap();
+    assert_eq!(force_v["workout_id"], 1);
+    assert_eq!(force_v["already_imported"], true);
+
+    let workouts: i64 = conn
+        .query_row("SELECT COUNT(*) FROM workouts", [], |r| r.get(0))
+        .unwrap();
+    let imports: i64 = conn
+        .query_row("SELECT COUNT(*) FROM activity_imports", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(workouts, 1, "force must not append a second workout");
+    assert_eq!(imports, 1, "force must not rewrite activity_imports");
 
     // workout show attaches compute-on-read track_metrics from trackpoints
     let show = bin()

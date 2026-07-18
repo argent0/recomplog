@@ -174,19 +174,52 @@ fn handle_fit(
     let bounds = hr_zone_bounds.map(parse_hr_zone_bounds).transpose()?;
 
     let conn = db::open_db(db_override)?;
-    if !force {
-        let exists: Option<i64> = conn
+
+    // Idempotent by file hash. Append-strict: never DELETE provenance or append a
+    // second workout for the same SHA. --force only re-prints the prior import.
+    let existing: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT id, workout_id FROM activity_imports WHERE file_sha256 = ?1",
+            [&sha],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((import_id, workout_id)) = existing {
+        if !force {
+            return Err(anyhow!(
+                "file already imported (sha256={sha}, workout_id={workout_id}); \
+                 pass --force to re-print the existing import without writing again"
+            ));
+        }
+        let set_id: Option<i64> = conn
             .query_row(
-                "SELECT id FROM activity_imports WHERE file_sha256 = ?1",
-                [&sha],
+                r#"SELECT es.id FROM exercise_sets es
+                   JOIN workout_exercises we ON we.id = es.workout_exercise_id
+                   WHERE we.workout_id = ?1
+                   ORDER BY we."order", es.set_number
+                   LIMIT 1"#,
+                [workout_id],
                 |r| r.get(0),
             )
             .optional()?;
-        if exists.is_some() {
-            return Err(anyhow!(
-                "file already imported (sha256={sha}); use --force to import again"
-            ));
+        let out = serde_json::json!({
+            "success": true,
+            "already_imported": true,
+            "import_id": import_id,
+            "workout_id": workout_id,
+            "set_id": set_id,
+            "sha256": sha,
+            "message": "file already imported; no new workout created",
+        });
+        if json {
+            print_json(&out);
+        } else {
+            println!(
+                "Already imported (sha256={sha}) → workout {} (import {}); no changes written",
+                workout_id, import_id
+            );
         }
+        return Ok(());
     }
 
     let profile = if no_profile_hr {
@@ -319,13 +352,6 @@ fn handle_fit(
             ],
         )?;
     }
-    // force: allow re-import by deleting old hash first
-    if force {
-        let _ = tx.execute(
-            "DELETE FROM activity_imports WHERE file_sha256 = ?1",
-            [&sha],
-        );
-    }
     tx.execute(
         "INSERT INTO activity_imports
          (workout_id, source_format, source_filename, file_sha256, device_name,
@@ -347,6 +373,7 @@ fn handle_fit(
 
     let out = serde_json::json!({
         "success": true,
+        "already_imported": false,
         "workout_id": workout_id,
         "set_id": set_id,
         "exercise": exercise_name,
