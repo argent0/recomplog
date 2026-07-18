@@ -10,6 +10,10 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
 - Agent-friendly by design — consistent `entity action`, excellent `--json`, predictable behavior.
 - One database for everything (no more fragile subprocess + JSON glue between tools).
 - Preserve the spirit of the original four tools.
+- **Quality data produces quality reports. Quality reports are actionable reports.**
+  - Logging, imports, sanity checks, and `db check` exist so the data is trustworthy.
+  - Reports (`report brief`, domain summaries, HTML) exist so the user (or agent) can act — not just stare at numbers.
+  - Prefer features that raise data quality or make reports more decision-ready over vanity metrics.
 
 ## How to Work as an Agent
 

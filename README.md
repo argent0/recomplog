@@ -11,6 +11,8 @@ Single-user, local-first, and agent-friendly. One SQLite database for:
 
 Successor to `repslog`, `bodylog`, `nutlog`, and `bodydashboard`.
 
+**Quality data produces quality reports. Quality reports are actionable reports.** The tool favors trustworthy logging (sanity checks, event-vs-storage time, gap detection) so reports can drive decisions, not just display numbers.
+
 ## Status
 
 The grouped CLI is in place for body, nutrition, workout (including stats), reports, config/check, legacy DB import, and **FIT import** (Garmin/Zepp-style activities, idempotent by file hash, optional HR zones).

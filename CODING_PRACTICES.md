@@ -7,6 +7,7 @@ This document defines the coding standards for the unified `recomplog` project.
 - Pleasant for humans *and* LLM agents.
 - Predictable, well-documented, scriptable CLI.
 - High-quality Rust without over-engineering.
+- Quality data → quality reports → actionable reports (see `AGENTS.md` philosophy).
 
 ## Core Principles
 
@@ -22,20 +23,25 @@ This document defines the coding standards for the unified `recomplog` project.
    - `clap` derive for CLI.
    - `thiserror` for domain errors, `anyhow` at the binary boundary.
 
-3. **Formatting & Style**
+3. **Data quality and actionable reports**
+   - Protect event-time integrity and refuse garbage on write when possible.
+   - Reports should surface what to do next (gaps, trends, summaries), not only raw dumps.
+   - Prefer decision-ready output over decorative metrics.
+
+4. **Formatting & Style**
    - `cargo fmt` before every commit (respects `rustfmt.toml`).
    - Max width 100.
    - 4-space indent.
 
-4. **Linting**
+5. **Linting**
    - `cargo clippy -- -D warnings` before committing.
    - See `clippy.toml`.
 
-5. **Error Handling**
+6. **Error Handling**
    - No `unwrap()`, `expect()`, or `panic!` in production paths.
    - Never silently drop errors.
 
-6. **Database**
+7. **Database**
    - All changes via migrations in `migrations/`.
    - Foreign keys on.
    - **Two clocks:** event time (when the user says it happened) vs storage time
@@ -47,12 +53,12 @@ This document defines the coding standards for the unified `recomplog` project.
    - Never rely on SQLite `datetime('now')` for new rows; always set timestamps from Rust.
    - Keep the model pragmatic.
 
-7. **Testing**
+8. **Testing**
    - Unit tests for logic.
    - Integration tests via `assert_cmd`.
    - Fast tests.
 
-8. **Documentation**
+9. **Documentation**
    - Public items get doc comments.
    - CLI help is primary docs.
    - Detailed guides live in `docs/`.
