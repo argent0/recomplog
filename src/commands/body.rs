@@ -615,12 +615,20 @@ const ZERO_CLASSIC_MACROS_SQL: &str = "pn.energy_kcal = 0 \
 fn list_products_with_incomplete_macros(
     conn: &rusqlite::Connection,
 ) -> Result<ProductsWithIncompleteMacros> {
+    // Active products only. Count consumptions logged on the product or on
+    // aliases that merged into it (event FKs stay on source after merge).
     let sql = format!(
         "SELECT p.id, p.name, COUNT(c.id) AS n
          FROM products p
          JOIN product_nutritions pn ON pn.product_id = p.id
-         JOIN consumptions c ON c.product_id = p.id
-         WHERE {INCOMPLETE_CLASSIC_MACROS_SQL}
+         JOIN consumptions c ON (
+             c.product_id = p.id
+             OR c.product_id IN (
+                 SELECT a.id FROM products a WHERE a.merged_into_id = p.id
+             )
+         )
+         WHERE p.retired_at IS NULL
+           AND {INCOMPLETE_CLASSIC_MACROS_SQL}
          GROUP BY p.id, p.name
          ORDER BY n DESC, p.name COLLATE NOCASE"
     );
@@ -644,26 +652,42 @@ fn list_products_with_incomplete_macros(
 fn list_consumptions_with_incomplete_macros(
     conn: &rusqlite::Connection,
 ) -> Result<ConsumptionsWithIncompleteMacros> {
-    let sql = format!(
-        "SELECT c.id, c.product_id, p.name, c.consumed_at
+    // Check macros on the effective (merge-resolved) product; keep logged product_id.
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.product_id, c.consumed_at
          FROM consumptions c
-         JOIN products p ON p.id = c.product_id
-         JOIN product_nutritions pn ON pn.product_id = c.product_id
-         WHERE {INCOMPLETE_CLASSIC_MACROS_SQL}
-         ORDER BY c.consumed_at DESC, c.id DESC"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let items: Vec<ConsumptionIncompleteMacrosItem> = stmt
-        .query_map([], |r| {
-            Ok(ConsumptionIncompleteMacrosItem {
-                id: r.get(0)?,
-                product_id: r.get(1)?,
-                product_name: r.get(2)?,
-                consumed_at: r.get(3)?,
-            })
-        })?
+         ORDER BY c.consumed_at DESC, c.id DESC",
+    )?;
+    let raw: Vec<(i64, i64, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .filter_map(|r| r.ok())
         .collect();
+    let mut items = Vec::new();
+    for (id, product_id, consumed_at) in raw {
+        let effective = crate::product_resolve::resolve_effective_product_id(conn, product_id)?;
+        let sql = format!(
+            "SELECT COUNT(*) FROM product_nutritions pn
+             WHERE pn.product_id = ?1 AND ({INCOMPLETE_CLASSIC_MACROS_SQL})"
+        );
+        let incomplete: i64 = conn
+            .query_row(&sql, [effective], |r| r.get(0))
+            .unwrap_or(0);
+        // Prior path used INNER JOIN nutrition: no row → not listed.
+        if incomplete == 0 {
+            continue;
+        }
+        let product_name: String = conn.query_row(
+            "SELECT name FROM products WHERE id = ?1",
+            [product_id],
+            |r| r.get(0),
+        )?;
+        items.push(ConsumptionIncompleteMacrosItem {
+            id,
+            product_id,
+            product_name,
+            consumed_at,
+        });
+    }
     Ok(ConsumptionsWithIncompleteMacros {
         count: items.len() as i64,
         items,
@@ -677,7 +701,8 @@ fn list_products_with_zero_macros(conn: &rusqlite::Connection) -> Result<Product
                 pn.fiber_g, pn.sugars_g
          FROM products p
          JOIN product_nutritions pn ON pn.product_id = p.id
-         WHERE {ZERO_CLASSIC_MACROS_SQL}
+         WHERE p.retired_at IS NULL
+           AND {ZERO_CLASSIC_MACROS_SQL}
          ORDER BY p.name COLLATE NOCASE"
     );
     let mut stmt = conn.prepare(&sql)?;

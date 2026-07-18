@@ -1415,7 +1415,7 @@ fn handle_purchase(
             }
             sql.push_str(" ORDER BY pu.id DESC LIMIT 100");
             let mut stmt = conn.prepare(&sql)?;
-            let rows: Vec<_> = stmt
+            let mut rows: Vec<_> = stmt
                 .query_map(rusqlite::params_from_iter(binds.iter()), |r| {
                     Ok(serde_json::json!({
                         "id": r.get::<_, i64>(0)?,
@@ -1430,6 +1430,29 @@ fn handle_purchase(
                 })?
                 .filter_map(|r| r.ok())
                 .collect();
+            for row in &mut rows {
+                if let Some(pid) = row["product_id"].as_i64() {
+                    let effective =
+                        crate::product_resolve::resolve_effective_product_id(&conn, pid)?;
+                    if effective != pid {
+                        if let Some(obj) = row.as_object_mut() {
+                            let ename: String = conn.query_row(
+                                "SELECT name FROM products WHERE id = ?1",
+                                [effective],
+                                |r| r.get(0),
+                            )?;
+                            obj.insert(
+                                "effective_product_id".into(),
+                                serde_json::json!(effective),
+                            );
+                            obj.insert(
+                                "effective_product_name".into(),
+                                serde_json::json!(ename),
+                            );
+                        }
+                    }
+                }
+            }
             if json {
                 print_json(&rows);
             } else {
@@ -1625,7 +1648,7 @@ fn handle_consumption(
             }
             sql.push_str(" ORDER BY c.consumed_at DESC LIMIT 100");
             let mut stmt = conn.prepare(&sql)?;
-            let rows: Vec<_> = stmt
+            let mut rows: Vec<_> = stmt
                 .query_map(rusqlite::params_from_iter(binds.iter()), |r| {
                     Ok(serde_json::json!({
                         "id": r.get::<_, i64>(0)?,
@@ -1639,14 +1662,40 @@ fn handle_consumption(
                 })?
                 .filter_map(|r| r.ok())
                 .collect();
+            for row in &mut rows {
+                if let Some(pid) = row["product_id"].as_i64() {
+                    let effective =
+                        crate::product_resolve::resolve_effective_product_id(&conn, pid)?;
+                    if effective != pid {
+                        let ename: String = conn.query_row(
+                            "SELECT name FROM products WHERE id = ?1",
+                            [effective],
+                            |r| r.get(0),
+                        )?;
+                        row.as_object_mut().unwrap().insert(
+                            "effective_product_id".into(),
+                            serde_json::json!(effective),
+                        );
+                        row.as_object_mut().unwrap().insert(
+                            "effective_product_name".into(),
+                            serde_json::json!(ename),
+                        );
+                    }
+                }
+            }
             if json {
                 print_json(&rows);
             } else {
                 for r in &rows {
                     let unit = r["unit"].as_str().unwrap_or("?");
+                    let name = r
+                        .get("effective_product_name")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| r["product_name"].as_str())
+                        .unwrap_or("?");
                     println!(
                         "{}: {} {} {} on {}",
-                        r["id"], r["product_name"], r["quantity"], unit, r["consumed_at"]
+                        r["id"], name, r["quantity"], unit, r["consumed_at"]
                     );
                 }
             }
