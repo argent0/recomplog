@@ -446,10 +446,8 @@ fn handle_legacy_import(
         copied.push("workout");
     }
 
-    // Legacy sources store naive BA wall times / date-only nutrition; normalize to UTC Z.
-    if !copied.is_empty() {
-        db::normalize_instants_to_rfc3339_public(&target)?;
-    }
+    // Instant and unit alignment happens only on newly inserted rows (see copy_*).
+    // Never re-run full-table normalizers against settled destination history.
 
     if json {
         print_json(&serde_json::json!({
@@ -488,6 +486,8 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             ))
         })? {
             let (id, name, ca, ua) = row?;
+            let ca = normalize_instant_for_import(&ca);
+            let ua = normalize_instant_for_import(&ua);
             products += tx.execute(
                 "INSERT OR IGNORE INTO products (id, name, created_at, updated_at) VALUES (?1,?2,?3,?4)",
                 params![id, name, ca, ua],
@@ -511,6 +511,7 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             if is_macronutrient_name(&name) {
                 continue;
             }
+            let ca = normalize_instant_for_import(&ca);
             micronutrients += tx.execute(
                 "INSERT OR IGNORE INTO micronutrients (id, name, unit, recommended_intake, created_at) VALUES (?1,?2,?3,?4,?5)",
                 params![id, name, unit, rec, ca],
@@ -527,6 +528,7 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             ))
         })? {
             let (id, name, ca) = row?;
+            let ca = normalize_instant_for_import(&ca);
             tags += tx.execute(
                 "INSERT OR IGNORE INTO product_tags (id, name, created_at) VALUES (?1,?2,?3)",
                 params![id, name, ca],
@@ -581,6 +583,7 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             ))
         })? {
             let (id, name, ca) = row?;
+            let ca = normalize_instant_for_import(&ca);
             let _ = tx.execute(
                 "INSERT OR IGNORE INTO stores (id, name, created_at) VALUES (?1,?2,?3)",
                 params![id, name, ca],
@@ -596,6 +599,7 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             ))
         })? {
             let (id, name, ca) = row?;
+            let ca = normalize_instant_for_import(&ca);
             let _ = tx.execute(
                 "INSERT OR IGNORE INTO store_tags (id, name, created_at) VALUES (?1,?2,?3)",
                 params![id, name, ca],
@@ -628,6 +632,8 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             ))
         })? {
             let (id, pid, qty, price, sid, pa, ca) = row?;
+            let pa = normalize_instant_for_import(&pa);
+            let ca = normalize_instant_for_import(&ca);
             purchases += tx.execute(
                 "INSERT OR IGNORE INTO purchases (id, product_id, quantity, price_cents, store_id, purchased_at, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
                 params![id, pid, qty, price, sid, pa, ca],
@@ -649,6 +655,10 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             ))
         })? {
             let (id, pid, qty, unit, ca_at, ca) = row?;
+            // Align free-form units only for this newly inserted row (not whole-table rewrite).
+            let (qty, unit) = normalize_consumption_unit_for_import(qty, unit);
+            let ca_at = normalize_instant_for_import(&ca_at);
+            let ca = normalize_instant_for_import(&ca);
             consumptions += tx.execute(
                 "INSERT OR IGNORE INTO consumptions (id, product_id, quantity, unit, consumed_at, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
                 params![id, pid, qty, unit, ca_at, ca],
@@ -719,8 +729,6 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
     }
 
     tx.commit()?;
-    // Align imported free-form units with g|ml|unit vocabulary.
-    db::normalize_nutrition_units_public(dst)?;
     Ok(serde_json::json!({
         "products": products,
         "micronutrients": micronutrients,
@@ -757,6 +765,8 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
             ))
         })? {
             let (id, date, w, bf, sm, vf, bmi, rmr, ca, ua) = row?;
+            let ca = normalize_instant_for_import(&ca);
+            let ua = normalize_instant_for_import(&ua);
             let n = tx.execute(
                 r#"INSERT OR IGNORE INTO measurements
                    (id, date, weight_kg, body_fat_pct, skeletal_muscle_pct,
@@ -785,6 +795,8 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
             ))
         })? {
             let (id, date, w, bf, sm, ca, ua) = row?;
+            let ca = normalize_instant_for_import(&ca);
+            let ua = normalize_instant_for_import(&ua);
             let n = tx.execute(
                 r#"INSERT OR IGNORE INTO measurements
                    (id, date, weight_kg, body_fat_pct, skeletal_muscle_pct,
@@ -859,6 +871,8 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
                 ca,
                 ua,
             ) = row?;
+            let ca = normalize_instant_for_import(&ca);
+            let ua = normalize_instant_for_import(&ua);
             let n = tx.execute(
                 "INSERT OR IGNORE INTO sleep
                  (id, date, bedtime, wake_time, time_in_bed_minutes, total_sleep_minutes,
@@ -890,6 +904,8 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
             ))
         })? {
             let (id, date, total, ca, ua) = row?;
+            let ca = normalize_instant_for_import(&ca);
+            let ua = normalize_instant_for_import(&ua);
             let n = tx.execute(
                 "INSERT OR IGNORE INTO sleep (id, date, total_sleep_minutes, created_at, updated_at) VALUES (?1,?2,?3,?4,?5)",
                 params![id, date, total, ca, ua],
@@ -916,6 +932,7 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
             })
             .optional()
         {
+            let ua = normalize_instant_for_import(&ua);
             let _ = tx.execute(
                 "INSERT OR REPLACE INTO user_profile (id, height_cm, date_of_birth, updated_at) VALUES (1, ?1, ?2, ?3)",
                 params![h, dob, ua],
@@ -1079,6 +1096,7 @@ fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Va
             let mut rows = select.query([])?;
             while let Some(row) = rows.next()? {
                 let mut values = row_values(row, cols.len())?;
+                normalize_instant_columns_in_row(&cols, &mut values);
                 // Legacy bodyweight sets often store weight_kg=0 meaning "unloaded".
                 // recomplog treats 0 as invalid (min 0.001); NULL is the correct sentinel.
                 let mut normalized_zero_weight = false;
@@ -1127,7 +1145,8 @@ fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Va
             let mut insert = tx.prepare(&insert_sql)?;
             let mut rows = select.query([])?;
             while let Some(row) = rows.next()? {
-                let values = row_values(row, cols.len())?;
+                let mut values = row_values(row, cols.len())?;
+                normalize_instant_columns_in_row(&cols, &mut values);
                 let parent = value_as_i64(&values[wid_idx]);
                 if parent.map(|id| !parent_ids.contains(&id)).unwrap_or(true) {
                     imports_skipped += 1;
@@ -1160,7 +1179,8 @@ fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Va
             let mut insert = tx.prepare(&insert_sql)?;
             let mut rows = select.query([])?;
             while let Some(row) = rows.next()? {
-                let values = row_values(row, cols.len())?;
+                let mut values = row_values(row, cols.len())?;
+                normalize_instant_columns_in_row(&cols, &mut values);
                 let parent = value_as_i64(&values[sid_idx]);
                 if parent.map(|id| !parent_ids.contains(&id)).unwrap_or(true) {
                     trackpoints_skipped += 1;
@@ -1230,7 +1250,8 @@ fn copy_rows_by_columns(
     let mut rows = select.query([])?;
     let mut n = 0i64;
     while let Some(row) = rows.next()? {
-        let values = row_values(row, cols.len())?;
+        let mut values = row_values(row, cols.len())?;
+        normalize_instant_columns_in_row(&cols, &mut values);
         n += insert.execute(params_from_iter(values.iter()))? as i64;
     }
     Ok(n)
@@ -1261,7 +1282,8 @@ fn copy_exercises_with_remap(
     let mut inserted = 0i64;
 
     while let Some(row) = rows.next()? {
-        let values = row_values(row, cols.len())?;
+        let mut values = row_values(row, cols.len())?;
+        normalize_instant_columns_in_row(&cols, &mut values);
         let src_id = value_as_i64(&values[id_idx])
             .ok_or_else(|| anyhow!("exercise row missing integer id during legacy import"))?;
         let name = match &values[name_idx] {
@@ -1391,6 +1413,57 @@ fn intersect_columns(
         .filter(|c| src.contains(**c) && dst.contains(**c))
         .map(|s| (*s).to_string())
         .collect()
+}
+
+/// Instant columns that may arrive as legacy naive wall times; normalize only at insert.
+const LEGACY_INSTANT_COLUMNS: &[&str] = &[
+    "started_at",
+    "finished_at",
+    "created_at",
+    "updated_at",
+    "imported_at",
+    "recorded_at",
+    "purchased_at",
+    "consumed_at",
+];
+
+fn is_instant_column(name: &str) -> bool {
+    LEGACY_INSTANT_COLUMNS
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(name))
+}
+
+/// Canonical UTC RFC3339 (`…Z`) for a single imported value; leave unrecognized strings unchanged.
+fn normalize_instant_for_import(raw: &str) -> String {
+    crate::utils::normalize_stored_instant_to_db(raw).unwrap_or_else(|_| raw.to_string())
+}
+
+/// Alias → base unit for a newly imported consumption only (`0.1 kg` → `100 g`).
+/// Unknown units pass through unchanged so history is not invented.
+fn normalize_consumption_unit_for_import(
+    quantity: f64,
+    unit: Option<String>,
+) -> (f64, Option<String>) {
+    match unit {
+        Some(u) if !u.trim().is_empty() => {
+            match crate::nutrition_units::normalize_to_canonical(quantity, &u) {
+                Ok((qty, canon)) => (qty, Some(canon)),
+                Err(_) => (quantity, Some(u)),
+            }
+        }
+        other => (quantity, other),
+    }
+}
+
+fn normalize_instant_columns_in_row(cols: &[String], values: &mut [Value]) {
+    for (col, value) in cols.iter().zip(values.iter_mut()) {
+        if !is_instant_column(col) {
+            continue;
+        }
+        if let Value::Text(s) = value {
+            *s = normalize_instant_for_import(s);
+        }
+    }
 }
 
 fn row_values(row: &rusqlite::Row<'_>, n: usize) -> rusqlite::Result<Vec<Value>> {

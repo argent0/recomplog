@@ -109,13 +109,9 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Re-run instant normalization (also used after legacy import of naive timestamps).
-pub fn normalize_instants_to_rfc3339_public(conn: &Connection) -> Result<()> {
-    normalize_instants_to_rfc3339(conn)
-}
-
-/// Rewrite all instant TEXT columns to canonical UTC RFC3339 (`…Z`).
+/// One-time migration: rewrite instant TEXT columns to canonical UTC RFC3339 (`…Z`).
 /// Legacy naive datetimes are interpreted as Buenos Aires (UTC−3).
+/// Not for re-entry after import — normalize values on the INSERT path instead.
 fn normalize_instants_to_rfc3339(conn: &Connection) -> Result<()> {
     use crate::utils::normalize_stored_instant_to_db;
 
@@ -192,15 +188,8 @@ fn normalize_instants_to_rfc3339(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Re-run unit normalization (also used after legacy import).
-pub fn normalize_nutrition_units_public(conn: &Connection) -> Result<()> {
-    normalize_nutrition_units(conn)?;
-    promote_whole_package_products(conn)?;
-    Ok(())
-}
-
-/// If every consumption is an integer multiple of the product’s reference amount
-/// (e.g. only 46 g and 92 g of a 46 g bar), treat the product as package/`unit`.
+/// One-time migration (user_version < 4): recover package products after v3 mass rewrite.
+/// Do not call on the import path — mutates historical consumption quantity/unit.
 fn promote_whole_package_products(conn: &Connection) -> Result<()> {
     use crate::nutrition_units::{parse_unit, UnitKind};
 
@@ -688,7 +677,11 @@ fn apply_v2_cardio_json(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Normalize nutrition units to the explicit vocabulary: `g`, `ml`, `unit`.
+/// One-time migration (user_version < 3): normalize nutrition units to `g`|`ml`|`unit`.
+///
+/// Mutates both catalog (`product_nutritions`) and historical consumptions.
+/// Gated by `run_migrations`; never re-run after import (see reports/append I2/I3).
+/// New writes must store canonical units at INSERT time instead.
 ///
 /// - Product reference units: aliases → canonical kind unit.
 /// - Products only ever consumed as package counts against a mass/volume

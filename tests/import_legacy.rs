@@ -680,6 +680,209 @@ fn legacy_import_nutrition_domain() {
     assert_eq!(consumptions2, 1);
 }
 
+/// Import must not re-normalize settled destination consumptions (append-only).
+#[test]
+fn legacy_import_nutrition_does_not_rewrite_preseeded_consumptions() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("nutlog_min.db");
+    let dst = dir.path().join("target.db");
+    let src_s = src.display().to_string();
+    let db_s = dst.display().to_string();
+    build_nutlog_min(&src);
+    init_target(&db_s);
+
+    // Pre-seed a product + consumption that unit heuristics might "fix" if they
+    // still ran whole-table after import (e.g. alias unit left as-is intentionally).
+    let target = Connection::open(&dst).unwrap();
+    target
+        .execute(
+            "INSERT INTO products (id, name, created_at, updated_at)
+             VALUES (900, 'Preseed Bar', '2026-06-01T00:00:00Z', '2026-06-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    target
+        .execute(
+            "INSERT INTO product_nutritions
+             (product_id, reference_quantity, reference_unit, energy_kcal, protein_g,
+              carbohydrates_g, fat_g, fiber_g, sugars_g)
+             VALUES (900, 46.0, 'g', 200.0, 10.0, 20.0, 8.0, 2.0, 1.0)",
+            [],
+        )
+        .unwrap();
+    target
+        .execute(
+            "INSERT INTO consumptions (id, product_id, quantity, unit, consumed_at, created_at)
+             VALUES (900, 900, 0.1, 'kg', '2026-06-01T12:00:00Z', '2026-06-01T13:00:00Z')",
+            [],
+        )
+        .unwrap();
+    let before: (f64, String, String, String) = target
+        .query_row(
+            "SELECT quantity, unit, consumed_at, created_at FROM consumptions WHERE id = 900",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+
+    bin()
+        .args([
+            "--db",
+            &db_s,
+            "--json",
+            "import",
+            "legacy",
+            "--from-db",
+            &src_s,
+            "--domain",
+            "nutrition",
+        ])
+        .assert()
+        .success();
+
+    let after: (f64, String, String, String) = target
+        .query_row(
+            "SELECT quantity, unit, consumed_at, created_at FROM consumptions WHERE id = 900",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "pre-seeded consumption must be byte-identical after import"
+    );
+    assert!((after.0 - 0.1).abs() < 1e-12);
+    assert_eq!(after.1, "kg");
+
+    // Newly imported rows still get insert-time unit alias normalization.
+    let (imp_qty, imp_unit): (f64, Option<String>) = target
+        .query_row(
+            "SELECT quantity, unit FROM consumptions WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!((imp_qty - 100.0).abs() < 1e-9);
+    assert_eq!(imp_unit.as_deref(), Some("g"));
+}
+
+/// Insert-time only: alias units on *imported* consumptions become g|ml|unit.
+#[test]
+fn legacy_import_nutrition_normalizes_imported_unit_aliases() {
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("nutlog_alias.db");
+    let dst = dir.path().join("target.db");
+    let src_s = src.display().to_string();
+    let db_s = dst.display().to_string();
+    init_target(&db_s);
+
+    let conn = Connection::open(&src).unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE products (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE nutrients (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            unit TEXT NOT NULL,
+            recommended_intake REAL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE product_nutritions (
+            product_id INTEGER PRIMARY KEY,
+            reference_quantity REAL NOT NULL,
+            reference_unit TEXT NOT NULL,
+            energy_kcal REAL,
+            protein_g REAL,
+            carbohydrates_g REAL,
+            fat_g REAL,
+            fiber_g REAL,
+            sugars_g REAL
+        );
+        CREATE TABLE purchases (
+            id INTEGER PRIMARY KEY,
+            product_id INTEGER NOT NULL,
+            quantity REAL NOT NULL,
+            price_cents INTEGER,
+            store_id INTEGER,
+            purchased_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE consumptions (
+            id INTEGER PRIMARY KEY,
+            product_id INTEGER NOT NULL,
+            quantity REAL NOT NULL,
+            unit TEXT,
+            consumed_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO products (id, name, created_at, updated_at)
+        VALUES (1, 'Rice', '2026-07-01 08:00:00', '2026-07-01 08:00:00');
+        INSERT INTO product_nutritions (
+            product_id, reference_quantity, reference_unit,
+            energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g
+        ) VALUES (1, 100.0, 'grams', 350.0, 7.0, 78.0, 1.0, 1.0, 0.0);
+        INSERT INTO consumptions (id, product_id, quantity, unit, consumed_at, created_at)
+        VALUES (1, 1, 0.15, 'kg', '2026-07-01 12:00:00', '2026-07-01 12:00:00');
+        "#,
+    )
+    .unwrap();
+
+    bin()
+        .args([
+            "--db",
+            &db_s,
+            "--json",
+            "import",
+            "legacy",
+            "--from-db",
+            &src_s,
+            "--domain",
+            "nutrition",
+        ])
+        .assert()
+        .success();
+
+    let target = Connection::open(&dst).unwrap();
+    let (qty, unit): (f64, String) = target
+        .query_row(
+            "SELECT quantity, unit FROM consumptions WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        (qty - 150.0).abs() < 1e-9,
+        "0.15 kg should become 150 g at insert, got {qty}"
+    );
+    assert_eq!(unit, "g");
+    let ref_u: String = target
+        .query_row(
+            "SELECT reference_unit FROM product_nutritions WHERE product_id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ref_u, "g");
+
+    // Instant normalized at insert (naive BA → UTC Z), not via full-table post-pass.
+    let consumed_at: String = target
+        .query_row(
+            "SELECT consumed_at FROM consumptions WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        consumed_at.ends_with('Z'),
+        "expected canonical Z instant, got {consumed_at}"
+    );
+}
+
 /// Real repslog DBs have no `finished_at` on workouts — import must still succeed.
 fn build_repslog_no_finished_at(path: &Path) {
     let conn = Connection::open(path).unwrap();
