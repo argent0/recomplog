@@ -358,9 +358,9 @@ fn classic_macros_gates_and_zero_inspection() {
     }));
 }
 
-/// Merge re-points purchases/consumptions, copies tags + nutrition gaps, deletes sources.
+/// Merge soft-retires sources as aliases; event product_ids stay put.
 #[test]
-fn product_merge_repoints_and_copies_nutrition() {
+fn product_merge_aliases_without_rewriting_event_fks() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("t.db").display().to_string();
 
@@ -409,7 +409,7 @@ fn product_merge_repoints_and_copies_nutrition() {
         .assert()
         .success();
 
-    // Source: thin "Oats" with different tag + history, no nutrition
+    // Source: thin "Oats" with different tag + history
     bin()
         .args([
             "--db",
@@ -493,7 +493,7 @@ fn product_merge_repoints_and_copies_nutrition() {
         .assert()
         .success();
 
-    // Dry-run does not delete source
+    // Dry-run does not retire source
     let dry = bin()
         .args([
             "--db",
@@ -515,9 +515,9 @@ fn product_merge_repoints_and_copies_nutrition() {
     let dry_v: serde_json::Value = serde_json::from_slice(&dry).unwrap();
     assert_eq!(dry_v["success"], true);
     assert_eq!(dry_v["dry_run"], true);
-    assert_eq!(dry_v["purchases_moved"], 1);
-    assert_eq!(dry_v["consumptions_moved"], 1);
-    assert!(dry_v["deleted_ids"].is_null());
+    assert_eq!(dry_v["purchases_aliased"], 1);
+    assert_eq!(dry_v["consumptions_aliased"], 1);
+    assert!(dry_v["retired_ids"].is_null());
     bin()
         .args(["--db", &db, "--json", "nutrition", "product", "show", "2"])
         .assert()
@@ -547,10 +547,10 @@ fn product_merge_repoints_and_copies_nutrition() {
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["success"], true);
     assert_eq!(v["into_id"], 1);
-    assert_eq!(v["purchases_moved"], 1);
-    assert_eq!(v["consumptions_moved"], 1);
+    assert_eq!(v["purchases_aliased"], 1);
+    assert_eq!(v["consumptions_aliased"], 1);
     assert_eq!(v["tags_copied"], 1);
-    assert_eq!(v["deleted_ids"][0], 2);
+    assert_eq!(v["retired_ids"][0], 2);
     assert!(
         v["warnings"]
             .as_array()
@@ -560,22 +560,64 @@ fn product_merge_repoints_and_copies_nutrition() {
         v["warnings"]
     );
 
-    // Source gone
-    bin()
-        .args(["--db", &db, "nutrition", "product", "show", "2"])
+    // Source still queryable as retired alias
+    let src_show = bin()
+        .args(["--db", &db, "--json", "nutrition", "product", "show", "2"])
         .assert()
-        .failure();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let src: serde_json::Value = serde_json::from_slice(&src_show).unwrap();
+    assert_eq!(src["id"], 2);
+    assert_eq!(src["merged_into_id"], 1);
+    assert!(src["retired_at"].as_str().is_some());
+    assert_eq!(src["effective_id"], 1);
+    assert_eq!(src["effective_name"], "Morixe Instant Oats");
 
-    // History re-pointed; keeper macros retained (380 not 389)
-    bin()
+    // Source hidden from list
+    let list = bin()
+        .args(["--db", &db, "--json", "nutrition", "product", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list_v: serde_json::Value = serde_json::from_slice(&list).unwrap();
+    let ids: Vec<i64> = list_v
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["id"].as_i64())
+        .collect();
+    assert!(ids.contains(&1));
+    assert!(!ids.contains(&2), "retired source must not appear in list");
+
+    // Keeper macros retained (380 not 389); tags merged
+    let keeper = bin()
         .args(["--db", &db, "--json", "nutrition", "product", "show", "1"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Morixe Instant Oats"))
-        .stdout(predicate::str::contains("breakfast"))
-        .stdout(predicate::str::contains("bulk"))
-        .stdout(predicate::str::contains("380"));
+        .get_output()
+        .stdout
+        .clone();
+    let k: serde_json::Value = serde_json::from_slice(&keeper).unwrap();
+    assert_eq!(k["name"], "Morixe Instant Oats");
+    assert_eq!(k["nutrition"]["energy_kcal"], 380.0);
+    assert!(k["merged_from"]
+        .as_array()
+        .map(|a| a.iter().any(|m| m["id"] == 2))
+        .unwrap_or(false));
+    let tags: Vec<&str> = k["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t.as_str())
+        .collect();
+    assert!(tags.contains(&"breakfast"));
+    assert!(tags.contains(&"bulk"));
 
+    // Event FKs still on source product_id
     let purchases = bin()
         .args([
             "--db",
@@ -585,7 +627,7 @@ fn product_merge_repoints_and_copies_nutrition() {
             "purchase",
             "list",
             "--product",
-            "1",
+            "2",
         ])
         .assert()
         .success()
@@ -593,10 +635,9 @@ fn product_merge_repoints_and_copies_nutrition() {
         .stdout
         .clone();
     let p: serde_json::Value = serde_json::from_slice(&purchases).unwrap();
-    assert!(
-        p.as_array().map(|a| !a.is_empty()).unwrap_or(false),
-        "expected purchase on keeper, got {p}"
-    );
+    let p0 = &p.as_array().unwrap()[0];
+    assert_eq!(p0["product_id"], 2);
+    assert_eq!(p0["effective_product_id"], 1);
 
     let consumptions = bin()
         .args([
@@ -607,7 +648,7 @@ fn product_merge_repoints_and_copies_nutrition() {
             "consumption",
             "list",
             "--product",
-            "1",
+            "2",
         ])
         .assert()
         .success()
@@ -615,9 +656,59 @@ fn product_merge_repoints_and_copies_nutrition() {
         .stdout
         .clone();
     let c: serde_json::Value = serde_json::from_slice(&consumptions).unwrap();
+    let c0 = &c.as_array().unwrap()[0];
+    assert_eq!(c0["product_id"], 2);
+    assert_eq!(c0["effective_product_id"], 1);
+
+    // New log on retired product fails
+    bin()
+        .args([
+            "--db",
+            &db,
+            "nutrition",
+            "consumption",
+            "create",
+            "--product",
+            "2",
+            "--quantity",
+            "10",
+            "--unit",
+            "g",
+            "--consumed-at",
+            "2026-07-15T08:00:00-03:00",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("retired"));
+
+    // Report uses keeper macros (380 kcal/100g * 80g = 304), not source 389
+    let report = bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "report",
+            "nutrition",
+            "summary",
+            "--since",
+            "2026-07-14",
+            "--until",
+            "2026-07-14",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rep: serde_json::Value = serde_json::from_slice(&report).unwrap();
+    let energy = rep["macros"]["energy_kcal"]
+        .as_f64()
+        .or_else(|| rep["totals"]["energy_kcal"].as_f64())
+        .or_else(|| rep["energy_kcal"].as_f64())
+        .expect("energy_kcal in nutrition summary");
     assert!(
-        c.as_array().map(|a| !a.is_empty()).unwrap_or(false),
-        "expected consumption on keeper, got {c}"
+        (energy - 304.0).abs() < 0.1,
+        "expected keeper macro total 304, got {energy} in {rep}"
     );
 }
 
@@ -692,6 +783,7 @@ fn product_merge_copies_nutrition_onto_empty_keeper() {
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["nutrition_copied_from"], 2);
     assert_eq!(v["merged"][0]["nutrition_copied"], true);
+    assert_eq!(v["retired_ids"][0], 2);
 
     bin()
         .args(["--db", &db, "--json", "nutrition", "product", "show", "1"])
@@ -699,6 +791,18 @@ fn product_merge_copies_nutrition_onto_empty_keeper() {
         .success()
         .stdout(predicate::str::contains("380"))
         .stdout(predicate::str::contains("protein_g"));
+
+    // Source remains as retired alias
+    let src = bin()
+        .args(["--db", &db, "--json", "nutrition", "product", "show", "2"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let s: serde_json::Value = serde_json::from_slice(&src).unwrap();
+    assert_eq!(s["merged_into_id"], 1);
+    assert!(s["retired_at"].as_str().is_some());
 }
 
 #[test]
@@ -740,4 +844,68 @@ fn product_merge_rejects_self_and_missing() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn product_merge_rejects_already_retired() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args(["--db", &db, "nutrition", "product", "create", "A"])
+        .assert()
+        .success();
+    bin()
+        .args(["--db", &db, "nutrition", "product", "create", "B"])
+        .assert()
+        .success();
+    bin()
+        .args(["--db", &db, "nutrition", "product", "create", "C"])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "nutrition",
+            "product",
+            "merge",
+            "--into",
+            "1",
+            "2",
+        ])
+        .assert()
+        .success();
+
+    // Re-merge source B fails
+    bin()
+        .args([
+            "--db",
+            &db,
+            "nutrition",
+            "product",
+            "merge",
+            "--into",
+            "3",
+            "2",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already retired"));
+
+    // Merge into retired B fails
+    bin()
+        .args([
+            "--db",
+            &db,
+            "nutrition",
+            "product",
+            "merge",
+            "--into",
+            "2",
+            "3",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("retired"));
 }
