@@ -13,6 +13,7 @@ mod macro_names;
 mod models;
 mod nutrition_units;
 mod phase;
+mod product_resolve;
 mod repository;
 mod sanity;
 mod stats;
