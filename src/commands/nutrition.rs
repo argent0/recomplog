@@ -406,8 +406,12 @@ fn handle_product(
             }
         }
         ProductAction::List => {
-            let mut stmt =
-                conn.prepare("SELECT id, name, created_at FROM products ORDER BY id DESC")?;
+            // Active products only (retired merge aliases hidden).
+            let mut stmt = conn.prepare(
+                "SELECT id, name, created_at FROM products
+                 WHERE retired_at IS NULL
+                 ORDER BY id DESC",
+            )?;
             let products: Vec<_> = stmt
                 .query_map([], |r| {
                     Ok(serde_json::json!({
@@ -430,7 +434,9 @@ fn handle_product(
         }
         ProductAction::Search { name, tag } => {
             if let Some(n) = name {
-                let mut stmt = conn.prepare("SELECT id, name FROM products")?;
+                let mut stmt = conn.prepare(
+                    "SELECT id, name FROM products WHERE retired_at IS NULL",
+                )?;
                 let cands: Vec<_> = stmt
                     .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
                     .filter_map(|r| r.ok())
@@ -455,6 +461,7 @@ fn handle_product(
                      JOIN product_tag_associations a ON a.product_id = p.id
                      JOIN product_tags t ON t.id = a.tag_id
                      WHERE t.name = ?1 COLLATE NOCASE
+                       AND p.retired_at IS NULL
                      ORDER BY p.name",
                 )?;
                 let rows: Vec<_> = stmt
@@ -952,15 +959,17 @@ fn merge_products(
     }
 
     let final_name = rename.unwrap_or(&into_name).to_string();
-    let deleted_ids: Vec<i64> = reports.iter().map(|r| r.id).collect();
+    let retired_ids: Vec<i64> = reports.iter().map(|r| r.id).collect();
     let message = if dry_run {
         format!(
-            "dry-run: would merge {} product(s) into {into} ({final_name})",
+            "dry-run: would merge {} product(s) into {into} ({final_name}) as aliases \
+             (event product_ids unchanged)",
             reports.len()
         )
     } else {
         format!(
-            "merged {} product(s) into {into} ({final_name})",
+            "merged {} product(s) into {into} ({final_name}) as aliases \
+             (event product_ids unchanged)",
             reports.len()
         )
     };
@@ -987,15 +996,15 @@ fn merge_products(
             "id": into,
             "into_id": into,
             "into_name": final_name,
-            "merged_ids": deleted_ids,
+            "merged_ids": retired_ids,
             "merged": merged,
-            "purchases_moved": total_purchases,
-            "consumptions_moved": total_consumptions,
+            "purchases_aliased": total_purchases,
+            "consumptions_aliased": total_consumptions,
             "tags_copied": total_tags,
             "nutrition_copied_from": nutrition_copied_from,
             "micronutrients_filled": total_micros_filled,
-            "deleted_ids": if dry_run { serde_json::Value::Null } else {
-                serde_json::json!(deleted_ids)
+            "retired_ids": if dry_run { serde_json::Value::Null } else {
+                serde_json::json!(retired_ids)
             },
             "dry_run": dry_run,
             "message": message,
@@ -1009,7 +1018,7 @@ fn merge_products(
         println!("{message}");
         for r in &reports {
             println!(
-                "  {} ({}): {} purchase(s), {} consumption(s), {} tag(s){}",
+                "  {} ({}): {} purchase(s), {} consumption(s) still on source id, {} tag(s){}",
                 r.id,
                 r.name,
                 r.purchases,
@@ -1029,6 +1038,7 @@ fn merge_products(
         }
         if !dry_run {
             println!("  kept product {into}: {final_name}");
+            println!("  retired as aliases: {retired_ids:?}");
         }
     }
 

@@ -136,9 +136,11 @@ fn query_exercises(conn: &Connection, prefix: &str) -> rusqlite::Result<Vec<Comp
 
 fn query_products(conn: &Connection, prefix: &str) -> rusqlite::Result<Vec<CompletionCandidate>> {
     let like = format!("{}%", prefix);
+    // Active products only (merge aliases with retired_at are hidden).
     let mut stmt = conn.prepare(
         "SELECT id, name FROM products
-         WHERE CAST(id AS TEXT) LIKE ?1 OR name LIKE ?1 COLLATE NOCASE
+         WHERE retired_at IS NULL
+           AND (CAST(id AS TEXT) LIKE ?1 OR name LIKE ?1 COLLATE NOCASE)
          ORDER BY id DESC
          LIMIT ?2",
     )?;
