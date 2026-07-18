@@ -719,12 +719,21 @@ fn merge_products(
         return Err(anyhow!("provide at least one source product id to merge"));
     }
 
-    let into_name: String = conn
-        .query_row("SELECT name FROM products WHERE id = ?1", [into], |r| {
-            r.get(0)
-        })
-        .optional()?
-        .ok_or_else(|| anyhow!("product {into} not found (--into)"))?;
+    let into_row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT name, retired_at FROM products WHERE id = ?1",
+            [into],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((into_name, into_retired)) = into_row else {
+        return Err(anyhow!("product {into} not found (--into)"));
+    };
+    if into_retired.is_some() {
+        return Err(anyhow!(
+            "product {into} ({into_name}) is retired; merge into an active product"
+        ));
+    }
 
     // Deduplicate sources while preserving order; reject into-in-from.
     let mut seen = std::collections::HashSet::new();
@@ -741,11 +750,20 @@ fn merge_products(
     }
 
     for &id in &sources {
-        let exists: Option<i64> = conn
-            .query_row("SELECT id FROM products WHERE id = ?1", [id], |r| r.get(0))
+        let row: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT name, retired_at FROM products WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .optional()?;
-        if exists.is_none() {
+        let Some((src_name, retired_at)) = row else {
             return Err(anyhow!("product {id} not found (source)"));
+        };
+        if retired_at.is_some() {
+            return Err(anyhow!(
+                "product {id} ({src_name}) is already retired; cannot merge again"
+            ));
         }
     }
 
@@ -866,23 +884,24 @@ fn merge_products(
             }
 
             if !dry_run {
-                conn.execute(
-                    "UPDATE purchases SET product_id = ?1 WHERE product_id = ?2",
-                    params![into, src],
-                )?;
-                conn.execute(
-                    "UPDATE consumptions SET product_id = ?1 WHERE product_id = ?2",
-                    params![into, src],
-                )?;
+                // Catalog only: copy tags onto keeper. Event FKs stay on `src`.
                 conn.execute(
                     "INSERT OR IGNORE INTO product_tag_associations (product_id, tag_id)
                      SELECT ?1, tag_id FROM product_tag_associations WHERE product_id = ?2",
                     params![into, src],
                 )?;
-                // Cascade removes source nutrition, tags, micros.
-                let n = conn.execute("DELETE FROM products WHERE id = ?1", [src])?;
+                // Soft-retire source as alias of keeper (no DELETE, no event UPDATE).
+                let now = db::now_utc();
+                let n = conn.execute(
+                    "UPDATE products
+                     SET merged_into_id = ?1, retired_at = ?2, updated_at = ?2
+                     WHERE id = ?3 AND retired_at IS NULL",
+                    params![into, now, src],
+                )?;
                 if n == 0 {
-                    return Err(anyhow!("product {src} disappeared during merge"));
+                    return Err(anyhow!(
+                        "product {src} disappeared or was already retired during merge"
+                    ));
                 }
             }
 
