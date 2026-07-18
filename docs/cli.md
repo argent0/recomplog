@@ -124,19 +124,27 @@ Legacy **workout** import copies the full set skeleton plus, when present in the
 fields including `heart_rate_zones` / `laps`. Dry-run reports per-table `would_copy`
 counts (including provenance tables). Re-runs are idempotent via `INSERT OR IGNORE`.
 
-### Other top-level
+### Database (`db`) and other top-level
 
 ```bash
-recomplog check --variations
+# File copy of the SQLite database (timestamped sibling by default)
+recomplog db backup
+recomplog db backup --to ~/backups/
+recomplog db backup --to /tmp/recomplog.db --force
+recomplog --json db backup
+
+recomplog db migrate --status
+
+recomplog db check --variations
 # Audits body measurements, sleep, and exercise sets against configured sanity limits.
 # Sets use absolute limits only (date window = workout session day).
 
 # Completeness: missing daily logs (measurement, sleep, nutrition) over last N days
 # (includes today), plus workout inactivity over last M days.
-recomplog check missing --days 7 --workout-days 3
-recomplog --json check missing --days 7 --workout-days 3
+recomplog db check missing --days 7 --workout-days 3
+recomplog --json db check missing --days 7 --workout-days 3
 # End window at yesterday (do not require today's logs yet):
-recomplog --json check missing --days 7 --workout-days 3 --skip-today
+recomplog --json db check missing --days 7 --workout-days 3 --skip-today
 
 recomplog config generate
 recomplog init

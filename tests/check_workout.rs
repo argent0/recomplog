@@ -66,7 +66,7 @@ fn check_reports_absurd_set_weight() {
 
     // Full check (all-time): must fail with a set violation.
     let assert = bin()
-        .args(["--db", &db, "--json", "check"])
+        .args(["--db", &db, "--json", "db", "check"])
         .assert()
         .failure()
         .stdout(predicate::str::contains("\"set_count\""))
@@ -100,7 +100,7 @@ fn check_reports_absurd_set_weight() {
         .assert()
         .success();
     bin()
-        .args(["--db", &db2, "--json", "check"])
+        .args(["--db", &db2, "--json", "db", "check"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"set_count\": 0"))
@@ -145,7 +145,7 @@ fn check_date_window_uses_workout_session_day() {
 
     // Recent window should not include the 2020 workout.
     bin()
-        .args(["--db", &db, "--json", "check", "--days", "7"])
+        .args(["--db", &db, "--json", "db", "check", "--days", "7"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"set_count\": 0"))
@@ -157,6 +157,7 @@ fn check_date_window_uses_workout_session_day() {
             "--db",
             &db,
             "--json",
+            "db",
             "check",
             "--since",
             "2020-01-01",

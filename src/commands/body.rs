@@ -135,7 +135,7 @@ fn emit_sanity_warnings(warnings: &[SanityWarning]) {
 
 // ---------- CHECK (scan DB for limit / variation violations) ----------
 
-/// One finding from `recomplog check`.
+/// One finding from `recomplog db check`.
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckViolation {
     /// "measurement", "sleep", or "set".
@@ -161,7 +161,7 @@ pub struct CheckViolation {
     pub exercise: Option<String>,
 }
 
-/// Report returned by `recomplog check` (JSON and human summary source).
+/// Report returned by `recomplog db check` (JSON and human summary source).
 #[derive(Debug, Serialize)]
 pub struct CheckReport {
     /// True when no violations of the enabled checks were found.

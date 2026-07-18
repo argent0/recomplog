@@ -88,11 +88,17 @@ pub enum Commands {
         action: ConfigAction,
     },
 
-    /// Audit database contents (sanity limits) or detect missing daily logs.
+    /// Database utilities: backup, migrate, integrity / completeness checks.
     ///
-    ///   recomplog check --variations --days 90
-    ///   recomplog check missing --days 7 --workout-days 3
-    Check(CheckCommand),
+    ///   recomplog db backup
+    ///   recomplog db backup --to ~/backups/
+    ///   recomplog db migrate --status
+    ///   recomplog db check --variations --days 90
+    ///   recomplog db check missing --days 7 --workout-days 3
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
+    },
 
     /// One-time initialization and migration helpers.
     Init {
@@ -100,6 +106,25 @@ pub enum Commands {
         dry_run: bool,
     },
 
+    /// Print version (also available as --version).
+    Version,
+}
+
+/// Actions under `recomplog db ...`
+#[derive(Subcommand, Debug)]
+pub enum DbAction {
+    /// Create a file copy of the SQLite database.
+    ///
+    /// Default destination is a timestamped file next to the active database.
+    /// Use `--to` for a custom file or directory path.
+    Backup {
+        /// Destination file or directory (default: same dir as the database).
+        #[arg(long = "to", value_name = "PATH")]
+        to: Option<String>,
+        /// Overwrite destination if it already exists.
+        #[arg(long)]
+        force: bool,
+    },
     /// Database migration status / apply (advanced).
     Migrate {
         #[arg(short, long)]
@@ -109,9 +134,11 @@ pub enum Commands {
         #[arg(short, long)]
         force: bool,
     },
-
-    /// Print version (also available as --version).
-    Version,
+    /// Audit database contents (sanity limits) or detect missing daily logs.
+    ///
+    ///   recomplog db check --variations --days 90
+    ///   recomplog db check missing --days 7 --workout-days 3
+    Check(CheckCommand),
 }
 
 // ---------- Grouped command actions ----------
@@ -1369,7 +1396,7 @@ pub enum ConfigAction {
     BashCompletion,
 }
 
-/// Top-level `check` command: optional subcommand, else sanity-limit audit.
+/// `recomplog db check`: optional subcommand, else sanity-limit audit.
 #[derive(Args, Debug, Clone)]
 pub struct CheckCommand {
     #[command(subcommand)]
@@ -1385,7 +1412,7 @@ pub enum CheckAction {
     Missing(CheckMissingArgs),
 }
 
-/// Args for `recomplog check missing`.
+/// Args for `recomplog db check missing`.
 #[derive(Args, Debug, Clone)]
 pub struct CheckMissingArgs {
     /// Calendar days to scan for measurement / sleep / nutrition (includes today unless `--skip-today`).
@@ -1399,7 +1426,7 @@ pub struct CheckMissingArgs {
     pub skip_today: bool,
 }
 
-/// Args for bare `recomplog check` (sanity-limit audit).
+/// Args for bare `recomplog db check` (sanity-limit audit).
 #[derive(Args, Debug, Clone)]
 pub struct CheckArgs {
     #[arg(long, alias = "deltas")]

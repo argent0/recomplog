@@ -4,7 +4,7 @@
 |--------|-----------|--------|
 | bodylog measurement * | `body measurement *` | done |
 | bodylog sleep * | `body sleep *` | done |
-| bodylog check | `check` | done |
+| bodylog check | `db check` | done |
 | bodylog config set/show | `body profile set/show` | done |
 | nutlog product * | `nutrition product *` | done |
 | nutlog product nutrition set | `nutrition product nutrition set` | done |

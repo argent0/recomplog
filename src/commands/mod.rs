@@ -1,5 +1,6 @@
 //! Command handlers for recomplog (grouped CLI surface).
 
+mod backup;
 pub mod body;
 mod check;
 mod config_cmd;
@@ -10,7 +11,7 @@ mod report_html;
 mod workout;
 mod workout_stats;
 
-use crate::cli::{Cli, Commands};
+use crate::cli::{Cli, Commands, DbAction};
 use crate::config;
 use crate::db;
 use crate::repository::BodyRepository;
@@ -68,38 +69,44 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Commands::Migrate {
-            status,
-            dry_run,
-            force: _,
-        } => {
-            let target = 4;
-            if status || dry_run {
-                if json {
-                    println!(
-                        r#"{{"current":2,"latest":{},"dry_run":{}}}"#,
-                        target, dry_run
-                    );
-                } else {
-                    println!("Schema target version: {target} (applied automatically on open)");
+        Commands::Db { action } => match action {
+            DbAction::Backup { to, force } => {
+                backup::handle(to.as_deref(), force, db_override, json, quiet)
+            }
+            DbAction::Migrate {
+                status,
+                dry_run,
+                force: _,
+            } => {
+                let target = 4;
+                if status || dry_run {
+                    if json {
+                        println!(
+                            r#"{{"current":2,"latest":{},"dry_run":{}}}"#,
+                            target, dry_run
+                        );
+                    } else {
+                        println!("Schema target version: {target} (applied automatically on open)");
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                let _conn = db::open_db(db_override)?;
+                println!("Migrations are applied automatically when opening the database.");
+                Ok(())
             }
-            let _conn = db::open_db(db_override)?;
-            println!("Migrations are applied automatically when opening the database.");
-            Ok(())
-        }
-        Commands::Import { action } => import::handle(action, db_override, json),
-        Commands::Check(cmd) => match cmd.action {
-            Some(crate::cli::CheckAction::Missing(args)) => {
-                check::handle_check_missing(args, db_override, json, quiet)
-            }
-            None => {
-                let conn = db::open_db(db_override)?;
-                let mut repo = BodyRepository::new(conn);
-                body::handle_check(&mut repo, cmd.audit, sanity, json, quiet).map_err(Into::into)
-            }
+            DbAction::Check(cmd) => match cmd.action {
+                Some(crate::cli::CheckAction::Missing(args)) => {
+                    check::handle_check_missing(args, db_override, json, quiet)
+                }
+                None => {
+                    let conn = db::open_db(db_override)?;
+                    let mut repo = BodyRepository::new(conn);
+                    body::handle_check(&mut repo, cmd.audit, sanity, json, quiet)
+                        .map_err(Into::into)
+                }
+            },
         },
+        Commands::Import { action } => import::handle(action, db_override, json),
         Commands::Workout { action } => {
             workout::handle(*action, db_override, &sanity.workout, json, quiet)
         }

@@ -110,9 +110,11 @@ recomplog import fit activity.fit --exercise running --dry-run
 recomplog import legacy --from-db ../bodylog/bodylog.db --dry-run
 recomplog import legacy --from-db ../nutlog/nutlog.db
 
-# Sanity / config
-recomplog check --variations
-recomplog check missing --days 7 --workout-days 3
+# Sanity / config / database
+recomplog db check --variations
+recomplog db check missing --days 7 --workout-days 3
+recomplog db backup
+recomplog db backup --to ~/backups/
 recomplog config generate
 ```
 
@@ -125,7 +127,7 @@ recomplog nutrition  # product, purchase, consumption, nutrient, store, tags
 recomplog report     # brief, nutrition, body, sleep, summary, html
 recomplog import     # fit | legacy
 recomplog config     # show | generate | path
-recomplog check      # sanity audit; `check missing` for logging gaps
+recomplog db         # backup | migrate | check (sanity audit / missing logs)
 recomplog init       # one-time setup helpers
 ```
 

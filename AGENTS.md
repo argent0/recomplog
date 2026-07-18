@@ -18,7 +18,7 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
    - Training: `workout create|list|show|delete`, `workout exercise ...`, `workout set add|add-cardio|delete`
    - Body: `body measurement ...`, `body sleep ...`, `body profile ...`
    - Nutrition: `nutrition product|purchase|consumption|nutrient ...`
-   - Cross-cutting: `report` (including `report brief`), `import`, `config`, `check` (sanity audit and `check missing`)
+   - Cross-cutting: `report` (including `report brief`), `import`, `config`, `db` (`backup`, `migrate`, `check` / `check missing`)
 3. **Always** support `--json` for data-returning commands.
 4. Run `cargo fmt && cargo clippy -- -D warnings && cargo test` before finishing changes.
 5. Use the provided `clippy.toml` and `rustfmt.toml`.
@@ -28,7 +28,7 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
 **Never conflate “when it happened” with “when it was stored.”**
 
 Example: at 12:00 the user logs “I ate at 09:00” → `consumed_at = 09:00`, `created_at = 12:00`.
-Reports, day buckets, and `check missing` use **event** time only.
+Reports, day buckets, and `db check missing` use **event** time only.
 
 | Kind | Meaning | Examples | Who sets it |
 |------|---------|----------|-------------|
@@ -123,8 +123,10 @@ recomplog import legacy --from-db ../bodylog/bodylog.db --dry-run
 recomplog --json report brief --days 7
 recomplog --json report brief --date yesterday --days 7
 recomplog report html --days 14 --name dashboard.html
-recomplog --json check missing --days 7 --workout-days 3
-recomplog --json check missing --days 7 --workout-days 3 --skip-today
+recomplog db backup
+recomplog --json db backup --to ~/backups/
+recomplog --json db check missing --days 7 --workout-days 3
+recomplog --json db check missing --days 7 --workout-days 3 --skip-today
 ```
 
 Update this file when agent interaction patterns evolve.

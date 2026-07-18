@@ -33,7 +33,7 @@ pub struct WorkoutInactivity {
     pub days_since_last: Option<i64>,
 }
 
-/// Full report from `recomplog check missing`.
+/// Full report from `recomplog db check missing`.
 #[derive(Debug, Serialize)]
 pub struct MissingReport {
     pub ok: bool,

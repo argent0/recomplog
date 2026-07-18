@@ -1,4 +1,4 @@
-//! Integration tests for `check missing` (logging completeness).
+//! Integration tests for `db check missing` (logging completeness).
 
 use assert_cmd::Command;
 use chrono::{Duration, Local};
@@ -148,6 +148,7 @@ fn missing_empty_db_reports_all_gaps() {
             "--db",
             &db,
             "--json",
+            "db",
             "check",
             "missing",
             "--days",
@@ -196,6 +197,7 @@ fn missing_complete_window_exits_ok() {
             "--db",
             &db,
             "--json",
+            "db",
             "check",
             "missing",
             "--days",
@@ -243,6 +245,7 @@ fn missing_workout_only_fails_when_stale() {
             "--db",
             &db,
             "--json",
+            "db",
             "check",
             "missing",
             "--days",
@@ -281,7 +284,7 @@ fn bare_check_still_runs_sanity_audit() {
 
     // Empty DB: sanity audit should succeed (nothing to violate).
     bin()
-        .args(["--db", &db, "--json", "check"])
+        .args(["--db", &db, "--json", "db", "check"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"ok\": true"))
@@ -300,6 +303,7 @@ fn missing_human_output_mentions_incomplete() {
         .args([
             "--db",
             &db,
+            "db",
             "check",
             "missing",
             "--days",
@@ -332,6 +336,7 @@ fn missing_skip_today_succeeds_with_yesterday_only() {
             "--db",
             &db,
             "--json",
+            "db",
             "check",
             "missing",
             "--days",
@@ -380,6 +385,7 @@ fn missing_without_skip_today_fails_when_today_empty() {
             "--db",
             &db,
             "--json",
+            "db",
             "check",
             "missing",
             "--days",
@@ -419,6 +425,7 @@ fn missing_skip_today_preserves_window_length() {
             "--db",
             &db,
             "--json",
+            "db",
             "check",
             "missing",
             "--days",
