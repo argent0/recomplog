@@ -1,12 +1,14 @@
 //! Nutrition domain handlers (nutlog parity under grouped CLI).
 
 use crate::cli::{
-    ConsumptionAction, MicronutrientAction, NutritionAction, ProductAction, ProductNutritionAction,
-    PurchaseAction, StoreAction, TagModifyAction, TaxonomyAction,
+    ConsumptionAction, InfoodsAction, MicronutrientAction, NutritionAction, ProductAction,
+    ProductNutritionAction, PurchaseAction, StoreAction, TagModifyAction, TaxonomyAction,
 };
 use crate::db;
+use crate::infoods::{self, EnsureMode};
 use crate::macro_names::{is_macronutrient_name, macro_flag_hint};
 use crate::models::Success;
+use crate::sanity::SanityWarning;
 use crate::utils::{
     parse_date_to_ymd, parse_rfc3339_instant_for_db, parse_rfc3339_to_utc, print_error_json,
     print_json, quiet_print, refuse_consumption_midnight,
@@ -47,6 +49,7 @@ pub fn handle(
         NutritionAction::Micronutrient { action } => {
             handle_micronutrient(action, db_override, json, quiet)
         }
+        NutritionAction::Infoods { action } => handle_infoods(action, db_override, json, quiet),
         NutritionAction::ProductTag { action } => handle_taxonomy(
             "product_tags",
             "product_tag_associations",
@@ -236,21 +239,13 @@ fn set_product_nutrition(
             "DELETE FROM product_micronutrients WHERE product_id = ?1",
             [id],
         )?;
-        let now = db::now_utc();
         for (name, amount, unit) in micros {
-            conn.execute(
-                "INSERT OR IGNORE INTO micronutrients (name, unit, created_at) VALUES (?1, ?2, ?3)",
-                params![name, unit, now],
-            )?;
-            let nid: i64 = conn.query_row(
-                "SELECT id FROM micronutrients WHERE name = ?1 COLLATE NOCASE",
-                [name],
-                |r| r.get(0),
-            )?;
+            let ensured = infoods::ensure_micronutrient(conn, name, unit, EnsureMode::ProductSet)?;
+            let unit = infoods::normalize_unit(unit);
             conn.execute(
                 "INSERT INTO product_micronutrients (product_id, micronutrient_id, amount, unit)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![id, nid, amount, unit],
+                params![id, ensured.id, amount, unit],
             )?;
         }
     }
@@ -1055,7 +1050,8 @@ fn handle_micronutrient(
     match action {
         MicronutrientAction::List => {
             let mut stmt = conn.prepare(
-                "SELECT id, name, unit, recommended_intake FROM micronutrients ORDER BY name",
+                "SELECT id, name, unit, recommended_intake, infoods_tag
+                 FROM micronutrients ORDER BY name",
             )?;
             let rows: Vec<_> = stmt
                 .query_map([], |r| {
@@ -1064,6 +1060,7 @@ fn handle_micronutrient(
                         "name": r.get::<_, String>(1)?,
                         "unit": r.get::<_, String>(2)?,
                         "recommended_intake": r.get::<_, Option<f64>>(3)?,
+                        "infoods_tag": r.get::<_, Option<String>>(4)?,
                     }))
                 })?
                 .filter_map(|r| r.ok())
@@ -1072,7 +1069,8 @@ fn handle_micronutrient(
                 print_json(&rows);
             } else {
                 for n in &rows {
-                    println!("{}: {} ({})", n["id"], n["name"], n["unit"]);
+                    let tag = n["infoods_tag"].as_str().unwrap_or("-");
+                    println!("{}: {} ({}) infoods={}", n["id"], n["name"], n["unit"], tag);
                 }
             }
         }
@@ -1080,34 +1078,25 @@ fn handle_micronutrient(
             name,
             unit,
             recommended_intake,
+            infoods,
+            force,
         } => {
-            if is_macronutrient_name(&name) {
-                let flag = macro_flag_hint(&name).unwrap_or("product nutrition set macro flags");
-                return Err(anyhow!(
-                    "'{name}' is a macronutrient; use {flag} on product nutrition set \
-                     (not micronutrient create)"
-                ));
-            }
-            let now = db::now_utc();
-            conn.execute(
-                "INSERT INTO micronutrients (name, unit, recommended_intake, created_at) VALUES (?1,?2,?3,?4)",
-                params![name, unit, recommended_intake, now],
+            create_micronutrient(
+                &conn,
+                &name,
+                &unit,
+                recommended_intake,
+                infoods.as_deref(),
+                force,
+                json,
+                quiet,
             )?;
-            let id = conn.last_insert_rowid();
-            if json {
-                print_json(&Success::created(
-                    id,
-                    name.clone(),
-                    format!("micronutrient: {name}"),
-                ));
-            } else {
-                quiet_print(quiet, format!("Created micronutrient {id}: {name}"));
-            }
         }
         MicronutrientAction::Show { id } => {
             let row = conn
                 .query_row(
-                    "SELECT id, name, unit, recommended_intake FROM micronutrients WHERE id=?1",
+                    "SELECT id, name, unit, recommended_intake, infoods_tag
+                     FROM micronutrients WHERE id=?1",
                     [id],
                     |r| {
                         Ok(serde_json::json!({
@@ -1115,6 +1104,7 @@ fn handle_micronutrient(
                             "name": r.get::<_, String>(1)?,
                             "unit": r.get::<_, String>(2)?,
                             "recommended_intake": r.get::<_, Option<f64>>(3)?,
+                            "infoods_tag": r.get::<_, Option<String>>(4)?,
                         }))
                     },
                 )
@@ -1175,6 +1165,303 @@ fn handle_micronutrient(
                 print_json(&Success::deleted(id));
             } else {
                 quiet_print(quiet, format!("Deleted micronutrient {id}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_micronutrient(
+    conn: &Connection,
+    name: &str,
+    unit: &str,
+    recommended_intake: Option<f64>,
+    infoods_tag: Option<&str>,
+    force: bool,
+    json: bool,
+    quiet: bool,
+) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("micronutrient name must not be empty"));
+    }
+    if is_macronutrient_name(name) {
+        let flag = macro_flag_hint(name).unwrap_or("product nutrition set macro flags");
+        return Err(anyhow!(
+            "'{name}' is a macronutrient; use {flag} on product nutrition set \
+             (not micronutrient create)"
+        ));
+    }
+
+    // Case-insensitive name uniqueness (no --force bypass).
+    if let Some((id, existing)) = conn
+        .query_row(
+            "SELECT id, name FROM micronutrients WHERE name = ?1 COLLATE NOCASE",
+            [name],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional()?
+    {
+        return Err(anyhow!(
+            "micronutrient already exists: id={id} name={existing}"
+        ));
+    }
+
+    let unit = infoods::normalize_unit(unit);
+    let mut resolved_tag: Option<String> = None;
+    let mut force_warnings: Vec<SanityWarning> = Vec::new();
+
+    if let Some(tag) = infoods_tag {
+        let tag = tag.trim();
+        if !infoods::tag_exists(conn, tag)? {
+            return Err(anyhow!("unknown INFOODS tag '{tag}'"));
+        }
+        if let Some((id, existing)) = conn
+            .query_row(
+                "SELECT id, name FROM micronutrients WHERE infoods_tag = ?1 COLLATE NOCASE",
+                [tag],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            return Err(anyhow!(
+                "INFOODS tag '{tag}' already linked to micronutrient id={id} name={existing}"
+            ));
+        }
+        // Canonical tag casing from catalog
+        let (canon, _, _) = infoods::get_component(conn, tag)?
+            .ok_or_else(|| anyhow!("unknown INFOODS tag '{tag}'"))?;
+        resolved_tag = Some(canon);
+    } else {
+        let blockers = infoods::find_create_blockers(conn, name)?;
+        if !blockers.is_empty() {
+            if !force {
+                return Err(anyhow!(infoods::format_blockers_message(name, &blockers)));
+            }
+            let msg = infoods::force_warning_message(name, &blockers);
+            eprintln!("Warning: {msg}");
+            force_warnings.push(SanityWarning {
+                field: "infoods".into(),
+                kind: "force".into(),
+                message: msg,
+                previous_value: None,
+                previous_date: None,
+                new_value: None,
+                delta: None,
+                allowed_delta: None,
+                days_gap: None,
+            });
+        }
+    }
+
+    let now = db::now_utc();
+    conn.execute(
+        "INSERT INTO micronutrients (name, unit, recommended_intake, created_at, infoods_tag)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![name, unit, recommended_intake, now, resolved_tag],
+    )?;
+    let id = conn.last_insert_rowid();
+    if json {
+        print_json(&Success::created_with_warnings(
+            id,
+            name.to_string(),
+            format!("micronutrient: {name}"),
+            force_warnings,
+        ));
+    } else {
+        quiet_print(
+            quiet,
+            format!(
+                "Created micronutrient {id}: {name}{}",
+                resolved_tag
+                    .as_ref()
+                    .map(|t| format!(" infoods={t}"))
+                    .unwrap_or_default()
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn handle_infoods(
+    action: InfoodsAction,
+    db_override: Option<&str>,
+    json: bool,
+    quiet: bool,
+) -> Result<()> {
+    let _ = quiet;
+    let conn = db::open_db(db_override)?;
+    match action {
+        InfoodsAction::List { limit } => {
+            let limit = limit.max(1);
+            let mut stmt = conn.prepare(
+                "SELECT tag, name, unit, source FROM infoods_components
+                 ORDER BY tag LIMIT ?1",
+            )?;
+            let rows: Vec<_> = stmt
+                .query_map([limit], |r| {
+                    Ok(serde_json::json!({
+                        "tag": r.get::<_, String>(0)?,
+                        "name": r.get::<_, String>(1)?,
+                        "unit": r.get::<_, Option<String>>(2)?,
+                        "source": r.get::<_, String>(3)?,
+                    }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            if json {
+                print_json(&rows);
+            } else {
+                for r in &rows {
+                    let unit = r["unit"].as_str().unwrap_or("?");
+                    println!("{}: {} ({})", r["tag"], r["name"], unit);
+                }
+            }
+        }
+        InfoodsAction::Show { tag } => {
+            let row = conn
+                .query_row(
+                    "SELECT tag, name, unit, synonyms, comments, tables_note, source
+                     FROM infoods_components WHERE tag = ?1 COLLATE NOCASE",
+                    [&tag],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "tag": r.get::<_, String>(0)?,
+                            "name": r.get::<_, String>(1)?,
+                            "unit": r.get::<_, Option<String>>(2)?,
+                            "synonyms": r.get::<_, Option<String>>(3)?,
+                            "comments": r.get::<_, Option<String>>(4)?,
+                            "tables_note": r.get::<_, Option<String>>(5)?,
+                            "source": r.get::<_, String>(6)?,
+                        }))
+                    },
+                )
+                .optional()?;
+            match row {
+                Some(v) => {
+                    if json {
+                        print_json(&v);
+                    } else {
+                        println!(
+                            "{} — {} ({})",
+                            v["tag"].as_str().unwrap_or("?"),
+                            v["name"].as_str().unwrap_or("?"),
+                            v["unit"].as_str().unwrap_or("?")
+                        );
+                        if let Some(s) = v["synonyms"].as_str() {
+                            println!("  synonyms: {s}");
+                        }
+                        if let Some(c) = v["comments"].as_str() {
+                            println!("  comments: {c}");
+                        }
+                    }
+                }
+                None => return Err(anyhow!("INFOODS tag not found: {tag}")),
+            }
+        }
+        InfoodsAction::Search { query } => {
+            // Exact first, then synonym substring, then fuzzy name.
+            let mut hits = infoods::find_exact_matches(&conn, &query)?;
+            {
+                let pattern = format!("%{}%", query.trim());
+                let mut stmt = conn.prepare(
+                    "SELECT DISTINCT c.tag, c.name, c.unit
+                     FROM infoods_synonyms s
+                     JOIN infoods_components c ON c.tag = s.tag
+                     WHERE s.synonym LIKE ?1 COLLATE NOCASE
+                     LIMIT 40",
+                )?;
+                let rows = stmt.query_map([&pattern], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (tag, name, unit) = row?;
+                    if hits.iter().any(|h| h.tag.eq_ignore_ascii_case(&tag)) {
+                        continue;
+                    }
+                    hits.push(infoods::InfoodsMatch {
+                        tag,
+                        name,
+                        unit,
+                        via: "synonym",
+                        score: 0.9,
+                    });
+                }
+            }
+            if hits.len() < 10 {
+                for h in infoods::find_fuzzy_matches(&conn, &query, 20)? {
+                    if hits.iter().any(|x| x.tag.eq_ignore_ascii_case(&h.tag)) {
+                        continue;
+                    }
+                    hits.push(h);
+                }
+            }
+            if hits.len() < 5 {
+                let mut stmt = conn.prepare("SELECT tag, name, unit FROM infoods_components")?;
+                let cands: Vec<_> = stmt
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                        ))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                let mut ranked: Vec<_> = cands
+                    .into_iter()
+                    .map(|(tag, name, unit)| {
+                        let score = name_match_score(&format!("{tag} {name}"), &query)
+                            .max(name_match_score(&name, &query));
+                        (tag, name, unit, score)
+                    })
+                    .filter(|(_, _, _, s)| *s >= 0.5)
+                    .collect();
+                ranked.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+                ranked.truncate(30);
+                for (tag, name, unit, score) in ranked {
+                    if hits.iter().any(|h| h.tag.eq_ignore_ascii_case(&tag)) {
+                        continue;
+                    }
+                    hits.push(infoods::InfoodsMatch {
+                        tag,
+                        name,
+                        unit,
+                        via: "search",
+                        score,
+                    });
+                }
+            }
+            hits.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            hits.truncate(30);
+            if json {
+                let out: Vec<_> = hits
+                    .iter()
+                    .map(|h| {
+                        serde_json::json!({
+                            "tag": h.tag,
+                            "name": h.name,
+                            "unit": h.unit,
+                            "via": h.via,
+                            "score": h.score,
+                        })
+                    })
+                    .collect();
+                print_json(&out);
+            } else {
+                for h in hits {
+                    let unit = h.unit.as_deref().unwrap_or("?");
+                    println!("{}: {} ({}) [{:.2}]", h.tag, h.name, unit, h.score);
+                }
             }
         }
     }

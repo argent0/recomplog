@@ -7,6 +7,7 @@ mod db;
 mod error;
 mod fit;
 mod hr_zones;
+mod infoods;
 mod load_type;
 mod macro_names;
 mod models;

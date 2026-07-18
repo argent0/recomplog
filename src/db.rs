@@ -61,7 +61,7 @@ pub fn open_db_readonly_for_completion(override_path: Option<&str>) -> Option<Co
 }
 
 /// Current schema version. Bump when adding a new migration block.
-const CURRENT_VERSION: i32 = 6;
+const CURRENT_VERSION: i32 = 7;
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i32 = conn
@@ -100,6 +100,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     if current < 6 {
         apply_v6_split_micro_macro_nutrients(conn)?;
         conn.execute("PRAGMA user_version = 6", [])?;
+    }
+    if current < 7 {
+        apply_v7_infoods_and_micro_unique(conn)?;
+        conn.execute("PRAGMA user_version = 7", [])?;
     }
 
     Ok(())
@@ -475,6 +479,145 @@ fn apply_v6_split_micro_macro_nutrients(conn: &Connection) -> Result<()> {
     // 6. Rebuild junction with micronutrient_id FK
     rebuild_product_micronutrients(conn, "nutrient_id")?;
 
+    Ok(())
+}
+
+/// v7: INFOODS reference catalog + case-insensitive micronutrient names.
+///
+/// - Seed `infoods_components` / `infoods_synonyms` from vendored FAO data.
+/// - Merge pure case-only duplicate micronutrient rows.
+/// - Rebuild `micronutrients` with `UNIQUE COLLATE NOCASE` and optional `infoods_tag`.
+fn apply_v7_infoods_and_micro_unique(conn: &Connection) -> Result<()> {
+    crate::infoods::ensure_schema_and_seed(conn)?;
+
+    if !table_exists(conn, "micronutrients")? {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE micronutrients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                unit TEXT NOT NULL,
+                recommended_intake REAL,
+                created_at TEXT NOT NULL,
+                infoods_tag TEXT UNIQUE COLLATE NOCASE
+                    REFERENCES infoods_components(tag)
+            );
+            "#,
+        )?;
+        return Ok(());
+    }
+
+    merge_case_only_micronutrient_dups(conn)?;
+
+    // Already migrated shape?
+    if column_exists(conn, "micronutrients", "infoods_tag")? {
+        // Ensure UNIQUE COLLATE NOCASE on name: SQLite cannot ALTER column
+        // collations; rebuild if the existing unique index is case-sensitive.
+        // Detect by probing: if a case-variant insert would be allowed we rebuild.
+        // Practical approach: always rebuild when infoods_tag exists only if
+        // we still have case dups (should be zero after merge) — skip rebuild
+        // when column present (idempotent re-run after partial).
+        return Ok(());
+    }
+
+    rebuild_micronutrients_with_infoods(conn)?;
+    Ok(())
+}
+
+/// Collapse rows that differ only by name casing (keep most product refs, then lowest id).
+fn merge_case_only_micronutrient_dups(conn: &Connection) -> Result<()> {
+    use rusqlite::params;
+    use std::collections::HashMap;
+
+    let mut stmt = conn.prepare("SELECT id, name FROM micronutrients ORDER BY id")?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut groups: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+    for (id, name) in rows {
+        groups
+            .entry(name.to_lowercase())
+            .or_default()
+            .push((id, name));
+    }
+
+    let has_pm = table_exists(conn, "product_micronutrients")?;
+
+    for (_key, members) in groups {
+        if members.len() < 2 {
+            continue;
+        }
+        // Score by product_micronutrients refs
+        let mut scored: Vec<(i64, i64, String)> = Vec::new();
+        for (id, name) in members {
+            let refs: i64 = if has_pm {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM product_micronutrients WHERE micronutrient_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )?
+            } else {
+                0
+            };
+            scored.push((refs, id, name));
+        }
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0) // more refs first
+                .then_with(|| a.1.cmp(&b.1)) // then lower id
+        });
+        let keeper_id = scored[0].1;
+        let losers: Vec<i64> = scored.into_iter().skip(1).map(|s| s.1).collect();
+
+        for loser in losers {
+            if has_pm {
+                // Re-point product links; drop if product already has keeper.
+                conn.execute(
+                    "INSERT OR IGNORE INTO product_micronutrients
+                     (product_id, micronutrient_id, amount, unit)
+                     SELECT product_id, ?1, amount, unit FROM product_micronutrients
+                     WHERE micronutrient_id = ?2",
+                    params![keeper_id, loser],
+                )?;
+                conn.execute(
+                    "DELETE FROM product_micronutrients WHERE micronutrient_id = ?1",
+                    [loser],
+                )?;
+            }
+            conn.execute("DELETE FROM micronutrients WHERE id = ?1", [loser])?;
+        }
+    }
+    Ok(())
+}
+
+fn rebuild_micronutrients_with_infoods(conn: &Connection) -> Result<()> {
+    // product_micronutrients FKs micronutrients(id); disable FKs for table swap.
+    conn.execute("PRAGMA foreign_keys = OFF", [])?;
+    conn.execute_batch(
+        r#"
+        CREATE TABLE micronutrients_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            unit TEXT NOT NULL,
+            recommended_intake REAL,
+            created_at TEXT NOT NULL,
+            infoods_tag TEXT UNIQUE COLLATE NOCASE
+                REFERENCES infoods_components(tag)
+        );
+        "#,
+    )?;
+    conn.execute(
+        "INSERT INTO micronutrients_new (id, name, unit, recommended_intake, created_at, infoods_tag)
+         SELECT id, name, unit, recommended_intake, created_at, NULL FROM micronutrients",
+        [],
+    )?;
+    conn.execute("DROP TABLE micronutrients", [])?;
+    conn.execute(
+        "ALTER TABLE micronutrients_new RENAME TO micronutrients",
+        [],
+    )?;
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
     Ok(())
 }
 

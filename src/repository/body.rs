@@ -13,6 +13,11 @@ impl Repository {
         Self { conn }
     }
 
+    /// Borrow the underlying connection (catalog health checks, etc.).
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     fn row_to_measurement(row: &Row) -> rusqlite::Result<Measurement> {
         let id: i64 = row.get(0)?;
         let date: String = row.get(1)?;

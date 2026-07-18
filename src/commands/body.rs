@@ -161,10 +161,25 @@ pub struct CheckViolation {
     pub exercise: Option<String>,
 }
 
+/// Micronutrients missing an INFOODS tag (`db check` catalog health).
+#[derive(Debug, Serialize)]
+pub struct MicronutrientsWithoutInfoods {
+    pub count: i64,
+    pub items: Vec<MicronutrientWithoutInfoodsItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MicronutrientWithoutInfoodsItem {
+    pub id: i64,
+    pub name: String,
+    pub unit: String,
+}
+
 /// Report returned by `recomplog db check` (JSON and human summary source).
 #[derive(Debug, Serialize)]
 pub struct CheckReport {
-    /// True when no violations of the enabled checks were found.
+    /// True when no violations of the enabled checks were found and every
+    /// micronutrient has an INFOODS tag.
     pub ok: bool,
     pub measurement_count: i64,
     pub sleep_count: i64,
@@ -176,6 +191,8 @@ pub struct CheckReport {
     pub hard_violation_count: i64,
     pub variation_violation_count: i64,
     pub violations: Vec<CheckViolation>,
+    /// User micronutrients with `infoods_tag IS NULL` (custom or unmapped).
+    pub micronutrients_without_infoods: MicronutrientsWithoutInfoods,
 }
 
 fn proposed_from_measurement(m: &Measurement) -> ProposedMetrics {
@@ -439,8 +456,11 @@ pub fn handle_check(
 
     let hard_violation_count = violations.iter().filter(|v| v.kind == "absolute").count() as i64;
     let variation_violation_count = violations.iter().filter(|v| v.kind == "delta").count() as i64;
+
+    let micronutrients_without_infoods = list_micronutrients_without_infoods(repo.conn())?;
+
     let report = CheckReport {
-        ok: violations.is_empty(),
+        ok: violations.is_empty() && micronutrients_without_infoods.count == 0,
         measurement_count: measurements.len() as i64,
         sleep_count: sleeps.len() as i64,
         set_count: sets.len() as i64,
@@ -448,6 +468,7 @@ pub fn handle_check(
         hard_violation_count,
         variation_violation_count,
         violations,
+        micronutrients_without_infoods,
     };
 
     if json {
@@ -460,8 +481,10 @@ pub fn handle_check(
             println!("ok");
         } else {
             println!(
-                "fail hard={} variations={}",
-                report.hard_violation_count, report.variation_violation_count
+                "fail hard={} variations={} untagged_micros={}",
+                report.hard_violation_count,
+                report.variation_violation_count,
+                report.micronutrients_without_infoods.count
             );
         }
     }
@@ -470,6 +493,30 @@ pub fn handle_check(
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn list_micronutrients_without_infoods(
+    conn: &rusqlite::Connection,
+) -> Result<MicronutrientsWithoutInfoods> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, unit FROM micronutrients
+         WHERE infoods_tag IS NULL
+         ORDER BY name COLLATE NOCASE",
+    )?;
+    let items: Vec<MicronutrientWithoutInfoodsItem> = stmt
+        .query_map([], |r| {
+            Ok(MicronutrientWithoutInfoodsItem {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                unit: r.get(2)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(MicronutrientsWithoutInfoods {
+        count: items.len() as i64,
+        items,
+    })
 }
 
 fn print_check_human(report: &CheckReport) {
@@ -484,26 +531,46 @@ fn print_check_human(report: &CheckReport) {
             " (hard limits only; pass --variations for measurement deltas)"
         }
     );
+
+    let micro = &report.micronutrients_without_infoods;
+    if micro.count > 0 {
+        println!(
+            "WARNING: {} micronutrient(s) have no INFOODS tag (db check fails until mapped or accepted as custom):",
+            micro.count
+        );
+        for item in micro.items.iter().take(20) {
+            println!("  id={} {} ({})", item.id, item.name, item.unit);
+        }
+        if micro.count > 20 {
+            println!("  … and {} more (see --json)", micro.count - 20);
+        }
+        println!(
+            "  Link with: nutrition micronutrient create … --infoods TAG  (or map existing rows later)"
+        );
+    }
+
     if report.ok {
         println!("OK — no violations found.");
         return;
     }
 
-    println!(
-        "Found {} hard-limit violation(s), {} variation violation(s):",
-        report.hard_violation_count, report.variation_violation_count
-    );
-    for v in &report.violations {
-        if let Some(ref ex) = v.exercise {
-            println!(
-                "  [{}] {} {} (id {}, {}) {}: {}",
-                v.kind, v.entity, v.date, v.id, ex, v.field, v.message
-            );
-        } else {
-            println!(
-                "  [{}] {} {} (id {}) {}: {}",
-                v.kind, v.entity, v.date, v.id, v.field, v.message
-            );
+    if !report.violations.is_empty() {
+        println!(
+            "Found {} hard-limit violation(s), {} variation violation(s):",
+            report.hard_violation_count, report.variation_violation_count
+        );
+        for v in &report.violations {
+            if let Some(ref ex) = v.exercise {
+                println!(
+                    "  [{}] {} {} (id {}, {}) {}: {}",
+                    v.kind, v.entity, v.date, v.id, ex, v.field, v.message
+                );
+            } else {
+                println!(
+                    "  [{}] {} {} (id {}) {}: {}",
+                    v.kind, v.entity, v.date, v.id, v.field, v.message
+                );
+            }
         }
     }
 }

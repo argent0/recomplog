@@ -7,7 +7,7 @@ This document describes the unified command structure.
 - Group related concerns so the top level is not overwhelming.
 - `workout | exercise | set` live together under one parent.
 - `measurement | sleep` live under `body`.
-- `product | purchase | consumption | micronutrient` live under `nutrition`.
+- `product | purchase | consumption | micronutrient | infoods` live under `nutrition`.
   (`nutrient` remains a visible alias of `micronutrient`.)
 - `report` stays top-level for easy cross-domain use (as requested).
 
@@ -139,6 +139,7 @@ recomplog db migrate --status
 recomplog db check --variations
 # Audits body measurements, sleep, and exercise sets against configured sanity limits.
 # Sets use absolute limits only (date window = workout session day).
+# Also fails when any micronutrient has no INFOODS tag (see micronutrients_without_infoods in --json).
 
 # Completeness: missing daily logs (measurement, sleep, nutrition) over last N days
 # (includes today), plus workout inactivity over last M days.
@@ -219,7 +220,11 @@ recomplog workout set add-cardio ... --require-zones-laps --hr-zones '...' --lap
 # Update zones / cadence after import
 recomplog workout set update 9 --hr-zones '...' --laps '...' --cadence 172 --ascent 125
 
-# Nutrition micros + store
+# Nutrition micros + store + INFOODS reference catalog
+recomplog nutrition infoods search "vitamin c"
+recomplog nutrition infoods show VITC
+# Prefer --infoods TAG when creating classics (blocked without link/force if name matches INFOODS)
+recomplog nutrition micronutrient create Magnesium --unit mg --infoods MG
 recomplog nutrition store create "Local Market"
 recomplog nutrition product nutrition set 1 --reference-quantity 100 --reference-unit g \
   --energy-kcal 59 --protein-g 10 --micronutrient Magnesium 200 mg

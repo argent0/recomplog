@@ -14,6 +14,7 @@ fn micronutrient_crud_and_nutrient_alias() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("t.db").display().to_string();
 
+    // Magnesium matches INFOODS MG — must link explicitly.
     bin()
         .args([
             "--db",
@@ -27,6 +28,8 @@ fn micronutrient_crud_and_nutrient_alias() {
             "mg",
             "--recommended-intake",
             "420",
+            "--infoods",
+            "MG",
         ])
         .assert()
         .success()
@@ -37,7 +40,8 @@ fn micronutrient_crud_and_nutrient_alias() {
         .args(["--db", &db, "--json", "nutrition", "nutrient", "list"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Magnesium"));
+        .stdout(predicate::str::contains("Magnesium"))
+        .stdout(predicate::str::contains("MG"));
 
     bin()
         .args([
@@ -306,7 +310,7 @@ fn migration_promotes_extended_macros_from_legacy_shape() {
     let ver: i32 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(ver, 6);
+    assert_eq!(ver, 7);
 
     let has_nutrients: i64 = conn
         .query_row(
@@ -350,4 +354,309 @@ fn migration_promotes_extended_macros_from_legacy_shape() {
         })
         .unwrap();
     assert_eq!(micro_links, 1); // Iron only
+
+    let infoods: i64 = conn
+        .query_row("SELECT COUNT(*) FROM infoods_components", [], |r| r.get(0))
+        .unwrap();
+    assert!(infoods > 500, "expected full INFOODS seed, got {infoods}");
+}
+
+#[test]
+fn infoods_seeded_and_searchable() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "infoods",
+            "show",
+            "VITC",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("vitamin C"));
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "infoods",
+            "search",
+            "ascorbic",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("VITC"));
+}
+
+#[test]
+fn create_refuses_infoods_name_without_link_or_force() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "nutrition",
+            "micronutrient",
+            "create",
+            "Vitamin C",
+            "--unit",
+            "mg",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("INFOODS"))
+        .stderr(predicate::str::contains("VITC"));
+}
+
+#[test]
+fn create_with_infoods_and_case_insensitive_unique() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "micronutrient",
+            "create",
+            "Iron",
+            "--unit",
+            "mg",
+            "--infoods",
+            "FE",
+        ])
+        .assert()
+        .success();
+
+    // Case-only duplicate refused (no --force bypass for true name dups).
+    bin()
+        .args([
+            "--db",
+            &db,
+            "nutrition",
+            "micronutrient",
+            "create",
+            "iron",
+            "--unit",
+            "mg",
+            "--force",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}
+
+#[test]
+fn product_set_reuses_case_and_auto_links_infoods() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "create",
+            "Spinach",
+        ])
+        .assert()
+        .success();
+
+    // Exact INFOODS name "magnesium" → auto-create with MG tag.
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "nutrition",
+            "set",
+            "1",
+            "--reference-quantity",
+            "100",
+            "--reference-unit",
+            "g",
+            "--energy-kcal",
+            "23",
+            "--micronutrient",
+            "magnesium",
+            "79",
+            "mg",
+        ])
+        .assert()
+        .success();
+
+    let list = bin()
+        .args(["--db", &db, "--json", "nutrition", "micronutrient", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let catalog: serde_json::Value = serde_json::from_slice(&list).unwrap();
+    let arr = catalog.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["infoods_tag"], "MG");
+
+    // Second product set with different casing reuses the row.
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "create",
+            "Almonds",
+        ])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "nutrition",
+            "set",
+            "2",
+            "--reference-quantity",
+            "100",
+            "--reference-unit",
+            "g",
+            "--micronutrient",
+            "Magnesium",
+            "270",
+            "mg",
+        ])
+        .assert()
+        .success();
+
+    let list2 = bin()
+        .args(["--db", &db, "--json", "nutrition", "micronutrient", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let catalog2: serde_json::Value = serde_json::from_slice(&list2).unwrap();
+    assert_eq!(catalog2.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn create_force_custom_near_infoods_warns() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    // "Vitamin C complex" fuzzy-matches vitamin C / VITC → needs --force
+    let out = bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "micronutrient",
+            "create",
+            "Vitamin C complex",
+            "--unit",
+            "mg",
+            "--force",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("FORCE") || stderr.contains("force"),
+        "expected stern force warning, got: {stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["success"], true);
+    // warnings present
+    assert!(v["warnings"]
+        .as_array()
+        .map(|a| !a.is_empty())
+        .unwrap_or(false));
+}
+
+#[test]
+fn custom_bioactive_create_without_infoods_ok() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "micronutrient",
+            "create",
+            "Caffeic acid customxyz",
+            "--unit",
+            "mg",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"success\": true"));
+}
+
+#[test]
+fn db_check_flags_untagged_micronutrients() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "micronutrient",
+            "create",
+            "MyPolyphenolXYZ",
+            "--unit",
+            "mg",
+        ])
+        .assert()
+        .success();
+
+    let out = bin()
+        .args(["--db", &db, "--json", "db", "check"])
+        .assert()
+        .failure() // ok=false → exit 1
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["ok"], false);
+    assert!(
+        v["micronutrients_without_infoods"]["count"]
+            .as_i64()
+            .unwrap()
+            >= 1
+    );
+    let names: Vec<&str> = v["micronutrients_without_infoods"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert!(names.iter().any(|n| n.contains("MyPolyphenolXYZ")));
 }

@@ -899,6 +899,11 @@ pub enum NutritionAction {
         #[command(subcommand)]
         action: MicronutrientAction,
     },
+    /// FAO INFOODS food-component tagnames (reference catalog; read-only).
+    Infoods {
+        #[command(subcommand)]
+        action: InfoodsAction,
+    },
     #[command(name = "product-tag")]
     ProductTag {
         #[command(subcommand)]
@@ -1127,12 +1132,21 @@ pub enum ConsumptionAction {
 #[derive(Subcommand, Debug, Clone)]
 pub enum MicronutrientAction {
     List,
+    /// Create a user micronutrient. Names that match INFOODS are refused unless
+    /// linked with `--infoods TAG` or overridden with `--force` (stern warning).
     Create {
         name: String,
         #[arg(long)]
         unit: String,
         #[arg(long)]
         recommended_intake: Option<f64>,
+        /// Link to an INFOODS tagname (e.g. VITC, CA, FE).
+        #[arg(long)]
+        infoods: Option<String>,
+        /// Allow create even when the name matches INFOODS (leaves infoods_tag NULL
+        /// unless `--infoods` is also set). Emits a stern warning.
+        #[arg(long)]
+        force: bool,
     },
     Show {
         id: i64,
@@ -1145,6 +1159,20 @@ pub enum MicronutrientAction {
         #[arg(long)]
         force: bool,
     },
+}
+
+/// Read-only INFOODS reference catalog (`nutrition infoods …`).
+#[derive(Subcommand, Debug, Clone)]
+pub enum InfoodsAction {
+    /// List INFOODS components (optional limit).
+    List {
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+    },
+    /// Fuzzy / substring search by tag, name, or synonym.
+    Search { query: String },
+    /// Show one component by tag (e.g. VITC).
+    Show { tag: String },
 }
 
 #[derive(Subcommand, Debug, Clone)]

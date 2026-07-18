@@ -17,7 +17,7 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
 2. Use the standard command shape: `recomplog <group> <entity> <action> ...`
    - Training: `workout create|list|show|delete`, `workout exercise ...`, `workout set add|add-cardio|delete`
    - Body: `body measurement ...`, `body sleep ...`, `body profile ...`
-   - Nutrition: `nutrition product|purchase|consumption|micronutrient ...`
+   - Nutrition: `nutrition product|purchase|consumption|micronutrient|infoods ...`
    - Cross-cutting: `report` (including `report brief`), `import`, `config`, `db` (`backup`, `migrate`, `check` / `check missing`)
 3. **Always** support `--json` for data-returning commands.
 4. Run `cargo fmt && cargo clippy -- -D warnings && cargo test` before finishing changes.
@@ -127,6 +127,10 @@ recomplog db backup
 recomplog --json db backup --to ~/backups/
 recomplog --json db check missing --days 7 --workout-days 3
 recomplog --json db check missing --days 7 --workout-days 3 --skip-today
+# Micronutrients: prefer INFOODS tags for classics; product set auto-links exact INFOODS names
+recomplog --json nutrition infoods search "iron"
+recomplog --json nutrition micronutrient create Iron --unit mg --infoods FE
+recomplog --json db check   # fails if any micronutrient lacks infoods_tag
 ```
 
 Update this file when agent interaction patterns evolve.
