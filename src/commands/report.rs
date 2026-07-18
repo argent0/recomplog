@@ -14,7 +14,7 @@ use crate::repository::BodyRepository;
 use crate::utils::{parse_date_to_ymd, print_json, print_table};
 use anyhow::{anyhow, Result};
 use chrono::{Duration, Local, NaiveDate};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{BTreeMap, HashMap};
 
 pub fn handle(
@@ -168,25 +168,42 @@ fn build_nutrition_daily_report(
 
 fn fetch_brief_consumptions(conn: &Connection, today_ymd: &str) -> Result<Vec<BriefConsumption>> {
     let mut stmt = conn.prepare(
-        "SELECT c.id, c.product_id, p.name, c.quantity, c.unit, c.consumed_at
+        "SELECT c.id, c.product_id, c.quantity, c.unit, c.consumed_at
          FROM consumptions c
-         LEFT JOIN products p ON p.id = c.product_id
          WHERE date(c.consumed_at, 'localtime') = date(?1)
          ORDER BY c.consumed_at DESC
          LIMIT 100",
     )?;
-    let rows = stmt
+    let raw = stmt
         .query_map(params![today_ymd], |r| {
-            Ok(BriefConsumption {
-                id: r.get(0)?,
-                product_id: r.get(1)?,
-                product_name: r.get(2)?,
-                quantity: r.get(3)?,
-                unit: r.get(4)?,
-                consumed_at: r.get(5)?,
-            })
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+            ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut rows = Vec::with_capacity(raw.len());
+    for (id, product_id, quantity, unit, consumed_at) in raw {
+        let effective = crate::product_resolve::resolve_effective_product_id(conn, product_id)?;
+        let product_name: Option<String> = conn
+            .query_row(
+                "SELECT name FROM products WHERE id = ?1",
+                [effective],
+                |r| r.get(0),
+            )
+            .optional()?;
+        rows.push(BriefConsumption {
+            id,
+            product_id,
+            product_name,
+            quantity,
+            unit,
+            consumed_at,
+        });
+    }
     Ok(rows)
 }
 
@@ -529,14 +546,10 @@ fn fetch_nutrition_consumptions(
     conn: &Connection,
     resolved: &ResolvedNutritionPeriod,
 ) -> Result<Vec<NutritionConsumptionRow>> {
+    // Load event rows, then resolve merge aliases so macros come from the keeper.
     let mut sql = String::from(
-        "SELECT c.quantity, c.unit, pn.reference_quantity, pn.reference_unit,
-                pn.energy_kcal, pn.protein_g, pn.carbohydrates_g, pn.fat_g, pn.fiber_g, pn.sugars_g,
-                pn.saturated_fat_g, pn.trans_fat_g, pn.monounsaturated_fat_g, pn.polyunsaturated_fat_g,
-                pn.cholesterol_mg, pn.added_sugars_g,
-                c.product_id, c.consumed_at
+        "SELECT c.quantity, c.unit, c.product_id, c.consumed_at
          FROM consumptions c
-         JOIN product_nutritions pn ON pn.product_id = c.product_id
          WHERE 1=1",
     );
     let mut bind: Vec<String> = vec![];
@@ -551,36 +564,108 @@ fn fetch_nutrition_consumptions(
     sql.push_str(" ORDER BY c.consumed_at ASC");
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
+    let raw = stmt
         .query_map(rusqlite::params_from_iter(bind.iter()), |r| {
-            let qty: f64 = r.get(0)?;
-            let unit: Option<String> = r.get(1)?;
-            let ref_q: f64 = r.get(2)?;
-            let ref_unit: String = r.get(3)?;
-            Ok(NutritionConsumptionRow {
-                scale: crate::nutrition_units::consumption_scale(
-                    qty,
-                    ref_q,
-                    unit.as_deref(),
-                    &ref_unit,
-                ),
-                energy_kcal: r.get(4)?,
-                protein_g: r.get(5)?,
-                carbohydrates_g: r.get(6)?,
-                fat_g: r.get(7)?,
-                fiber_g: r.get(8)?,
-                sugars_g: r.get(9)?,
-                saturated_fat_g: r.get(10)?,
-                trans_fat_g: r.get(11)?,
-                monounsaturated_fat_g: r.get(12)?,
-                polyunsaturated_fat_g: r.get(13)?,
-                cholesterol_mg: r.get(14)?,
-                added_sugars_g: r.get(15)?,
-                product_id: r.get(16)?,
-                consumed_at: r.get(17)?,
-            })
+            Ok((
+                r.get::<_, f64>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+            ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let mut rows = Vec::new();
+    for (qty, unit, logged_product_id, consumed_at) in raw {
+        let effective_id =
+            crate::product_resolve::resolve_effective_product_id(conn, logged_product_id)?;
+        let nutrition: Option<(
+            f64,
+            String,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+        )> = conn
+            .query_row(
+                "SELECT reference_quantity, reference_unit,
+                        energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g,
+                        saturated_fat_g, trans_fat_g, monounsaturated_fat_g, polyunsaturated_fat_g,
+                        cholesterol_mg, added_sugars_g
+                 FROM product_nutritions WHERE product_id = ?1",
+                [effective_id],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                        r.get(11)?,
+                        r.get(12)?,
+                        r.get(13)?,
+                    ))
+                },
+            )
+            .optional()?;
+        // Same as former INNER JOIN: skip rows with no nutrition on effective product.
+        let Some((
+            ref_q,
+            ref_unit,
+            energy_kcal,
+            protein_g,
+            carbohydrates_g,
+            fat_g,
+            fiber_g,
+            sugars_g,
+            saturated_fat_g,
+            trans_fat_g,
+            monounsaturated_fat_g,
+            polyunsaturated_fat_g,
+            cholesterol_mg,
+            added_sugars_g,
+        )) = nutrition
+        else {
+            continue;
+        };
+        rows.push(NutritionConsumptionRow {
+            scale: crate::nutrition_units::consumption_scale(
+                qty,
+                ref_q,
+                unit.as_deref(),
+                &ref_unit,
+            ),
+            energy_kcal,
+            protein_g,
+            carbohydrates_g,
+            fat_g,
+            fiber_g,
+            sugars_g,
+            saturated_fat_g,
+            trans_fat_g,
+            monounsaturated_fat_g,
+            polyunsaturated_fat_g,
+            cholesterol_mg,
+            added_sugars_g,
+            // Micros and scale use the effective (keeper) product.
+            product_id: effective_id,
+            consumed_at,
+        });
+    }
     Ok(rows)
 }
 
@@ -986,30 +1071,45 @@ fn nutrition_spending(
     }
 
     let by_product = if by == SpendingBy::Product {
+        // Group by effective product so merge aliases roll into the keeper.
         let mut psql = String::from(
-            "SELECT pu.product_id, p.name, COALESCE(SUM(pu.price_cents),0), COUNT(*)
+            "SELECT pu.product_id, pu.price_cents
              FROM purchases pu
-             JOIN products p ON p.id = pu.product_id
              WHERE 1=1",
         );
         let mut pbind: Vec<String> = vec![];
         push_date_filters(&mut psql, &mut pbind, "pu.purchased_at", &resolved);
-        psql.push_str(" GROUP BY pu.product_id ORDER BY SUM(pu.price_cents) DESC");
-        let mut prods = vec![];
-        let mut stmt = conn.prepare(&psql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(pbind.iter()), |r| {
-            let cents: i64 = r.get(2)?;
-            Ok(ProductSpending {
-                product_id: r.get(0)?,
-                product_name: r.get(1)?,
+        let mut agg: HashMap<i64, (i64, i64)> = HashMap::new(); // effective_id -> (cents, count)
+        {
+            let mut stmt = conn.prepare(&psql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(pbind.iter()), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
+            })?;
+            for row in rows {
+                let (logged_id, price_cents) = row?;
+                let effective =
+                    crate::product_resolve::resolve_effective_product_id(conn, logged_id)?;
+                let entry = agg.entry(effective).or_insert((0, 0));
+                entry.0 += price_cents.unwrap_or(0);
+                entry.1 += 1;
+            }
+        }
+        let mut prods: Vec<ProductSpending> = Vec::new();
+        for (product_id, (cents, purchase_count)) in agg {
+            let product_name: String = conn.query_row(
+                "SELECT name FROM products WHERE id = ?1",
+                [product_id],
+                |r| r.get(0),
+            )?;
+            prods.push(ProductSpending {
+                product_id,
+                product_name,
                 cents,
                 amount: format_money_cents(cents),
-                purchase_count: r.get(3)?,
-            })
-        })?;
-        for row in rows {
-            prods.push(row?);
+                purchase_count,
+            });
         }
+        prods.sort_by(|a, b| b.cents.cmp(&a.cents));
         Some(prods)
     } else {
         None

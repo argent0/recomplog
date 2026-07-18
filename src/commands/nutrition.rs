@@ -736,7 +736,9 @@ fn merge_products(
     let Some((into_name, into_retired)) = into_row else {
         return Err(anyhow!("product {into} not found (--into)"));
     };
-    if into_retired.is_some() {
+    if into_retired.is_some()
+        || !crate::product_resolve::is_active_product(conn, into)?
+    {
         return Err(anyhow!(
             "product {into} ({into_name}) is retired; merge into an active product"
         ));

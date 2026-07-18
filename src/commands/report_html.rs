@@ -9,7 +9,7 @@ use crate::stats::{
 use crate::utils::print_json;
 use anyhow::Result;
 use chrono::{Datelike, Local, NaiveDate};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::fs;
 use std::path::Path;
 
@@ -169,13 +169,13 @@ fn fetch_html_sleep(conn: &Connection, since: &str, until: &str) -> Result<Vec<S
 fn fetch_html_nutrition_daily(conn: &Connection, since: &str, until: &str) -> Result<Vec<NutDay>> {
     // Aggregate in Rust so discrete units (bar, cup, serving) use the same
     // consumption_scale rules as `report nutrition` / `report brief`.
+    // Macros come from the effective (merge keeper) product.
     let mut stmt = conn.prepare(
         "SELECT date(c.consumed_at, 'localtime') AS d,
-                c.quantity, c.unit, pn.reference_quantity, pn.reference_unit,
-                pn.energy_kcal, pn.protein_g, pn.carbohydrates_g, pn.fat_g, pn.fiber_g, pn.sugars_g
+                c.quantity, c.unit, c.product_id
          FROM consumptions c
-         LEFT JOIN product_nutritions pn ON pn.product_id = c.product_id
-         WHERE date(c.consumed_at, 'localtime') >= date(?1) AND date(c.consumed_at, 'localtime') <= date(?2)
+         WHERE date(c.consumed_at, 'localtime') >= date(?1)
+           AND date(c.consumed_at, 'localtime') <= date(?2)
          ORDER BY d ASC",
     )?;
     let mut by_day: std::collections::BTreeMap<String, NutDay> = std::collections::BTreeMap::new();
@@ -184,13 +184,34 @@ fn fetch_html_nutrition_daily(conn: &Connection, since: &str, until: &str) -> Re
         let date: String = r.get(0)?;
         let qty: f64 = r.get(1)?;
         let unit: Option<String> = r.get(2)?;
-        let ref_q: Option<f64> = r.get(3)?;
-        let ref_unit: Option<String> = r.get(4)?;
-        let scale = match (ref_q, ref_unit.as_deref()) {
-            (Some(rq), Some(ru)) => {
-                crate::nutrition_units::consumption_scale(qty, rq, unit.as_deref(), ru)
+        let logged_pid: i64 = r.get(3)?;
+        let effective =
+            crate::product_resolve::resolve_effective_product_id(conn, logged_pid)?;
+        let nutrition: Option<(f64, String, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>)> =
+            conn.query_row(
+                "SELECT reference_quantity, reference_unit,
+                        energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g
+                 FROM product_nutritions WHERE product_id = ?1",
+                [effective],
+                |nr| {
+                    Ok((
+                        nr.get(0)?,
+                        nr.get(1)?,
+                        nr.get(2)?,
+                        nr.get(3)?,
+                        nr.get(4)?,
+                        nr.get(5)?,
+                        nr.get(6)?,
+                        nr.get(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let scale = match &nutrition {
+            Some((rq, ru, ..)) => {
+                crate::nutrition_units::consumption_scale(qty, *rq, unit.as_deref(), ru)
             }
-            _ => 0.0,
+            None => 0.0,
         };
         let day = by_day.entry(date.clone()).or_insert(NutDay {
             date,
@@ -201,23 +222,25 @@ fn fetch_html_nutrition_daily(conn: &Connection, since: &str, until: &str) -> Re
             fiber_g: 0.0,
             sugars_g: 0.0,
         });
-        if let Some(v) = r.get::<_, Option<f64>>(5)? {
-            day.energy_kcal += v * scale;
-        }
-        if let Some(v) = r.get::<_, Option<f64>>(6)? {
-            day.protein_g += v * scale;
-        }
-        if let Some(v) = r.get::<_, Option<f64>>(7)? {
-            day.carbohydrates_g += v * scale;
-        }
-        if let Some(v) = r.get::<_, Option<f64>>(8)? {
-            day.fat_g += v * scale;
-        }
-        if let Some(v) = r.get::<_, Option<f64>>(9)? {
-            day.fiber_g += v * scale;
-        }
-        if let Some(v) = r.get::<_, Option<f64>>(10)? {
-            day.sugars_g += v * scale;
+        if let Some((_, _, energy, protein, carbs, fat, fiber, sugars)) = nutrition {
+            if let Some(v) = energy {
+                day.energy_kcal += v * scale;
+            }
+            if let Some(v) = protein {
+                day.protein_g += v * scale;
+            }
+            if let Some(v) = carbs {
+                day.carbohydrates_g += v * scale;
+            }
+            if let Some(v) = fat {
+                day.fat_g += v * scale;
+            }
+            if let Some(v) = fiber {
+                day.fiber_g += v * scale;
+            }
+            if let Some(v) = sugars {
+                day.sugars_g += v * scale;
+            }
         }
     }
     Ok(by_day.into_values().collect())
