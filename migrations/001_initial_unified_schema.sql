@@ -155,8 +155,12 @@ CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- Merge alias (v9): retired sources redirect to keeper; event FKs stay put.
+    merged_into_id INTEGER REFERENCES products(id),
+    retired_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_products_merged_into ON products(merged_into_id);
 
 CREATE TABLE IF NOT EXISTS nutrients (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
