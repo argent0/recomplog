@@ -8,6 +8,7 @@ mod error;
 mod fit;
 mod hr_zones;
 mod load_type;
+mod macro_names;
 mod models;
 mod nutrition_units;
 mod phase;

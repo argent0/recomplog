@@ -1,10 +1,11 @@
 //! Nutrition domain handlers (nutlog parity under grouped CLI).
 
 use crate::cli::{
-    ConsumptionAction, NutrientAction, NutritionAction, ProductAction, ProductNutritionAction,
+    ConsumptionAction, MicronutrientAction, NutritionAction, ProductAction, ProductNutritionAction,
     PurchaseAction, StoreAction, TagModifyAction, TaxonomyAction,
 };
 use crate::db;
+use crate::macro_names::{is_macronutrient_name, macro_flag_hint};
 use crate::models::Success;
 use crate::utils::{
     parse_date_to_ymd, parse_rfc3339_instant_for_db, parse_rfc3339_to_utc, print_error_json,
@@ -13,6 +14,23 @@ use crate::utils::{
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use strsim::jaro_winkler;
+
+/// Macros stored as columns on `product_nutritions`.
+#[derive(Debug, Default, Clone)]
+struct ProductMacros {
+    energy_kcal: Option<f64>,
+    protein_g: Option<f64>,
+    carbohydrates_g: Option<f64>,
+    fat_g: Option<f64>,
+    fiber_g: Option<f64>,
+    sugars_g: Option<f64>,
+    saturated_fat_g: Option<f64>,
+    trans_fat_g: Option<f64>,
+    monounsaturated_fat_g: Option<f64>,
+    polyunsaturated_fat_g: Option<f64>,
+    cholesterol_mg: Option<f64>,
+    added_sugars_g: Option<f64>,
+}
 
 pub fn handle(
     action: NutritionAction,
@@ -26,7 +44,9 @@ pub fn handle(
         NutritionAction::Consumption { action } => {
             handle_consumption(action, db_override, json, quiet)
         }
-        NutritionAction::Nutrient { action } => handle_nutrient(action, db_override, json, quiet),
+        NutritionAction::Micronutrient { action } => {
+            handle_micronutrient(action, db_override, json, quiet)
+        }
         NutritionAction::ProductTag { action } => handle_taxonomy(
             "product_tags",
             "product_tag_associations",
@@ -153,18 +173,12 @@ fn ensure_tag(conn: &Connection, table: &str, name: &str) -> Result<i64> {
     )?)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn set_product_nutrition(
     conn: &Connection,
     id: i64,
     reference_quantity: f64,
     reference_unit: &str,
-    energy_kcal: Option<f64>,
-    protein_g: Option<f64>,
-    carbohydrates_g: Option<f64>,
-    fat_g: Option<f64>,
-    fiber_g: Option<f64>,
-    sugars_g: Option<f64>,
+    macros: &ProductMacros,
     micros: &[(String, f64, String)],
 ) -> Result<()> {
     let exists: Option<i64> = conn
@@ -175,10 +189,14 @@ fn set_product_nutrition(
     }
     let (reference_quantity, reference_unit) =
         crate::nutrition_units::validate_product_reference(reference_quantity, reference_unit)?;
+    reject_macro_names_as_micros(micros)?;
     conn.execute(
         "INSERT INTO product_nutritions
-         (product_id, reference_quantity, reference_unit, energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+         (product_id, reference_quantity, reference_unit,
+          energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g,
+          saturated_fat_g, trans_fat_g, monounsaturated_fat_g, polyunsaturated_fat_g,
+          cholesterol_mg, added_sugars_g)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
          ON CONFLICT(product_id) DO UPDATE SET
            reference_quantity=excluded.reference_quantity,
            reference_unit=excluded.reference_unit,
@@ -187,17 +205,29 @@ fn set_product_nutrition(
            carbohydrates_g=excluded.carbohydrates_g,
            fat_g=excluded.fat_g,
            fiber_g=excluded.fiber_g,
-           sugars_g=excluded.sugars_g",
+           sugars_g=excluded.sugars_g,
+           saturated_fat_g=excluded.saturated_fat_g,
+           trans_fat_g=excluded.trans_fat_g,
+           monounsaturated_fat_g=excluded.monounsaturated_fat_g,
+           polyunsaturated_fat_g=excluded.polyunsaturated_fat_g,
+           cholesterol_mg=excluded.cholesterol_mg,
+           added_sugars_g=excluded.added_sugars_g",
         params![
             id,
             reference_quantity,
             reference_unit,
-            energy_kcal,
-            protein_g,
-            carbohydrates_g,
-            fat_g,
-            fiber_g,
-            sugars_g
+            macros.energy_kcal,
+            macros.protein_g,
+            macros.carbohydrates_g,
+            macros.fat_g,
+            macros.fiber_g,
+            macros.sugars_g,
+            macros.saturated_fat_g,
+            macros.trans_fat_g,
+            macros.monounsaturated_fat_g,
+            macros.polyunsaturated_fat_g,
+            macros.cholesterol_mg,
+            macros.added_sugars_g,
         ],
     )?;
     // Replace micronutrients when provided
@@ -209,19 +239,31 @@ fn set_product_nutrition(
         let now = db::now_utc();
         for (name, amount, unit) in micros {
             conn.execute(
-                "INSERT OR IGNORE INTO nutrients (name, unit, created_at) VALUES (?1, ?2, ?3)",
+                "INSERT OR IGNORE INTO micronutrients (name, unit, created_at) VALUES (?1, ?2, ?3)",
                 params![name, unit, now],
             )?;
             let nid: i64 = conn.query_row(
-                "SELECT id FROM nutrients WHERE name = ?1 COLLATE NOCASE",
+                "SELECT id FROM micronutrients WHERE name = ?1 COLLATE NOCASE",
                 [name],
                 |r| r.get(0),
             )?;
             conn.execute(
-                "INSERT INTO product_micronutrients (product_id, nutrient_id, amount, unit)
+                "INSERT INTO product_micronutrients (product_id, micronutrient_id, amount, unit)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![id, nid, amount, unit],
             )?;
+        }
+    }
+    Ok(())
+}
+
+fn reject_macro_names_as_micros(micros: &[(String, f64, String)]) -> Result<()> {
+    for (name, _, _) in micros {
+        if let Some(flag) = macro_flag_hint(name) {
+            return Err(anyhow!(
+                "'{name}' is a macronutrient; use {flag} on product nutrition set \
+                 (not --micronutrient)"
+            ));
         }
     }
     Ok(())
@@ -241,6 +283,7 @@ fn parse_micronutrient_triples(flat: &[String]) -> Result<Vec<(String, f64, Stri
             .map_err(|_| anyhow!("invalid micronutrient amount '{}'", chunk[1]))?;
         out.push((chunk[0].clone(), amount, chunk[2].clone()));
     }
+    reject_macro_names_as_micros(&out)?;
     Ok(out)
 }
 
@@ -409,11 +452,17 @@ fn handle_product(
                     fat_g,
                     fiber_g,
                     sugars_g,
+                    saturated_fat_g,
+                    trans_fat_g,
+                    monounsaturated_fat_g,
+                    polyunsaturated_fat_g,
+                    cholesterol_mg,
+                    added_sugars_g,
                     micronutrient,
                     json_file,
                 },
         } => {
-            let (rq, ru, e, p, c, f, fi, su, micros) = if let Some(path) = json_file {
+            let (rq, ru, macros, micros) = if let Some(path) = json_file {
                 let raw = std::fs::read_to_string(&path)?;
                 let v: serde_json::Value = serde_json::from_str(&raw)?;
                 let ref_obj = &v["reference"];
@@ -427,49 +476,67 @@ fn handle_product(
                     .unwrap_or("g")
                     .to_string();
                 // Validated/normalized in set_product_nutrition.
-                let macros = &v["macros"];
+                let m = &v["macros"];
                 let mut micros = vec![];
                 if let Some(arr) = v["micronutrients"].as_array() {
-                    for m in arr {
+                    for mi in arr {
                         micros.push((
-                            m["name"].as_str().unwrap_or("").to_string(),
-                            m["amount"].as_f64().unwrap_or(0.0),
-                            m["unit"].as_str().unwrap_or("mg").to_string(),
+                            mi["name"].as_str().unwrap_or("").to_string(),
+                            mi["amount"].as_f64().unwrap_or(0.0),
+                            mi["unit"].as_str().unwrap_or("mg").to_string(),
                         ));
                     }
                 }
-                (
-                    rq,
-                    ru,
-                    macros["energy_kcal"].as_f64().or(v["energy_kcal"].as_f64()),
-                    macros["protein_g"].as_f64().or(v["protein_g"].as_f64()),
-                    macros["carbohydrates_g"]
+                let macros = ProductMacros {
+                    energy_kcal: m["energy_kcal"].as_f64().or(v["energy_kcal"].as_f64()),
+                    protein_g: m["protein_g"].as_f64().or(v["protein_g"].as_f64()),
+                    carbohydrates_g: m["carbohydrates_g"]
                         .as_f64()
                         .or(v["carbohydrates_g"].as_f64()),
-                    macros["fat_g"].as_f64().or(v["fat_g"].as_f64()),
-                    macros["fiber_g"].as_f64().or(v["fiber_g"].as_f64()),
-                    macros["sugars_g"].as_f64().or(v["sugars_g"].as_f64()),
-                    micros,
-                )
+                    fat_g: m["fat_g"].as_f64().or(v["fat_g"].as_f64()),
+                    fiber_g: m["fiber_g"].as_f64().or(v["fiber_g"].as_f64()),
+                    sugars_g: m["sugars_g"].as_f64().or(v["sugars_g"].as_f64()),
+                    saturated_fat_g: m["saturated_fat_g"]
+                        .as_f64()
+                        .or(v["saturated_fat_g"].as_f64()),
+                    trans_fat_g: m["trans_fat_g"].as_f64().or(v["trans_fat_g"].as_f64()),
+                    monounsaturated_fat_g: m["monounsaturated_fat_g"]
+                        .as_f64()
+                        .or(v["monounsaturated_fat_g"].as_f64()),
+                    polyunsaturated_fat_g: m["polyunsaturated_fat_g"]
+                        .as_f64()
+                        .or(v["polyunsaturated_fat_g"].as_f64()),
+                    cholesterol_mg: m["cholesterol_mg"]
+                        .as_f64()
+                        .or(v["cholesterol_mg"].as_f64()),
+                    added_sugars_g: m["added_sugars_g"]
+                        .as_f64()
+                        .or(v["added_sugars_g"].as_f64()),
+                };
+                (rq, ru, macros, micros)
             } else {
                 let rq = reference_quantity.ok_or_else(|| {
                     anyhow!("--reference-quantity required unless --json-file is used")
                 })?;
                 let ru = reference_unit.unwrap_or_else(|| "g".into());
                 let micros = parse_micronutrient_triples(&micronutrient)?;
-                (
-                    rq,
-                    ru,
+                let macros = ProductMacros {
                     energy_kcal,
                     protein_g,
                     carbohydrates_g,
                     fat_g,
                     fiber_g,
                     sugars_g,
-                    micros,
-                )
+                    saturated_fat_g,
+                    trans_fat_g,
+                    monounsaturated_fat_g,
+                    polyunsaturated_fat_g,
+                    cholesterol_mg,
+                    added_sugars_g,
+                };
+                (rq, ru, macros, micros)
             };
-            set_product_nutrition(&conn, id, rq, &ru, e, p, c, f, fi, su, &micros)?;
+            set_product_nutrition(&conn, id, rq, &ru, &macros, &micros)?;
             if json {
                 print_json(&Success::created(id, "nutrition", "product nutrition set"));
             } else {
@@ -493,19 +560,16 @@ fn handle_product(
             fiber_g,
             sugars_g,
         } => {
-            set_product_nutrition(
-                &conn,
-                id,
-                reference_quantity,
-                &reference_unit,
+            let macros = ProductMacros {
                 energy_kcal,
                 protein_g,
                 carbohydrates_g,
                 fat_g,
                 fiber_g,
                 sugars_g,
-                &[],
-            )?;
+                ..Default::default()
+            };
+            set_product_nutrition(&conn, id, reference_quantity, &reference_unit, &macros, &[])?;
             if json {
                 print_json(&Success::created(id, "nutrition", "product nutrition set"));
             } else {
@@ -579,7 +643,9 @@ fn show_product(conn: &Connection, id: i64, json: bool) -> Result<()> {
         .collect();
     let nutrition = conn
         .query_row(
-            "SELECT reference_quantity, reference_unit, energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g
+            "SELECT reference_quantity, reference_unit, energy_kcal, protein_g, carbohydrates_g,
+                    fat_g, fiber_g, sugars_g, saturated_fat_g, trans_fat_g, monounsaturated_fat_g,
+                    polyunsaturated_fat_g, cholesterol_mg, added_sugars_g
              FROM product_nutritions WHERE product_id = ?1",
             [id],
             |r| {
@@ -600,13 +666,19 @@ fn show_product(conn: &Connection, id: i64, json: bool) -> Result<()> {
                     "fat_g": r.get::<_, Option<f64>>(5)?,
                     "fiber_g": r.get::<_, Option<f64>>(6)?,
                     "sugars_g": r.get::<_, Option<f64>>(7)?,
+                    "saturated_fat_g": r.get::<_, Option<f64>>(8)?,
+                    "trans_fat_g": r.get::<_, Option<f64>>(9)?,
+                    "monounsaturated_fat_g": r.get::<_, Option<f64>>(10)?,
+                    "polyunsaturated_fat_g": r.get::<_, Option<f64>>(11)?,
+                    "cholesterol_mg": r.get::<_, Option<f64>>(12)?,
+                    "added_sugars_g": r.get::<_, Option<f64>>(13)?,
                 }))
             },
         )
         .optional()?;
     let mut mstmt = conn.prepare(
         "SELECT n.name, pm.amount, pm.unit FROM product_micronutrients pm
-         JOIN nutrients n ON n.id = pm.nutrient_id
+         JOIN micronutrients n ON n.id = pm.micronutrient_id
          WHERE pm.product_id = ?1",
     )?;
     let micros: Vec<_> = mstmt
@@ -654,6 +726,24 @@ fn show_product(conn: &Connection, id: i64, json: bool) -> Result<()> {
             }
             if let Some(v) = nu["sugars_g"].as_f64() {
                 println!("    sugars: {v} g");
+            }
+            if let Some(v) = nu["saturated_fat_g"].as_f64() {
+                println!("    saturated fat: {v} g");
+            }
+            if let Some(v) = nu["trans_fat_g"].as_f64() {
+                println!("    trans fat: {v} g");
+            }
+            if let Some(v) = nu["monounsaturated_fat_g"].as_f64() {
+                println!("    monounsaturated fat: {v} g");
+            }
+            if let Some(v) = nu["polyunsaturated_fat_g"].as_f64() {
+                println!("    polyunsaturated fat: {v} g");
+            }
+            if let Some(v) = nu["cholesterol_mg"].as_f64() {
+                println!("    cholesterol: {v} mg");
+            }
+            if let Some(v) = nu["added_sugars_g"].as_f64() {
+                println!("    added sugars: {v} g");
             }
             println!(
                 "    reference: {} {}",
@@ -955,17 +1045,17 @@ fn handle_consumption(
     Ok(())
 }
 
-fn handle_nutrient(
-    action: NutrientAction,
+fn handle_micronutrient(
+    action: MicronutrientAction,
     db_override: Option<&str>,
     json: bool,
     quiet: bool,
 ) -> Result<()> {
     let conn = db::open_db(db_override)?;
     match action {
-        NutrientAction::List => {
+        MicronutrientAction::List => {
             let mut stmt = conn.prepare(
-                "SELECT id, name, unit, recommended_intake FROM nutrients ORDER BY name",
+                "SELECT id, name, unit, recommended_intake FROM micronutrients ORDER BY name",
             )?;
             let rows: Vec<_> = stmt
                 .query_map([], |r| {
@@ -986,14 +1076,21 @@ fn handle_nutrient(
                 }
             }
         }
-        NutrientAction::Create {
+        MicronutrientAction::Create {
             name,
             unit,
             recommended_intake,
         } => {
+            if is_macronutrient_name(&name) {
+                let flag = macro_flag_hint(&name).unwrap_or("product nutrition set macro flags");
+                return Err(anyhow!(
+                    "'{name}' is a macronutrient; use {flag} on product nutrition set \
+                     (not micronutrient create)"
+                ));
+            }
             let now = db::now_utc();
             conn.execute(
-                "INSERT INTO nutrients (name, unit, recommended_intake, created_at) VALUES (?1,?2,?3,?4)",
+                "INSERT INTO micronutrients (name, unit, recommended_intake, created_at) VALUES (?1,?2,?3,?4)",
                 params![name, unit, recommended_intake, now],
             )?;
             let id = conn.last_insert_rowid();
@@ -1001,16 +1098,16 @@ fn handle_nutrient(
                 print_json(&Success::created(
                     id,
                     name.clone(),
-                    format!("nutrient: {name}"),
+                    format!("micronutrient: {name}"),
                 ));
             } else {
-                quiet_print(quiet, format!("Created nutrient {id}: {name}"));
+                quiet_print(quiet, format!("Created micronutrient {id}: {name}"));
             }
         }
-        NutrientAction::Show { id } => {
+        MicronutrientAction::Show { id } => {
             let row = conn
                 .query_row(
-                    "SELECT id, name, unit, recommended_intake FROM nutrients WHERE id=?1",
+                    "SELECT id, name, unit, recommended_intake FROM micronutrients WHERE id=?1",
                     [id],
                     |r| {
                         Ok(serde_json::json!({
@@ -1030,11 +1127,11 @@ fn handle_nutrient(
                         println!("{v}");
                     }
                 }
-                None => return Err(anyhow!("nutrient not found")),
+                None => return Err(anyhow!("micronutrient not found")),
             }
         }
-        NutrientAction::Search { query } => {
-            let mut stmt = conn.prepare("SELECT id, name FROM nutrients")?;
+        MicronutrientAction::Search { query } => {
+            let mut stmt = conn.prepare("SELECT id, name FROM micronutrients")?;
             let cands: Vec<_> = stmt
                 .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
                 .filter_map(|r| r.ok())
@@ -1052,32 +1149,32 @@ fn handle_nutrient(
                 }
             }
         }
-        NutrientAction::Delete { id, force } => {
+        MicronutrientAction::Delete { id, force } => {
             if !force {
                 let refs: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM product_micronutrients WHERE nutrient_id=?1",
+                    "SELECT COUNT(*) FROM product_micronutrients WHERE micronutrient_id=?1",
                     [id],
                     |r| r.get(0),
                 )?;
                 if refs > 0 {
                     return Err(anyhow!(
-                        "nutrient referenced by products; use --force to delete"
+                        "micronutrient referenced by products; use --force to delete"
                     ));
                 }
             } else {
                 conn.execute(
-                    "DELETE FROM product_micronutrients WHERE nutrient_id=?1",
+                    "DELETE FROM product_micronutrients WHERE micronutrient_id=?1",
                     [id],
                 )?;
             }
-            let n = conn.execute("DELETE FROM nutrients WHERE id=?1", [id])?;
+            let n = conn.execute("DELETE FROM micronutrients WHERE id=?1", [id])?;
             if n == 0 {
-                return Err(anyhow!("nutrient not found"));
+                return Err(anyhow!("micronutrient not found"));
             }
             if json {
                 print_json(&Success::deleted(id));
             } else {
-                quiet_print(quiet, format!("Deleted nutrient {id}"));
+                quiet_print(quiet, format!("Deleted micronutrient {id}"));
             }
         }
     }

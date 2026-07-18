@@ -263,11 +263,23 @@ pub struct MacroTotals {
     pub fat_g: Option<f64>,
     pub fiber_g: Option<f64>,
     pub sugars_g: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saturated_fat_g: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trans_fat_g: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monounsaturated_fat_g: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub polyunsaturated_fat_g: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cholesterol_mg: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added_sugars_g: Option<f64>,
 }
 
 #[derive(Serialize, Debug)]
 pub struct MicroTotal {
-    pub nutrient_id: i64,
+    pub micronutrient_id: i64,
     pub name: String,
     pub unit: String,
     pub total_amount: f64,

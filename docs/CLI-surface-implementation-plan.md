@@ -84,7 +84,7 @@ Deliverables:
   - `nutrition set` (full micronutrient support)
 - `nutrition purchase` (with price in cents, store)
 - `nutrition consumption`
-- `nutrition nutrient` (CRUD + search)
+- `nutrition micronutrient` (CRUD + search; `nutrient` alias)
 - Tags (product-tag, store-tag), stores
 - Proper fuzzy search (token-aware Jaro-Winkler from nutlog)
 

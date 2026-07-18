@@ -464,6 +464,12 @@ struct NutritionConsumptionRow {
     fat_g: Option<f64>,
     fiber_g: Option<f64>,
     sugars_g: Option<f64>,
+    saturated_fat_g: Option<f64>,
+    trans_fat_g: Option<f64>,
+    monounsaturated_fat_g: Option<f64>,
+    polyunsaturated_fat_g: Option<f64>,
+    cholesterol_mg: Option<f64>,
+    added_sugars_g: Option<f64>,
 }
 
 fn resolve_nutrition_report_period(args: &NutritionPeriodArgs) -> Result<ResolvedNutritionPeriod> {
@@ -526,6 +532,8 @@ fn fetch_nutrition_consumptions(
     let mut sql = String::from(
         "SELECT c.quantity, c.unit, pn.reference_quantity, pn.reference_unit,
                 pn.energy_kcal, pn.protein_g, pn.carbohydrates_g, pn.fat_g, pn.fiber_g, pn.sugars_g,
+                pn.saturated_fat_g, pn.trans_fat_g, pn.monounsaturated_fat_g, pn.polyunsaturated_fat_g,
+                pn.cholesterol_mg, pn.added_sugars_g,
                 c.product_id, c.consumed_at
          FROM consumptions c
          JOIN product_nutritions pn ON pn.product_id = c.product_id
@@ -562,34 +570,48 @@ fn fetch_nutrition_consumptions(
                 fat_g: r.get(7)?,
                 fiber_g: r.get(8)?,
                 sugars_g: r.get(9)?,
-                product_id: r.get(10)?,
-                consumed_at: r.get(11)?,
+                saturated_fat_g: r.get(10)?,
+                trans_fat_g: r.get(11)?,
+                monounsaturated_fat_g: r.get(12)?,
+                polyunsaturated_fat_g: r.get(13)?,
+                cholesterol_mg: r.get(14)?,
+                added_sugars_g: r.get(15)?,
+                product_id: r.get(16)?,
+                consumed_at: r.get(17)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
+fn add_scaled(slot: &mut Option<f64>, value: Option<f64>, scale: f64) {
+    if let Some(v) = value {
+        *slot = Some(slot.unwrap_or(0.0) + v * scale);
+    }
+}
+
 fn add_row_macros(totals: &mut MacroTotals, row: &NutritionConsumptionRow) {
     let scale = row.scale;
-    if let Some(v) = row.energy_kcal {
-        totals.energy_kcal = Some(totals.energy_kcal.unwrap_or(0.0) + v * scale);
-    }
-    if let Some(v) = row.protein_g {
-        totals.protein_g = Some(totals.protein_g.unwrap_or(0.0) + v * scale);
-    }
-    if let Some(v) = row.carbohydrates_g {
-        totals.carbohydrates_g = Some(totals.carbohydrates_g.unwrap_or(0.0) + v * scale);
-    }
-    if let Some(v) = row.fat_g {
-        totals.fat_g = Some(totals.fat_g.unwrap_or(0.0) + v * scale);
-    }
-    if let Some(v) = row.fiber_g {
-        totals.fiber_g = Some(totals.fiber_g.unwrap_or(0.0) + v * scale);
-    }
-    if let Some(v) = row.sugars_g {
-        totals.sugars_g = Some(totals.sugars_g.unwrap_or(0.0) + v * scale);
-    }
+    add_scaled(&mut totals.energy_kcal, row.energy_kcal, scale);
+    add_scaled(&mut totals.protein_g, row.protein_g, scale);
+    add_scaled(&mut totals.carbohydrates_g, row.carbohydrates_g, scale);
+    add_scaled(&mut totals.fat_g, row.fat_g, scale);
+    add_scaled(&mut totals.fiber_g, row.fiber_g, scale);
+    add_scaled(&mut totals.sugars_g, row.sugars_g, scale);
+    add_scaled(&mut totals.saturated_fat_g, row.saturated_fat_g, scale);
+    add_scaled(&mut totals.trans_fat_g, row.trans_fat_g, scale);
+    add_scaled(
+        &mut totals.monounsaturated_fat_g,
+        row.monounsaturated_fat_g,
+        scale,
+    );
+    add_scaled(
+        &mut totals.polyunsaturated_fat_g,
+        row.polyunsaturated_fat_g,
+        scale,
+    );
+    add_scaled(&mut totals.cholesterol_mg, row.cholesterol_mg, scale);
+    add_scaled(&mut totals.added_sugars_g, row.added_sugars_g, scale);
 }
 
 fn aggregate_micronutrients(
@@ -599,9 +621,9 @@ fn aggregate_micronutrients(
     let mut micro_map: HashMap<i64, (String, String, f64)> = HashMap::new();
     for row in rows {
         let mut mstmt = conn.prepare(
-            "SELECT pm.nutrient_id, pm.amount, pm.unit, n.name
+            "SELECT pm.micronutrient_id, pm.amount, pm.unit, n.name
              FROM product_micronutrients pm
-             JOIN nutrients n ON n.id = pm.nutrient_id
+             JOIN micronutrients n ON n.id = pm.micronutrient_id
              WHERE pm.product_id = ?",
         )?;
         let micros = mstmt
@@ -622,7 +644,7 @@ fn aggregate_micronutrients(
     let mut out: Vec<MicroTotal> = micro_map
         .into_iter()
         .map(|(nid, (nm, un, tot))| MicroTotal {
-            nutrient_id: nid,
+            micronutrient_id: nid,
             name: nm,
             unit: un,
             total_amount: tot,
@@ -657,6 +679,30 @@ fn apply_value_filter(totals: MacroTotals, value: NutritionReportValue) -> Macro
         },
         NutritionReportValue::Sugars => MacroTotals {
             sugars_g: totals.sugars_g,
+            ..Default::default()
+        },
+        NutritionReportValue::SaturatedFat => MacroTotals {
+            saturated_fat_g: totals.saturated_fat_g,
+            ..Default::default()
+        },
+        NutritionReportValue::TransFat => MacroTotals {
+            trans_fat_g: totals.trans_fat_g,
+            ..Default::default()
+        },
+        NutritionReportValue::MonounsaturatedFat => MacroTotals {
+            monounsaturated_fat_g: totals.monounsaturated_fat_g,
+            ..Default::default()
+        },
+        NutritionReportValue::PolyunsaturatedFat => MacroTotals {
+            polyunsaturated_fat_g: totals.polyunsaturated_fat_g,
+            ..Default::default()
+        },
+        NutritionReportValue::Cholesterol => MacroTotals {
+            cholesterol_mg: totals.cholesterol_mg,
+            ..Default::default()
+        },
+        NutritionReportValue::AddedSugars => MacroTotals {
+            added_sugars_g: totals.added_sugars_g,
             ..Default::default()
         },
     }
@@ -729,6 +775,24 @@ fn print_macro_totals_human(totals: &MacroTotals, indent: &str) {
     }
     if let Some(v) = totals.sugars_g {
         println!("{indent}sugars: {v:.1} g");
+    }
+    if let Some(v) = totals.saturated_fat_g {
+        println!("{indent}saturated fat: {v:.1} g");
+    }
+    if let Some(v) = totals.trans_fat_g {
+        println!("{indent}trans fat: {v:.1} g");
+    }
+    if let Some(v) = totals.monounsaturated_fat_g {
+        println!("{indent}monounsaturated fat: {v:.1} g");
+    }
+    if let Some(v) = totals.polyunsaturated_fat_g {
+        println!("{indent}polyunsaturated fat: {v:.1} g");
+    }
+    if let Some(v) = totals.cholesterol_mg {
+        println!("{indent}cholesterol: {v:.1} mg");
+    }
+    if let Some(v) = totals.added_sugars_g {
+        println!("{indent}added sugars: {v:.1} g");
     }
 }
 
@@ -817,6 +881,12 @@ fn nutrition_list(
             NutritionReportValue::Fat => "Fat (g)",
             NutritionReportValue::Fiber => "Fiber (g)",
             NutritionReportValue::Sugars => "Sugars (g)",
+            NutritionReportValue::SaturatedFat => "Sat fat (g)",
+            NutritionReportValue::TransFat => "Trans fat (g)",
+            NutritionReportValue::MonounsaturatedFat => "MUFA (g)",
+            NutritionReportValue::PolyunsaturatedFat => "PUFA (g)",
+            NutritionReportValue::Cholesterol => "Cholesterol (mg)",
+            NutritionReportValue::AddedSugars => "Added sugars (g)",
             NutritionReportValue::Macronutrients => "Value",
         };
         let table_rows: Vec<Vec<String>> = report
@@ -830,6 +900,12 @@ fn nutrition_list(
                     NutritionReportValue::Fat => day.totals.fat_g,
                     NutritionReportValue::Fiber => day.totals.fiber_g,
                     NutritionReportValue::Sugars => day.totals.sugars_g,
+                    NutritionReportValue::SaturatedFat => day.totals.saturated_fat_g,
+                    NutritionReportValue::TransFat => day.totals.trans_fat_g,
+                    NutritionReportValue::MonounsaturatedFat => day.totals.monounsaturated_fat_g,
+                    NutritionReportValue::PolyunsaturatedFat => day.totals.polyunsaturated_fat_g,
+                    NutritionReportValue::Cholesterol => day.totals.cholesterol_mg,
+                    NutritionReportValue::AddedSugars => day.totals.added_sugars_g,
                     NutritionReportValue::Macronutrients => None,
                 };
                 vec![

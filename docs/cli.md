@@ -7,7 +7,8 @@ This document describes the unified command structure.
 - Group related concerns so the top level is not overwhelming.
 - `workout | exercise | set` live together under one parent.
 - `measurement | sleep` live under `body`.
-- `product | purchase | consumption | nutrient` live under `nutrition`.
+- `product | purchase | consumption | micronutrient` live under `nutrition`.
+  (`nutrient` remains a visible alias of `micronutrient`.)
 - `report` stays top-level for easy cross-domain use (as requested).
 
 ## Recommended Usage

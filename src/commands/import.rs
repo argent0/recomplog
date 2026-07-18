@@ -468,9 +468,11 @@ fn handle_legacy_import(
 }
 
 fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value> {
+    use crate::macro_names::{extended_macro_column, is_macronutrient_name};
+
     let tx = dst.transaction()?;
     let mut products = 0i64;
-    let mut nutrients = 0i64;
+    let mut micronutrients = 0i64;
     let mut purchases = 0i64;
     let mut consumptions = 0i64;
     let mut tags = 0i64;
@@ -492,6 +494,7 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             )? as i64;
         }
     }
+    // Legacy nutlog uses `nutrients`; skip macronutrient catalog rows.
     {
         let mut stmt =
             src.prepare("SELECT id, name, unit, recommended_intake, created_at FROM nutrients")?;
@@ -505,8 +508,11 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             ))
         })? {
             let (id, name, unit, rec, ca) = row?;
-            nutrients += tx.execute(
-                "INSERT OR IGNORE INTO nutrients (id, name, unit, recommended_intake, created_at) VALUES (?1,?2,?3,?4,?5)",
+            if is_macronutrient_name(&name) {
+                continue;
+            }
+            micronutrients += tx.execute(
+                "INSERT OR IGNORE INTO micronutrients (id, name, unit, recommended_intake, created_at) VALUES (?1,?2,?3,?4,?5)",
                 params![id, name, unit, rec, ca],
             )? as i64;
         }
@@ -536,7 +542,7 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             );
         }
     }
-    // product_nutritions
+    // product_nutritions (primary macros from source columns)
     if let Ok(mut stmt) = src.prepare(
         "SELECT product_id, reference_quantity, reference_unit, energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g FROM product_nutritions",
     ) {
@@ -650,7 +656,18 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
         }
     }
 
-    // micronutrients
+    // Micronutrients: promote extended macros to columns; keep true micros.
+    // Resolve nutrient names from source for classification.
+    let nutrient_names: std::collections::HashMap<i64, String> = {
+        let mut map = std::collections::HashMap::new();
+        if let Ok(mut stmt) = src.prepare("SELECT id, name FROM nutrients") {
+            for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
+                let (id, name) = row?;
+                map.insert(id, name);
+            }
+        }
+        map
+    };
     if let Ok(mut stmt) =
         src.prepare("SELECT product_id, nutrient_id, amount, unit FROM product_micronutrients")
     {
@@ -663,8 +680,39 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             ))
         })? {
             let (pid, nid, amt, unit) = row?;
+            let Some(name) = nutrient_names.get(&nid) else {
+                continue;
+            };
+            if let Some(col) = extended_macro_column(name) {
+                // Ensure product_nutritions row exists, then set column if NULL.
+                let has: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM product_nutritions WHERE product_id = ?1",
+                    [pid],
+                    |r| r.get(0),
+                )?;
+                if has == 0 {
+                    let _ = tx.execute(
+                        "INSERT INTO product_nutritions
+                         (product_id, reference_quantity, reference_unit)
+                         VALUES (?1, 100, 'g')",
+                        params![pid],
+                    );
+                }
+                let _ = tx.execute(
+                    &format!(
+                        "UPDATE product_nutritions SET {col} = ?1
+                         WHERE product_id = ?2 AND {col} IS NULL"
+                    ),
+                    params![amt, pid],
+                );
+                continue;
+            }
+            if is_macronutrient_name(name) {
+                // Primary macros already on product_nutritions columns.
+                continue;
+            }
             let _ = tx.execute(
-                "INSERT OR IGNORE INTO product_micronutrients (product_id, nutrient_id, amount, unit) VALUES (?1,?2,?3,?4)",
+                "INSERT OR IGNORE INTO product_micronutrients (product_id, micronutrient_id, amount, unit) VALUES (?1,?2,?3,?4)",
                 params![pid, nid, amt, unit],
             );
         }
@@ -675,7 +723,7 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
     db::normalize_nutrition_units_public(dst)?;
     Ok(serde_json::json!({
         "products": products,
-        "nutrients": nutrients,
+        "micronutrients": micronutrients,
         "tags": tags,
         "purchases": purchases,
         "consumptions": consumptions,

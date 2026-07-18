@@ -59,7 +59,7 @@ pub enum Commands {
         action: BodyAction,
     },
 
-    /// Nutrition logging: products, purchases, consumption, nutrients.
+    /// Nutrition logging: products, purchases, consumption, micronutrients.
     ///
     ///   recomplog nutrition product create "Oats 500g" --tags bulk,breakfast
     ///   recomplog nutrition product list --json
@@ -892,9 +892,12 @@ pub enum NutritionAction {
         #[command(subcommand)]
         action: ConsumptionAction,
     },
-    Nutrient {
+    /// Micronutrient catalog (vitamins, minerals, bioactives — not macros).
+    /// Macros are set on products via `nutrition product nutrition set`.
+    #[command(visible_alias = "nutrient")]
+    Micronutrient {
         #[command(subcommand)]
-        action: NutrientAction,
+        action: MicronutrientAction,
     },
     #[command(name = "product-tag")]
     ProductTag {
@@ -1014,7 +1017,19 @@ pub enum ProductNutritionAction {
         fiber_g: Option<f64>,
         #[arg(long)]
         sugars_g: Option<f64>,
-        /// Repeatable: --micronutrient NAME AMOUNT UNIT
+        #[arg(long)]
+        saturated_fat_g: Option<f64>,
+        #[arg(long)]
+        trans_fat_g: Option<f64>,
+        #[arg(long)]
+        monounsaturated_fat_g: Option<f64>,
+        #[arg(long)]
+        polyunsaturated_fat_g: Option<f64>,
+        #[arg(long)]
+        cholesterol_mg: Option<f64>,
+        #[arg(long)]
+        added_sugars_g: Option<f64>,
+        /// Repeatable: --micronutrient NAME AMOUNT UNIT (vitamins/minerals only; not macros)
         #[arg(long, value_names = ["NAME", "AMOUNT", "UNIT"], num_args = 3, action = clap::ArgAction::Append)]
         micronutrient: Vec<String>,
         #[arg(long = "json-file")]
@@ -1110,7 +1125,7 @@ pub enum ConsumptionAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub enum NutrientAction {
+pub enum MicronutrientAction {
     List,
     Create {
         name: String,
@@ -1268,7 +1283,7 @@ pub struct NutritionPeriodArgs {
 /// Which macro nutrient(s) to show in per-day nutrition list output.
 #[derive(Clone, Copy, Debug, ValueEnum, Eq, PartialEq)]
 pub enum NutritionReportValue {
-    /// All tracked macros (energy, protein, carbohydrates, fat, fiber, sugars).
+    /// All tracked macros (primary + extended when present).
     Macronutrients,
     /// Energy only (kcal).
     Calories,
@@ -1282,6 +1297,18 @@ pub enum NutritionReportValue {
     Fiber,
     /// Sugars only (g).
     Sugars,
+    /// Saturated fat only (g).
+    SaturatedFat,
+    /// Trans fat only (g).
+    TransFat,
+    /// Monounsaturated fat only (g).
+    MonounsaturatedFat,
+    /// Polyunsaturated fat only (g).
+    PolyunsaturatedFat,
+    /// Cholesterol only (mg).
+    Cholesterol,
+    /// Added sugars only (g).
+    AddedSugars,
 }
 
 impl NutritionReportValue {
@@ -1294,6 +1321,12 @@ impl NutritionReportValue {
             Self::Fat => "fat",
             Self::Fiber => "fiber",
             Self::Sugars => "sugars",
+            Self::SaturatedFat => "saturated-fat",
+            Self::TransFat => "trans-fat",
+            Self::MonounsaturatedFat => "monounsaturated-fat",
+            Self::PolyunsaturatedFat => "polyunsaturated-fat",
+            Self::Cholesterol => "cholesterol",
+            Self::AddedSugars => "added-sugars",
         }
     }
 }

@@ -61,7 +61,7 @@ pub fn open_db_readonly_for_completion(override_path: Option<&str>) -> Option<Co
 }
 
 /// Current schema version. Bump when adding a new migration block.
-const CURRENT_VERSION: i32 = 5;
+const CURRENT_VERSION: i32 = 6;
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i32 = conn
@@ -97,6 +97,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         normalize_instants_to_rfc3339(conn)?;
         conn.execute("PRAGMA user_version = 5", [])?;
     }
+    if current < 6 {
+        apply_v6_split_micro_macro_nutrients(conn)?;
+        conn.execute("PRAGMA user_version = 6", [])?;
+    }
 
     Ok(())
 }
@@ -127,7 +131,8 @@ fn normalize_instants_to_rfc3339(conn: &Connection) -> Result<()> {
         ("user_profile", "id", "updated_at"),
         ("products", "id", "created_at"),
         ("products", "id", "updated_at"),
-        ("nutrients", "id", "created_at"),
+        ("nutrients", "id", "created_at"), // pre-v6 catalog name
+        ("micronutrients", "id", "created_at"),
         ("product_tags", "id", "created_at"),
         ("store_tags", "id", "created_at"),
         ("stores", "id", "created_at"),
@@ -286,6 +291,243 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        [table],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// v6: split micro vs macro nutrients.
+///
+/// - Extended macros (sat fat, cholesterol, …) move from product_micronutrients
+///   into columns on product_nutritions.
+/// - Macro rows leave the nutrient catalog.
+/// - Catalog table `nutrients` → `micronutrients`; junction column
+///   `nutrient_id` → `micronutrient_id`.
+fn apply_v6_split_micro_macro_nutrients(conn: &Connection) -> Result<()> {
+    use crate::macro_names::{
+        extended_macro_column, is_macronutrient_name, EXTENDED_MACRO_COLUMNS, MACRO_CATALOG_NAMES,
+    };
+
+    // 1. Extended macro columns on product_nutritions
+    for col in EXTENDED_MACRO_COLUMNS {
+        if !column_exists(conn, "product_nutritions", col)? {
+            conn.execute(
+                &format!("ALTER TABLE product_nutritions ADD COLUMN {col} REAL"),
+                [],
+            )?;
+        }
+    }
+
+    // Already on the new schema (e.g. re-open after partial manual work).
+    if table_exists(conn, "micronutrients")? && !table_exists(conn, "nutrients")? {
+        // Ensure junction uses micronutrient_id if a leftover nutrient_id form exists.
+        if table_exists(conn, "product_micronutrients")?
+            && column_exists(conn, "product_micronutrients", "nutrient_id")?
+            && !column_exists(conn, "product_micronutrients", "micronutrient_id")?
+        {
+            rebuild_product_micronutrients(conn, "nutrient_id")?;
+        }
+        return Ok(());
+    }
+
+    if !table_exists(conn, "nutrients")? {
+        // Brand-new path that already used micronutrients-only schema.
+        if !table_exists(conn, "micronutrients")? {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS micronutrients (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    unit TEXT NOT NULL,
+                    recommended_intake REAL,
+                    created_at TEXT NOT NULL
+                );
+                "#,
+            )?;
+        }
+        if table_exists(conn, "product_micronutrients")?
+            && column_exists(conn, "product_micronutrients", "nutrient_id")?
+        {
+            rebuild_product_micronutrients(conn, "nutrient_id")?;
+        }
+        return Ok(());
+    }
+
+    // 2. Promote extended macro amounts into product_nutritions columns.
+    //    Prefer the maximum amount if multiple catalog rows match (rare).
+    let pairs: Vec<(i64, String, f64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT pm.product_id, n.name, pm.amount
+             FROM product_micronutrients pm
+             JOIN nutrients n ON n.id = pm.nutrient_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        out
+    };
+
+    // product_id → column → amount
+    let mut promotions: std::collections::HashMap<(i64, &'static str), f64> =
+        std::collections::HashMap::new();
+    for (pid, name, amount) in pairs {
+        if let Some(col) = extended_macro_column(&name) {
+            let entry = promotions.entry((pid, col)).or_insert(amount);
+            if amount > *entry {
+                *entry = amount;
+            }
+        }
+    }
+
+    for ((pid, col), amount) in promotions {
+        // Only fill when the column is currently NULL.
+        conn.execute(
+            &format!(
+                "UPDATE product_nutritions SET {col} = ?1
+                 WHERE product_id = ?2 AND {col} IS NULL"
+            ),
+            rusqlite::params![amount, pid],
+        )?;
+        // If product has micros but no product_nutritions row yet, create one
+        // with defaults so the promoted amount is not lost.
+        let has_row: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM product_nutritions WHERE product_id = ?1",
+            [pid],
+            |r| r.get(0),
+        )?;
+        if has_row == 0 {
+            conn.execute(
+                &format!(
+                    "INSERT INTO product_nutritions
+                     (product_id, reference_quantity, reference_unit, {col})
+                     VALUES (?1, 100, 'g', ?2)"
+                ),
+                rusqlite::params![pid, amount],
+            )?;
+        }
+    }
+
+    // 3. Delete product_micronutrients rows whose nutrient is a macro.
+    {
+        let macro_ids: Vec<i64> = {
+            let mut stmt = conn.prepare("SELECT id, name FROM nutrients")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            let mut ids = Vec::new();
+            for row in rows {
+                let (id, name) = row?;
+                if is_macronutrient_name(&name) {
+                    ids.push(id);
+                }
+            }
+            ids
+        };
+        for id in macro_ids {
+            conn.execute(
+                "DELETE FROM product_micronutrients WHERE nutrient_id = ?1",
+                [id],
+            )?;
+        }
+    }
+
+    // 4. Delete macro catalog rows (primary stubs + extended).
+    for name in MACRO_CATALOG_NAMES {
+        conn.execute(
+            "DELETE FROM nutrients WHERE name = ?1 COLLATE NOCASE",
+            [*name],
+        )?;
+    }
+    // Catch any other case variants (e.g. lowercase cholesterol).
+    {
+        let leftover: Vec<i64> = {
+            let mut stmt = conn.prepare("SELECT id, name FROM nutrients")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            let mut ids = Vec::new();
+            for row in rows {
+                let (id, name) = row?;
+                if is_macronutrient_name(&name) {
+                    ids.push(id);
+                }
+            }
+            ids
+        };
+        for id in leftover {
+            conn.execute("DELETE FROM nutrients WHERE id = ?1", [id])?;
+        }
+    }
+
+    // 5. Rename nutrients → micronutrients
+    conn.execute("ALTER TABLE nutrients RENAME TO micronutrients", [])?;
+
+    // 6. Rebuild junction with micronutrient_id FK
+    rebuild_product_micronutrients(conn, "nutrient_id")?;
+
+    Ok(())
+}
+
+/// Rebuild `product_micronutrients` so the nutrient FK column is `micronutrient_id`
+/// referencing `micronutrients(id)`.
+fn rebuild_product_micronutrients(conn: &Connection, old_id_col: &str) -> Result<()> {
+    if !table_exists(conn, "product_micronutrients")? {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE product_micronutrients (
+                product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+                micronutrient_id INTEGER NOT NULL REFERENCES micronutrients(id),
+                amount REAL NOT NULL,
+                unit TEXT NOT NULL,
+                PRIMARY KEY (product_id, micronutrient_id)
+            );
+            "#,
+        )?;
+        return Ok(());
+    }
+
+    // Already on new shape.
+    if column_exists(conn, "product_micronutrients", "micronutrient_id")?
+        && !column_exists(conn, "product_micronutrients", "nutrient_id")?
+    {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        r#"
+        CREATE TABLE product_micronutrients_new (
+            product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+            micronutrient_id INTEGER NOT NULL REFERENCES micronutrients(id),
+            amount REAL NOT NULL,
+            unit TEXT NOT NULL,
+            PRIMARY KEY (product_id, micronutrient_id)
+        );
+        "#,
+    )?;
+    conn.execute(
+        &format!(
+            "INSERT OR IGNORE INTO product_micronutrients_new
+             (product_id, micronutrient_id, amount, unit)
+             SELECT product_id, {old_id_col}, amount, unit FROM product_micronutrients"
+        ),
+        [],
+    )?;
+    conn.execute("DROP TABLE product_micronutrients", [])?;
+    conn.execute(
+        "ALTER TABLE product_micronutrients_new RENAME TO product_micronutrients",
+        [],
+    )?;
+    Ok(())
 }
 
 fn apply_v2_cardio_json(conn: &Connection) -> Result<()> {

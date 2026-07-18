@@ -6,7 +6,7 @@ Single-user, local-first, and agent-friendly. One SQLite database for:
 
 - **Training** — workouts, exercises, sets (strength, cluster, cardio), FIT import
 - **Body** — measurements, sleep, profile (height / DOB / HR zones)
-- **Nutrition** — products, purchases, consumption, stores, nutrients
+- **Nutrition** — products, purchases, consumption, stores, micronutrients
 - **Reports** — body/sleep/nutrition summaries, combined JSON, self-contained HTML dashboard
 
 Successor to `repslog`, `bodylog`, `nutlog`, and `bodydashboard`.
@@ -123,7 +123,7 @@ recomplog config generate
 ```
 recomplog workout    # sessions, exercises, sets, stats
 recomplog body       # measurement, sleep, profile
-recomplog nutrition  # product, purchase, consumption, nutrient, store, tags
+recomplog nutrition  # product, purchase, consumption, micronutrient, store, tags
 recomplog report     # brief, nutrition, body, sleep, summary, html
 recomplog import     # fit | legacy
 recomplog config     # show | generate | path

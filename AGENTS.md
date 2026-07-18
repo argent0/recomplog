@@ -17,7 +17,7 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
 2. Use the standard command shape: `recomplog <group> <entity> <action> ...`
    - Training: `workout create|list|show|delete`, `workout exercise ...`, `workout set add|add-cardio|delete`
    - Body: `body measurement ...`, `body sleep ...`, `body profile ...`
-   - Nutrition: `nutrition product|purchase|consumption|nutrient ...`
+   - Nutrition: `nutrition product|purchase|consumption|micronutrient ...`
    - Cross-cutting: `report` (including `report brief`), `import`, `config`, `db` (`backup`, `migrate`, `check` / `check missing`)
 3. **Always** support `--json` for data-returning commands.
 4. Run `cargo fmt && cargo clippy -- -D warnings && cargo test` before finishing changes.

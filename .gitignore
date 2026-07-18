@@ -32,6 +32,8 @@ bodylog.db
 nutlog.db
 repslog.db
 
+prompt.md
+
 # Temporary / reports during development
 reports/
 *.tmp

@@ -11,7 +11,7 @@
 | nutlog product-tag * | `nutrition product-tag *` | done |
 | nutlog store * | `nutrition store *` | done |
 | nutlog store-tag * | `nutrition store-tag *` | done |
-| nutlog purchase/consumption/nutrient | `nutrition purchase/consumption/nutrient` | done |
+| nutlog purchase/consumption/nutrient | `nutrition purchase/consumption/micronutrient` (`nutrient` alias) | done |
 | nutlog report | `report nutrition *` | done |
 | repslog workout * | `workout *` | done |
 | repslog exercise * | `workout exercise *` | done |
