@@ -1162,15 +1162,44 @@ fn tag_remove_product(
 }
 
 fn show_product(conn: &Connection, id: i64, json: bool) -> Result<()> {
-    let name: Option<String> = conn
-        .query_row("SELECT name FROM products WHERE id=?", [id], |r| r.get(0))
+    let row: Option<(String, Option<i64>, Option<String>)> = conn
+        .query_row(
+            "SELECT name, merged_into_id, retired_at FROM products WHERE id=?",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .optional()?;
-    let Some(n) = name else {
+    let Some((n, merged_into_id, retired_at)) = row else {
         if json {
             print_error_json("product not found");
         }
         return Err(anyhow!("product not found"));
     };
+    let effective_id = crate::product_resolve::resolve_effective_product_id(conn, id)?;
+    let effective_name: String = if effective_id == id {
+        n.clone()
+    } else {
+        conn.query_row(
+            "SELECT name FROM products WHERE id = ?1",
+            [effective_id],
+            |r| r.get(0),
+        )?
+    };
+    let mut from_stmt = conn.prepare(
+        "SELECT id, name, retired_at FROM products
+         WHERE merged_into_id = ?1
+         ORDER BY id",
+    )?;
+    let merged_from: Vec<_> = from_stmt
+        .query_map([id], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "name": r.get::<_, String>(1)?,
+                "retired_at": r.get::<_, Option<String>>(2)?,
+            }))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
     let mut stmt = conn.prepare(
         "SELECT t.name FROM product_tags t
          JOIN product_tag_associations a ON a.tag_id = t.id
@@ -1233,6 +1262,11 @@ fn show_product(conn: &Connection, id: i64, json: bool) -> Result<()> {
     let out = serde_json::json!({
         "id": id,
         "name": n,
+        "merged_into_id": merged_into_id,
+        "retired_at": retired_at,
+        "effective_id": effective_id,
+        "effective_name": effective_name,
+        "merged_from": merged_from,
         "tags": tags,
         "nutrition": nutrition,
         "micronutrients": micros,
@@ -1241,6 +1275,18 @@ fn show_product(conn: &Connection, id: i64, json: bool) -> Result<()> {
         print_json(&out);
     } else {
         println!("{id}: {n}");
+        if let Some(ref at) = retired_at {
+            println!(
+                "  retired at {at} → effective {} ({})",
+                effective_id, effective_name
+            );
+        } else if !merged_from.is_empty() {
+            let ids: Vec<String> = merged_from
+                .iter()
+                .filter_map(|m| m["id"].as_i64().map(|i| i.to_string()))
+                .collect();
+            println!("  merge keeper for: {}", ids.join(", "));
+        }
         if !tags.is_empty() {
             println!("  tags: {}", tags.join(", "));
         }
