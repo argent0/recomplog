@@ -98,7 +98,12 @@ impl Repository {
          heart_rate_bpm, hypopnea_per_hr, respiratory_rate, notes, \
          created_at, updated_at";
 
-    /// Create a new measurement. Fails if date already exists.
+    /// Shared SELECT column list for measurements (order matches `row_to_measurement`).
+    const MEASUREMENT_SELECT_COLS: &'static str =
+        "id, date, weight_kg, body_fat_pct, skeletal_muscle_pct, visceral_fat_level, \
+         bmi, resting_metabolism_kcal, created_at, updated_at";
+
+    /// Create a new measurement sample (always appends; multiple rows per date allowed).
     /// Returns the new id.
     #[allow(clippy::too_many_arguments)]
     pub fn create_measurement(
@@ -111,19 +116,6 @@ impl Repository {
         bmi: Option<f64>,
         resting_metabolism_kcal: Option<i64>,
     ) -> Result<i64> {
-        // Check for existing
-        let exists: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT id FROM measurements WHERE date = ?1",
-                params![date],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if exists.is_some() {
-            return Err(RecomplogError::MeasurementExistsForDate(date.to_string()));
-        }
-
         let now = now_utc();
         self.conn.execute(
             "INSERT INTO measurements
@@ -144,42 +136,38 @@ impl Repository {
     }
 
     /// List measurements in [since, until] (inclusive), or all if None.
-    /// Sorted by date DESC (newest first).
+    /// Sorted by date DESC, then created_at DESC, id DESC (newest samples first).
     pub fn list_measurements(
         &self,
         since: Option<&str>,
         until: Option<&str>,
     ) -> Result<Vec<Measurement>> {
+        let cols = Self::MEASUREMENT_SELECT_COLS;
+        let order = "ORDER BY date DESC, created_at DESC, id DESC";
         let rows = match (since, until) {
             (None, None) => {
-                let mut stmt = self.conn.prepare(
-                    "SELECT id, date, weight_kg, body_fat_pct, skeletal_muscle_pct, visceral_fat_level, bmi, resting_metabolism_kcal, created_at, updated_at
-                     FROM measurements ORDER BY date DESC",
-                )?;
+                let sql = format!("SELECT {cols} FROM measurements {order}");
+                let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([], Self::row_to_measurement)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (Some(s), None) => {
-                let mut stmt = self.conn.prepare(
-                    "SELECT id, date, weight_kg, body_fat_pct, skeletal_muscle_pct, visceral_fat_level, bmi, resting_metabolism_kcal, created_at, updated_at
-                     FROM measurements WHERE date >= ?1 ORDER BY date DESC",
-                )?;
+                let sql = format!("SELECT {cols} FROM measurements WHERE date >= ?1 {order}");
+                let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([s], Self::row_to_measurement)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (None, Some(u)) => {
-                let mut stmt = self.conn.prepare(
-                    "SELECT id, date, weight_kg, body_fat_pct, skeletal_muscle_pct, visceral_fat_level, bmi, resting_metabolism_kcal, created_at, updated_at
-                     FROM measurements WHERE date <= ?1 ORDER BY date DESC",
-                )?;
+                let sql = format!("SELECT {cols} FROM measurements WHERE date <= ?1 {order}");
+                let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([u], Self::row_to_measurement)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (Some(s), Some(u)) => {
-                let mut stmt = self.conn.prepare(
-                    "SELECT id, date, weight_kg, body_fat_pct, skeletal_muscle_pct, visceral_fat_level, bmi, resting_metabolism_kcal, created_at, updated_at
-                     FROM measurements WHERE date >= ?1 AND date <= ?2 ORDER BY date DESC",
-                )?;
+                let sql = format!(
+                    "SELECT {cols} FROM measurements WHERE date >= ?1 AND date <= ?2 {order}"
+                );
+                let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([s, u], Self::row_to_measurement)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
@@ -201,18 +189,48 @@ impl Repository {
         m.ok_or(RecomplogError::MeasurementNotFound(id))
     }
 
-    /// Get a single measurement by exact date (YYYY-MM-DD).
+    /// Latest measurement sample for a calendar date (`created_at DESC, id DESC`).
+    /// Multiple samples per day are allowed; this picks the last-written one.
     pub fn get_measurement_by_date(&self, date: &str) -> Result<Measurement> {
+        let cols = Self::MEASUREMENT_SELECT_COLS;
+        let sql = format!(
+            "SELECT {cols} FROM measurements WHERE date = ?1 \
+             ORDER BY created_at DESC, id DESC LIMIT 1"
+        );
         let m: Option<Measurement> = self
             .conn
-            .query_row(
-                "SELECT id, date, weight_kg, body_fat_pct, skeletal_muscle_pct, visceral_fat_level, bmi, resting_metabolism_kcal, created_at, updated_at
-                 FROM measurements WHERE date = ?1",
-                [date],
-                Self::row_to_measurement,
-            )
+            .query_row(&sql, [date], Self::row_to_measurement)
             .optional()?;
         m.ok_or(RecomplogError::MeasurementNotFoundForDate(date.to_string()))
+    }
+
+    fn count_measurements_for_date(&self, date: &str) -> Result<i64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM measurements WHERE date = ?1",
+            [date],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
+    /// Sole measurement id for date when mutating by date. Errors if 0 or >1 rows.
+    fn sole_measurement_id_for_date(&self, date: &str) -> Result<i64> {
+        let count = self.count_measurements_for_date(date)?;
+        if count == 0 {
+            return Err(RecomplogError::MeasurementNotFoundForDate(date.to_string()));
+        }
+        if count > 1 {
+            return Err(RecomplogError::MeasurementAmbiguousForDate {
+                date: date.to_string(),
+                count,
+            });
+        }
+        let id: i64 =
+            self.conn
+                .query_row("SELECT id FROM measurements WHERE date = ?1", [date], |r| {
+                    r.get(0)
+                })?;
+        Ok(id)
     }
 
     /// Update fields on an existing measurement (by id). Only non-None fields are changed.
@@ -276,7 +294,8 @@ impl Repository {
         Ok(())
     }
 
-    /// Update by date (convenience). Returns the id of the updated row.
+    /// Update by date when exactly one sample exists. Returns the updated id.
+    /// If multiple samples share the date, fails with `MeasurementAmbiguousForDate`.
     #[allow(clippy::too_many_arguments)]
     pub fn update_measurement_by_date(
         &self,
@@ -288,9 +307,9 @@ impl Repository {
         bmi: Option<f64>,
         resting_metabolism_kcal: Option<i64>,
     ) -> Result<i64> {
-        let m = self.get_measurement_by_date(date)?;
+        let id = self.sole_measurement_id_for_date(date)?;
         self.update_measurement(
-            m.id,
+            id,
             weight_kg,
             body_fat_pct,
             skeletal_muscle_pct,
@@ -298,7 +317,7 @@ impl Repository {
             bmi,
             resting_metabolism_kcal,
         )?;
-        Ok(m.id)
+        Ok(id)
     }
 
     /// Delete by id. Returns the deleted id on success.
@@ -312,16 +331,10 @@ impl Repository {
         Ok(id)
     }
 
-    /// Delete by date. Returns the deleted id on success.
+    /// Delete by date when exactly one sample exists. Returns the deleted id.
+    /// If multiple samples share the date, fails with `MeasurementAmbiguousForDate`.
     pub fn delete_measurement_by_date(&self, date: &str) -> Result<i64> {
-        // First find id for nice error + return value
-        let id: Option<i64> = self
-            .conn
-            .query_row("SELECT id FROM measurements WHERE date = ?1", [date], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        let id = id.ok_or_else(|| RecomplogError::MeasurementNotFoundForDate(date.to_string()))?;
+        let id = self.sole_measurement_id_for_date(date)?;
         self.conn
             .execute("DELETE FROM measurements WHERE id = ?1", [id])?;
         Ok(id)
@@ -347,7 +360,9 @@ impl Repository {
     fn latest_f64_before(&self, column: &str, before_date: &str) -> Result<Option<(String, f64)>> {
         // column is a fixed identifier from call sites, not user input
         let sql = format!(
-            "SELECT date, {column} FROM measurements WHERE date < ?1 AND {column} IS NOT NULL ORDER BY date DESC LIMIT 1"
+            "SELECT date, {column} FROM measurements \
+             WHERE date < ?1 AND {column} IS NOT NULL \
+             ORDER BY date DESC, created_at DESC, id DESC LIMIT 1"
         );
         let row: Option<(String, f64)> = self
             .conn
@@ -358,7 +373,9 @@ impl Repository {
 
     fn latest_i64_before(&self, column: &str, before_date: &str) -> Result<Option<(String, i64)>> {
         let sql = format!(
-            "SELECT date, {column} FROM measurements WHERE date < ?1 AND {column} IS NOT NULL ORDER BY date DESC LIMIT 1"
+            "SELECT date, {column} FROM measurements \
+             WHERE date < ?1 AND {column} IS NOT NULL \
+             ORDER BY date DESC, created_at DESC, id DESC LIMIT 1"
         );
         let row: Option<(String, i64)> = self
             .conn
@@ -428,88 +445,67 @@ impl Repository {
         Ok(())
     }
 
-    /// Fetch measurements in a date range [since, until] inclusive, ordered by date ASC (oldest first).
-    /// Used by reports. Returns lightweight points (no timestamps).
+    /// Fetch one measurement point per calendar day (last by `created_at`, then `id`),
+    /// ordered by date ASC. Used by day-series reports and charts.
     pub fn get_measurements_for_report(
         &self,
         since: Option<&str>,
         until: Option<&str>,
     ) -> Result<Vec<MeasurementPoint>> {
-        let mut sql = "SELECT date, weight_kg, body_fat_pct, skeletal_muscle_pct, visceral_fat_level, bmi, resting_metabolism_kcal
-                       FROM measurements".to_string();
+        // Correlated subquery: last-written sample per event date.
+        let base = "SELECT date, weight_kg, body_fat_pct, skeletal_muscle_pct, \
+                    visceral_fat_level, bmi, resting_metabolism_kcal \
+                    FROM measurements m \
+                    WHERE id = ( \
+                        SELECT id FROM measurements m2 \
+                        WHERE m2.date = m.date \
+                        ORDER BY m2.created_at DESC, m2.id DESC LIMIT 1 \
+                    )";
 
         let rows: Vec<MeasurementPoint> = match (since, until) {
             (None, None) => {
-                sql.push_str(" ORDER BY date ASC");
+                let sql = format!("{base} ORDER BY date ASC");
                 let mut stmt = self.conn.prepare(&sql)?;
-                let rows = stmt.query_map([], |r| {
-                    Ok(MeasurementPoint {
-                        date: r.get(0)?,
-                        weight_kg: r.get(1)?,
-                        body_fat_pct: r.get(2)?,
-                        skeletal_muscle_pct: r.get(3)?,
-                        visceral_fat_level: r.get(4)?,
-                        bmi: r.get(5)?,
-                        resting_metabolism_kcal: r.get(6)?,
-                    })
-                })?;
+                let rows = stmt.query_map([], Self::row_to_measurement_point)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (Some(s), None) => {
-                sql.push_str(" WHERE date >= ?1 ORDER BY date ASC");
+                let sql = format!("{base} AND date >= ?1 ORDER BY date ASC");
                 let mut stmt = self.conn.prepare(&sql)?;
-                let rows = stmt.query_map([s], |r| {
-                    Ok(MeasurementPoint {
-                        date: r.get(0)?,
-                        weight_kg: r.get(1)?,
-                        body_fat_pct: r.get(2)?,
-                        skeletal_muscle_pct: r.get(3)?,
-                        visceral_fat_level: r.get(4)?,
-                        bmi: r.get(5)?,
-                        resting_metabolism_kcal: r.get(6)?,
-                    })
-                })?;
+                let rows = stmt.query_map([s], Self::row_to_measurement_point)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (None, Some(u)) => {
-                sql.push_str(" WHERE date <= ?1 ORDER BY date ASC");
+                let sql = format!("{base} AND date <= ?1 ORDER BY date ASC");
                 let mut stmt = self.conn.prepare(&sql)?;
-                let rows = stmt.query_map([u], |r| {
-                    Ok(MeasurementPoint {
-                        date: r.get(0)?,
-                        weight_kg: r.get(1)?,
-                        body_fat_pct: r.get(2)?,
-                        skeletal_muscle_pct: r.get(3)?,
-                        visceral_fat_level: r.get(4)?,
-                        bmi: r.get(5)?,
-                        resting_metabolism_kcal: r.get(6)?,
-                    })
-                })?;
+                let rows = stmt.query_map([u], Self::row_to_measurement_point)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (Some(s), Some(u)) => {
-                sql.push_str(" WHERE date >= ?1 AND date <= ?2 ORDER BY date ASC");
+                let sql = format!("{base} AND date >= ?1 AND date <= ?2 ORDER BY date ASC");
                 let mut stmt = self.conn.prepare(&sql)?;
-                let rows = stmt.query_map([s, u], |r| {
-                    Ok(MeasurementPoint {
-                        date: r.get(0)?,
-                        weight_kg: r.get(1)?,
-                        body_fat_pct: r.get(2)?,
-                        skeletal_muscle_pct: r.get(3)?,
-                        visceral_fat_level: r.get(4)?,
-                        bmi: r.get(5)?,
-                        resting_metabolism_kcal: r.get(6)?,
-                    })
-                })?;
+                let rows = stmt.query_map([s, u], Self::row_to_measurement_point)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
         };
         Ok(rows)
     }
 
+    fn row_to_measurement_point(row: &Row) -> rusqlite::Result<MeasurementPoint> {
+        Ok(MeasurementPoint {
+            date: row.get(0)?,
+            weight_kg: row.get(1)?,
+            body_fat_pct: row.get(2)?,
+            skeletal_muscle_pct: row.get(3)?,
+            visceral_fat_level: row.get(4)?,
+            bmi: row.get(5)?,
+            resting_metabolism_kcal: row.get(6)?,
+        })
+    }
+
     // ---------- Sleep (sleep) per spec/02-sleep-logging.md ----------
 
-    /// Create a new sleep entry. Fails if a record for the (wake-up) date already exists.
+    /// Create a new sleep sample (always appends; multiple rows per wake-up date allowed).
     /// Returns the new id.
     #[allow(clippy::too_many_arguments)]
     pub fn create_sleep(
@@ -532,17 +528,6 @@ impl Repository {
         respiratory_rate: Option<f64>,
         notes: Option<&str>,
     ) -> Result<i64> {
-        // Check for existing (unique date)
-        let exists: Option<i64> = self
-            .conn
-            .query_row("SELECT id FROM sleep WHERE date = ?1", params![date], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        if exists.is_some() {
-            return Err(RecomplogError::SleepExistsForDate(date.to_string()));
-        }
-
         let now = now_utc();
         self.conn.execute(
             "INSERT INTO sleep
@@ -577,39 +562,32 @@ impl Repository {
     }
 
     /// List sleep sessions in [since, until] (inclusive), or all if None.
-    /// Sorted by date DESC (newest first).
+    /// Sorted by date DESC, then created_at DESC, id DESC.
     pub fn list_sleeps(&self, since: Option<&str>, until: Option<&str>) -> Result<Vec<Sleep>> {
         let cols = Self::SLEEP_SELECT_COLS;
+        let order = "ORDER BY date DESC, created_at DESC, id DESC";
         let rows = match (since, until) {
             (None, None) => {
-                let sql = format!("SELECT {} FROM sleep ORDER BY date DESC", cols);
+                let sql = format!("SELECT {cols} FROM sleep {order}");
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([], Self::row_to_sleep)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (Some(s), None) => {
-                let sql = format!(
-                    "SELECT {} FROM sleep WHERE date >= ?1 ORDER BY date DESC",
-                    cols
-                );
+                let sql = format!("SELECT {cols} FROM sleep WHERE date >= ?1 {order}");
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([s], Self::row_to_sleep)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (None, Some(u)) => {
-                let sql = format!(
-                    "SELECT {} FROM sleep WHERE date <= ?1 ORDER BY date DESC",
-                    cols
-                );
+                let sql = format!("SELECT {cols} FROM sleep WHERE date <= ?1 {order}");
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([u], Self::row_to_sleep)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (Some(s), Some(u)) => {
-                let sql = format!(
-                    "SELECT {} FROM sleep WHERE date >= ?1 AND date <= ?2 ORDER BY date DESC",
-                    cols
-                );
+                let sql =
+                    format!("SELECT {cols} FROM sleep WHERE date >= ?1 AND date <= ?2 {order}");
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([s, u], Self::row_to_sleep)?;
                 rows.filter_map(|r| r.ok()).collect()
@@ -631,10 +609,12 @@ impl Repository {
         s.ok_or(RecomplogError::SleepNotFound(id))
     }
 
-    /// Get a single sleep record by exact (wake-up) date (YYYY-MM-DD).
+    /// Latest sleep sample for a wake-up date (`created_at DESC, id DESC`).
+    /// Multiple samples per day are allowed; this picks the last-written one.
     pub fn get_sleep_by_date(&self, date: &str) -> Result<Sleep> {
         let sql = format!(
-            "SELECT {} FROM sleep WHERE date = ?1",
+            "SELECT {} FROM sleep WHERE date = ?1 \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
             Self::SLEEP_SELECT_COLS
         );
         let s: Option<Sleep> = self
@@ -642,6 +622,33 @@ impl Repository {
             .query_row(&sql, [date], Self::row_to_sleep)
             .optional()?;
         s.ok_or(RecomplogError::SleepNotFoundForDate(date.to_string()))
+    }
+
+    fn count_sleeps_for_date(&self, date: &str) -> Result<i64> {
+        let n: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM sleep WHERE date = ?1", [date], |r| {
+                    r.get(0)
+                })?;
+        Ok(n)
+    }
+
+    /// Sole sleep id for date when mutating by date. Errors if 0 or >1 rows.
+    fn sole_sleep_id_for_date(&self, date: &str) -> Result<i64> {
+        let count = self.count_sleeps_for_date(date)?;
+        if count == 0 {
+            return Err(RecomplogError::SleepNotFoundForDate(date.to_string()));
+        }
+        if count > 1 {
+            return Err(RecomplogError::SleepAmbiguousForDate {
+                date: date.to_string(),
+                count,
+            });
+        }
+        let id: i64 = self
+            .conn
+            .query_row("SELECT id FROM sleep WHERE date = ?1", [date], |r| r.get(0))?;
+        Ok(id)
     }
 
     /// Update fields on an existing sleep record (by id). Only non-None fields are changed.
@@ -728,7 +735,8 @@ impl Repository {
         Ok(())
     }
 
-    /// Update by (wake-up) date. Returns the id of the updated row.
+    /// Update by date when exactly one sample exists. Returns the updated id.
+    /// If multiple samples share the date, fails with `SleepAmbiguousForDate`.
     #[allow(clippy::too_many_arguments)]
     pub fn update_sleep_by_date(
         &self,
@@ -750,9 +758,9 @@ impl Repository {
         respiratory_rate: Option<f64>,
         notes: Option<&str>,
     ) -> Result<i64> {
-        let s = self.get_sleep_by_date(date)?;
+        let id = self.sole_sleep_id_for_date(date)?;
         self.update_sleep(
-            s.id,
+            id,
             bedtime,
             wake_time,
             time_in_bed_minutes,
@@ -770,7 +778,7 @@ impl Repository {
             respiratory_rate,
             notes,
         )?;
-        Ok(s.id)
+        Ok(id)
     }
 
     /// Delete by id. Returns the deleted id.
@@ -782,55 +790,51 @@ impl Repository {
         Ok(id)
     }
 
-    /// Delete by date. Returns the deleted id.
+    /// Delete by date when exactly one sample exists. Returns the deleted id.
+    /// If multiple samples share the date, fails with `SleepAmbiguousForDate`.
     pub fn delete_sleep_by_date(&self, date: &str) -> Result<i64> {
-        let id: Option<i64> = self
-            .conn
-            .query_row("SELECT id FROM sleep WHERE date = ?1", [date], |r| r.get(0))
-            .optional()?;
-        let id = id.ok_or_else(|| RecomplogError::SleepNotFoundForDate(date.to_string()))?;
+        let id = self.sole_sleep_id_for_date(date)?;
         self.conn.execute("DELETE FROM sleep WHERE id = ?1", [id])?;
         Ok(id)
     }
 
-    /// Fetch sleep sessions in [since, until] inclusive, ordered by date ASC (oldest first).
-    /// Used by sleep reports and summary integration.
+    /// One sleep sample per wake-up date (last by `created_at`, then `id`), date ASC.
+    /// Used by day-series sleep reports.
     pub fn get_sleeps_for_report(
         &self,
         since: Option<&str>,
         until: Option<&str>,
     ) -> Result<Vec<Sleep>> {
         let cols = Self::SLEEP_SELECT_COLS;
+        let base = format!(
+            "SELECT {cols} FROM sleep s \
+             WHERE id = ( \
+                 SELECT id FROM sleep s2 \
+                 WHERE s2.date = s.date \
+                 ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1 \
+             )"
+        );
         let rows: Vec<Sleep> = match (since, until) {
             (None, None) => {
-                let sql = format!("SELECT {} FROM sleep ORDER BY date ASC", cols);
+                let sql = format!("{base} ORDER BY date ASC");
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([], Self::row_to_sleep)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (Some(s), None) => {
-                let sql = format!(
-                    "SELECT {} FROM sleep WHERE date >= ?1 ORDER BY date ASC",
-                    cols
-                );
+                let sql = format!("{base} AND date >= ?1 ORDER BY date ASC");
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([s], Self::row_to_sleep)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (None, Some(u)) => {
-                let sql = format!(
-                    "SELECT {} FROM sleep WHERE date <= ?1 ORDER BY date ASC",
-                    cols
-                );
+                let sql = format!("{base} AND date <= ?1 ORDER BY date ASC");
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([u], Self::row_to_sleep)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (Some(s), Some(u)) => {
-                let sql = format!(
-                    "SELECT {} FROM sleep WHERE date >= ?1 AND date <= ?2 ORDER BY date ASC",
-                    cols
-                );
+                let sql = format!("{base} AND date >= ?1 AND date <= ?2 ORDER BY date ASC");
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([s, u], Self::row_to_sleep)?;
                 rows.filter_map(|r| r.ok()).collect()

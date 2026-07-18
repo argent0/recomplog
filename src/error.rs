@@ -10,14 +10,16 @@ pub enum RecomplogError {
     MeasurementNotFoundForDate(String),
 
     #[error(
-        "measurement already exists for date {0}; use `body measurement update --date {0}` to modify"
+        "multiple measurements for date {date} ({count} rows); use --id to select one \
+         (list with `body measurement list`)"
     )]
-    MeasurementExistsForDate(String),
+    MeasurementAmbiguousForDate { date: String, count: i64 },
 
     #[error(
-        "sleep entry already exists for date {0}; use `body sleep update --date {0}` to modify"
+        "multiple sleep entries for date {date} ({count} rows); use --id to select one \
+         (list with `body sleep list`)"
     )]
-    SleepExistsForDate(String),
+    SleepAmbiguousForDate { date: String, count: i64 },
 
     #[error("sleep entry not found: {0}")]
     SleepNotFound(i64),

@@ -114,7 +114,7 @@ fn distinct_dates(
 fn list_measurement_dates(conn: &Connection, since: &str, until: &str) -> Result<HashSet<String>> {
     distinct_dates(
         conn,
-        "SELECT date FROM measurements
+        "SELECT DISTINCT date FROM measurements
          WHERE date >= ?1 AND date <= ?2
          ORDER BY date",
         since,
@@ -125,7 +125,7 @@ fn list_measurement_dates(conn: &Connection, since: &str, until: &str) -> Result
 fn list_sleep_dates(conn: &Connection, since: &str, until: &str) -> Result<HashSet<String>> {
     distinct_dates(
         conn,
-        "SELECT date FROM sleep
+        "SELECT DISTINCT date FROM sleep
          WHERE date >= ?1 AND date <= ?2
          ORDER BY date",
         since,

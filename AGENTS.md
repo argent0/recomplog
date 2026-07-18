@@ -10,12 +10,13 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
 - Agent-friendly by design — consistent `entity action`, excellent `--json`, predictable behavior.
 - One database for everything (no more fragile subprocess + JSON glue between tools).
 - Preserve the spirit of the original four tools.
-- **Append only (event history grows by insertion).**
-  - Event logs (workouts, sets, consumptions, purchases, measurements, sleep, imports) are a growing record of what was logged — prefer `create` / `add` over rewriting the past.
-  - Catalog and config (products, exercises, tags, profile, micronutrients, nutrition facts) may be updated or merged; that is not “rewriting history.”
-  - `update` / `delete` on log rows exist for honest corrections (typos, wrong weight, abandoned workout), not as the primary logging path.
-  - New features must not depend on silent bulk mutation of historical events. Imports append (idempotently where possible); reports read the log as stored.
+- **Append only — no exceptions. Never, nowhere.**
+  - Event history (workouts, sets, consumptions, purchases, measurements, sleep, imports, trackpoints, …) **grows only by insertion**. There is no carve-out, domain, import path, migration, “convenience upsert”, day-uniqueness, or bulk “fix” that may rewrite settled event rows. If a design needs to mutate past events, the design is wrong — append a new fact (or supersede/void via a later row when that model exists), do not overwrite the old one.
+  - Logging path is always `create` / `add` / import-insert. Same calendar day may have many measurement or sleep samples; `create` always inserts. No `UNIQUE(event day)`, no create-fails-if-exists, no second-write-as-update.
+  - Catalog and config (products, exercises, tags, profile, micronutrients, nutrition facts) may be updated or merged; that is catalog, not event history.
+  - Imports append and stay idempotent (`INSERT OR IGNORE` / hash skip). Never replace domain history as a side effect. Reports and checks **read** the log as stored; day-series aggregation (e.g. last-by-`created_at` per date) is read-side only and never deletes prior samples.
   - Event time and storage time stay independent: appending a late log never backdates `created_at` (see time model below).
+  - Existing `update` / `delete` on log rows are **legacy correction debt**, not a model for new work. New features must not depend on them. Prefer append (or future supersede/tombstone) over rewrite.
 - **Quality data produces quality reports. Quality reports are actionable reports.**
   - Logging, imports, sanity checks, and `db check` exist so the data is trustworthy.
   - Reports (`report brief`, domain summaries, HTML) exist so the user (or agent) can act — not just stare at numbers.

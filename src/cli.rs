@@ -677,7 +677,7 @@ pub struct ProfileSetArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum MeasurementAction {
-    /// Create / log a new daily measurement (one per date).
+    /// Create / log a measurement sample (multiple samples per date allowed; always appends).
     Create(CreateMeasurementArgs),
     /// List measurements.
     List(ListArgs),
@@ -782,7 +782,7 @@ pub struct DeleteArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SleepAction {
-    /// Create / log a sleep entry (one per wake-up date).
+    /// Create / log a sleep sample (multiple samples per wake-up date allowed; always appends).
     Create(SleepCreateArgs),
     /// List sleep entries (newest first).
     List(ListArgs),

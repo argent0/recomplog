@@ -1146,6 +1146,19 @@ fn compute_median_row(anchor: &Measurement, window: &[&Measurement]) -> MedianRo
     }
 }
 
+/// Collapse multi-sample days to the last-written row per date.
+/// Input must be ordered `date DESC, created_at DESC, id DESC` (as from `list_measurements`).
+fn daily_last_measurements(all: &[Measurement]) -> Vec<&Measurement> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for m in all {
+        if seen.insert(m.date.as_str()) {
+            out.push(m);
+        }
+    }
+    out
+}
+
 fn handle_medians(repo: &mut Repository, args: MediansArgs, json: bool, quiet: bool) -> Result<()> {
     if args.window < 1 {
         return Err(RecomplogError::InvalidInput(
@@ -1163,9 +1176,11 @@ fn handle_medians(repo: &mut Repository, args: MediansArgs, json: bool, quiet: b
     };
 
     let all = repo.list_measurements(load_since.as_deref(), display_until.as_deref())?;
+    // One anchor per calendar day so multi-sample days do not inflate `n`.
+    let daily = daily_last_measurements(&all);
 
     let mut rows: Vec<MedianRow> = Vec::new();
-    for anchor in &all {
+    for anchor in &daily {
         if !in_display_range(
             &anchor.date,
             display_since.as_deref(),
@@ -1174,8 +1189,9 @@ fn handle_medians(repo: &mut Repository, args: MediansArgs, json: bool, quiet: b
             continue;
         }
         let start = window_start_ymd(&anchor.date, args.window)?;
-        let window: Vec<&Measurement> = all
+        let window: Vec<&Measurement> = daily
             .iter()
+            .copied()
             .filter(|p| {
                 p.date.as_str() >= start.as_str() && p.date.as_str() <= anchor.date.as_str()
             })
@@ -2154,24 +2170,8 @@ fn handle_sleep_create(
         }
         Err(e) => {
             if json {
-                // For duplicate date, include a suggestion per spec
-                if matches!(e, RecomplogError::SleepExistsForDate(_)) {
-                    #[derive(serde::Serialize)]
-                    struct ErrWithSuggestion {
-                        success: bool,
-                        error: String,
-                        suggestion: String,
-                    }
-                    print_json(&ErrWithSuggestion {
-                        success: false,
-                        error: e.to_string(),
-                        suggestion: format!("recomplog sleep update --date {}", date),
-                    });
-                    std::process::exit(1);
-                } else {
-                    print_error_json(&e.to_string());
-                    std::process::exit(1);
-                }
+                print_error_json(&e.to_string());
+                std::process::exit(1);
             } else {
                 Err(e)
             }

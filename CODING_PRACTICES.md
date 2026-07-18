@@ -8,7 +8,7 @@ This document defines the coding standards for the unified `recomplog` project.
 - Predictable, well-documented, scriptable CLI.
 - High-quality Rust without over-engineering.
 - Quality data → quality reports → actionable reports (see `AGENTS.md` philosophy).
-- Append-only event history: prefer insert over rewrite (see `AGENTS.md` philosophy).
+- **Append only — no exceptions. Never, nowhere.** (see `AGENTS.md` philosophy).
 
 ## Core Principles
 
@@ -24,12 +24,18 @@ This document defines the coding standards for the unified `recomplog` project.
    - `clap` derive for CLI.
    - `thiserror` for domain errors, `anyhow` at the binary boundary.
 
-3. **Append-only event history**
-   - Default write path for logs is insert (`create` / `add` / import).
-   - Catalog/config rows may update; event rows should not be the normal place to “fix” history in bulk.
-   - Design new domain concepts so corrections do not require silent rewrites of past events.
-   - Imports append and stay idempotent where possible; never replace an entire domain’s history as a side effect.
+3. **Append only — no exceptions. Never, nowhere.**
+   - Event history grows **only** by insert (`create` / `add` / import). No domain,
+     feature, migration, import flag, or “agent convenience” may rewrite settled
+     event rows. If you need a different past, append a new fact (or supersede/void
+     when that model exists) — do not UPDATE/DELETE history as the product path.
+   - Catalog/config may update or merge; that is not event history.
+   - Imports append and stay idempotent; never replace a domain’s history as a side effect.
    - Keep event time vs storage time distinct when appending late entries.
+   - No day-level uniqueness on event logs (measurements/sleep multi-sample; same for
+     any future event table). Day aggregation for reports is read-side only.
+   - Log `update`/`delete` that still exist are legacy correction debt — do not build
+     new features on them; do not teach agents to upsert events.
    - **Consumption quantity/unit:** canonicalize at insert only. Do not re-run
      migration heuristics (`normalize_nutrition_units`, `promote_whole_package_products`)
      on open, import, or as a silent repair path. Those run once under `user_version`
@@ -60,10 +66,13 @@ This document defines the coding standards for the unified `recomplog` project.
      (`created_at` / `updated_at` / `imported_at` = always `now_utc()`; never user input).
    - Instants: UTC RFC3339 (`YYYY-MM-DDTHH:MM:SSZ`) only — write via `format_instant_utc` /
      `now_utc` / `parse_rfc3339_instant_for_db` + `validate_instant_for_db`.
-   - Calendar days: `YYYY-MM-DD` only (event day for measurements/sleep).
-   - Day buckets and reports use **event** fields only, never `created_at`.
+   - Calendar days: `YYYY-MM-DD` only (event day for measurements/sleep). Multiple
+     measurement/sleep rows may share the same event day.
+   - Day buckets and reports use **event** fields only, never `created_at` for bucketing;
+     when collapsing multi-sample days, prefer last-by-`created_at` (then `id`).
    - Never rely on SQLite `datetime('now')` for new rows; always set timestamps from Rust.
-   - Keep the model pragmatic; prefer append-friendly schemas for event tables.
+   - Event tables must be append-friendly: no uniqueness that forces rewrite of
+     history (e.g. no `UNIQUE` on event calendar day).
 
 9. **Testing**
    - Unit tests for logic.

@@ -772,8 +772,9 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
     let mut sleeps = 0i64;
     let mut sleep_skipped = 0i64;
 
-    // Event rows: INSERT OR IGNORE only (append-only idempotency). Never REPLACE —
-    // re-import must not overwrite local corrections or richer rows with slim payloads.
+    // Event rows: INSERT OR IGNORE only (append-only idempotency, conflict on PK id).
+    // Never REPLACE — re-import must not overwrite local corrections or richer rows
+    // with slim payloads. Date is not unique (S1); same-day rows with new ids append.
     if let Ok(mut stmt) = src.prepare(
         "SELECT id, date, weight_kg, body_fat_pct, skeletal_muscle_pct, visceral_fat_level, bmi, resting_metabolism_kcal, created_at, updated_at FROM measurements",
     ) {

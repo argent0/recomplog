@@ -20,7 +20,7 @@ pub fn lookup_measured_body_weight(
             .query_row(
                 "SELECT date, weight_kg FROM measurements \
                  WHERE weight_kg IS NOT NULL AND date <= ?1 \
-                 ORDER BY date DESC LIMIT 1",
+                 ORDER BY date DESC, created_at DESC, id DESC LIMIT 1",
                 params![date],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -33,7 +33,7 @@ pub fn lookup_measured_body_weight(
         .query_row(
             "SELECT date, weight_kg FROM measurements \
              WHERE weight_kg IS NOT NULL \
-             ORDER BY date DESC LIMIT 1",
+             ORDER BY date DESC, created_at DESC, id DESC LIMIT 1",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )

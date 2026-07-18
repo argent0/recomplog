@@ -101,9 +101,17 @@ fn stage_or_zero(v: Option<i64>) -> f64 {
 }
 
 fn fetch_html_measurements(conn: &Connection, since: &str, until: &str) -> Result<Vec<MeasPoint>> {
+    // One point per calendar day (last sample by created_at, then id).
     let mut stmt = conn.prepare(
         "SELECT date, weight_kg, body_fat_pct, skeletal_muscle_pct, resting_metabolism_kcal
-         FROM measurements WHERE date >= ?1 AND date <= ?2 ORDER BY date ASC",
+         FROM measurements m
+         WHERE date >= ?1 AND date <= ?2
+           AND id = (
+             SELECT id FROM measurements m2
+             WHERE m2.date = m.date
+             ORDER BY m2.created_at DESC, m2.id DESC LIMIT 1
+           )
+         ORDER BY date ASC",
     )?;
     let rows = stmt
         .query_map(params![since, until], |r| {
@@ -128,10 +136,18 @@ fn fetch_html_measurements(conn: &Connection, since: &str, until: &str) -> Resul
 }
 
 fn fetch_html_sleep(conn: &Connection, since: &str, until: &str) -> Result<Vec<SleepPoint>> {
+    // One night per wake-up date (last sample by created_at, then id).
     let mut stmt = conn.prepare(
         "SELECT date, total_sleep_minutes, rem_minutes, deep_minutes, light_minutes,
                 awake_minutes, sleep_efficiency_pct, sleep_score
-         FROM sleep WHERE date >= ?1 AND date <= ?2 ORDER BY date ASC",
+         FROM sleep s
+         WHERE date >= ?1 AND date <= ?2
+           AND id = (
+             SELECT id FROM sleep s2
+             WHERE s2.date = s.date
+             ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1
+           )
+         ORDER BY date ASC",
     )?;
     let rows = stmt
         .query_map(params![since, until], |r| {

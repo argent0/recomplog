@@ -61,7 +61,7 @@ pub fn open_db_readonly_for_completion(override_path: Option<&str>) -> Option<Co
 }
 
 /// Current schema version. Bump when adding a new migration block.
-const CURRENT_VERSION: i32 = 7;
+const CURRENT_VERSION: i32 = 8;
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i32 = conn
@@ -107,6 +107,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     if current < 7 {
         apply_v7_infoods_and_micro_unique(conn)?;
         conn.execute("PRAGMA user_version = 7", [])?;
+    }
+    if current < 8 {
+        apply_v8_body_multi_sample_per_day(conn)?;
+        conn.execute("PRAGMA user_version = 8", [])?;
     }
 
     Ok(())
@@ -665,6 +669,89 @@ fn rebuild_product_micronutrients(conn: &Connection, old_id_col: &str) -> Result
     Ok(())
 }
 
+/// Drop UNIQUE on measurements.date / sleep.date so same-day samples append.
+/// See migrations/008_body_multi_sample_per_day.sql and reports/append/S1.
+fn apply_v8_body_multi_sample_per_day(conn: &Connection) -> Result<()> {
+    // Greenfield schema already omits UNIQUE; rebuild is still safe and keeps
+    // upgrades from ≤v7 consistent. No FKs reference these tables.
+    // Partial DBs (nutrition-only migration fixtures) may lack body tables — skip.
+    if table_exists(conn, "measurements")? {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE measurements_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                weight_kg REAL,
+                body_fat_pct REAL,
+                skeletal_muscle_pct REAL,
+                visceral_fat_level INTEGER,
+                bmi REAL,
+                resting_metabolism_kcal INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO measurements_new (
+                id, date, weight_kg, body_fat_pct, skeletal_muscle_pct,
+                visceral_fat_level, bmi, resting_metabolism_kcal, created_at, updated_at
+            )
+            SELECT
+                id, date, weight_kg, body_fat_pct, skeletal_muscle_pct,
+                visceral_fat_level, bmi, resting_metabolism_kcal, created_at, updated_at
+            FROM measurements;
+            DROP TABLE measurements;
+            ALTER TABLE measurements_new RENAME TO measurements;
+            CREATE INDEX IF NOT EXISTS idx_measurements_date ON measurements(date);
+            "#,
+        )?;
+    }
+    if table_exists(conn, "sleep")? {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sleep_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                bedtime TEXT,
+                wake_time TEXT,
+                time_in_bed_minutes INTEGER,
+                total_sleep_minutes INTEGER,
+                rem_minutes INTEGER,
+                deep_minutes INTEGER,
+                light_minutes INTEGER,
+                awake_minutes INTEGER,
+                sleep_efficiency_pct REAL,
+                sleep_score INTEGER,
+                subjective_quality INTEGER,
+                awakenings INTEGER,
+                heart_rate_bpm REAL,
+                hypopnea_per_hr REAL,
+                respiratory_rate REAL,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO sleep_new (
+                id, date, bedtime, wake_time, time_in_bed_minutes, total_sleep_minutes,
+                rem_minutes, deep_minutes, light_minutes, awake_minutes,
+                sleep_efficiency_pct, sleep_score, subjective_quality, awakenings,
+                heart_rate_bpm, hypopnea_per_hr, respiratory_rate, notes,
+                created_at, updated_at
+            )
+            SELECT
+                id, date, bedtime, wake_time, time_in_bed_minutes, total_sleep_minutes,
+                rem_minutes, deep_minutes, light_minutes, awake_minutes,
+                sleep_efficiency_pct, sleep_score, subjective_quality, awakenings,
+                heart_rate_bpm, hypopnea_per_hr, respiratory_rate, notes,
+                created_at, updated_at
+            FROM sleep;
+            DROP TABLE sleep;
+            ALTER TABLE sleep_new RENAME TO sleep;
+            CREATE INDEX IF NOT EXISTS idx_sleep_date ON sleep(date);
+            "#,
+        )?;
+    }
+    Ok(())
+}
+
 fn apply_v2_cardio_json(conn: &Connection) -> Result<()> {
     // Fresh DBs from v1 apply may already include columns if schema was updated;
     // ALTER only when missing (idempotent for re-runs / mixed paths).
@@ -1035,7 +1122,7 @@ CREATE INDEX IF NOT EXISTS idx_trackpoints_set ON activity_trackpoints(exercise_
 
 CREATE TABLE IF NOT EXISTS measurements (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT NOT NULL UNIQUE,
+    date TEXT NOT NULL,
     weight_kg REAL,
     body_fat_pct REAL,
     skeletal_muscle_pct REAL,
@@ -1057,7 +1144,7 @@ CREATE TABLE IF NOT EXISTS user_profile (
 
 CREATE TABLE IF NOT EXISTS sleep (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT NOT NULL UNIQUE,
+    date TEXT NOT NULL,
     bedtime TEXT,
     wake_time TEXT,
     time_in_bed_minutes INTEGER,

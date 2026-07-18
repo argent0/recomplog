@@ -326,7 +326,7 @@ fn migration_promotes_extended_macros_from_legacy_shape() {
     let ver: i32 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(ver, 7);
+    assert!(ver >= 8, "expected user_version >= 8 after open, got {ver}");
 
     let has_nutrients: i64 = conn
         .query_row(
