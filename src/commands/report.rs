@@ -6,9 +6,9 @@ use crate::cli::{
 use crate::config::SanityLimits;
 use crate::db;
 use crate::models::{
-    BriefConsumption, BriefReport, BriefWorkout, BriefWorkouts, DailyNutritionEntry, MacroTotals,
-    Measurement, MicroTotal, NutritionDailyReport, NutritionReport, Period, ProductSpending,
-    SpendingReport, StoreSpending, WorkoutPeriodOverview,
+    BriefConsumption, BriefCorrection, BriefReport, BriefWorkout, BriefWorkouts,
+    DailyNutritionEntry, MacroTotals, Measurement, MicroTotal, NutritionDailyReport,
+    NutritionReport, Period, ProductSpending, SpendingReport, StoreSpending, WorkoutPeriodOverview,
 };
 use crate::repository::BodyRepository;
 use crate::utils::{parse_date_to_ymd, print_json, print_table};
@@ -117,6 +117,7 @@ fn handle_brief(
     let workouts_today = fetch_brief_workouts_detail_on_day(&conn, &anchor_s)?;
     let previous_workouts = fetch_brief_workouts_in_range(&conn, &prev_since_s, &prev_until_s)?;
     let previous_overview = fetch_workout_period_overview(&conn, prev_period, previous_workouts)?;
+    let corrections = fetch_brief_corrections(&conn, &since_s, &anchor_s)?;
 
     let repo = BodyRepository::new(conn);
     let measurements = repo
@@ -136,6 +137,7 @@ fn handle_brief(
             today: workouts_today,
             previous: previous_overview,
         },
+        corrections,
     };
 
     if json {
@@ -168,7 +170,7 @@ fn build_nutrition_daily_report(
 
 fn fetch_brief_consumptions(conn: &Connection, today_ymd: &str) -> Result<Vec<BriefConsumption>> {
     let mut stmt = conn.prepare(
-        "SELECT c.id, c.product_id, c.quantity, c.unit, c.consumed_at
+        "SELECT c.id, c.product_id, c.quantity, c.unit, c.consumed_at, c.supersedes_id
          FROM consumptions c
          WHERE c.deleted_at IS NULL
            AND date(c.consumed_at, 'localtime') = date(?1)
@@ -183,11 +185,12 @@ fn fetch_brief_consumptions(conn: &Connection, today_ymd: &str) -> Result<Vec<Br
                 r.get::<_, f64>(2)?,
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, Option<i64>>(5)?,
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut rows = Vec::with_capacity(raw.len());
-    for (id, product_id, quantity, unit, consumed_at) in raw {
+    for (id, product_id, quantity, unit, consumed_at, supersedes_id) in raw {
         let effective = crate::product_resolve::resolve_effective_product_id(conn, product_id)?;
         let product_name: Option<String> = conn
             .query_row(
@@ -203,9 +206,62 @@ fn fetch_brief_consumptions(conn: &Connection, today_ymd: &str) -> Result<Vec<Br
             quantity,
             unit,
             consumed_at,
+            supersedes_id,
         });
     }
     Ok(rows)
+}
+
+/// Supersede audit rows in [since, until] by storage calendar day (F1d).
+fn fetch_brief_corrections(
+    conn: &Connection,
+    since_ymd: &str,
+    until_ymd: &str,
+) -> Result<Vec<BriefCorrection>> {
+    let mut stmt = conn.prepare(
+        "SELECT entity_type, entity_id, at, summary, meta_json
+         FROM entity_audit
+         WHERE kind = 'supersede'
+           AND date(at, 'localtime') >= date(?1)
+           AND date(at, 'localtime') <= date(?2)
+         ORDER BY at DESC, id DESC
+         LIMIT 100",
+    )?;
+    let rows = stmt
+        .query_map(params![since_ymd, until_ymd], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (entity, from_id, at, summary, meta_raw) in rows {
+        let meta: serde_json::Value = meta_raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let to_id = meta
+            .get("superseded_by")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let reason = meta
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        out.push(BriefCorrection {
+            entity,
+            from_id,
+            to_id,
+            at,
+            reason,
+            summary,
+        });
+    }
+    Ok(out)
 }
 
 fn map_brief_workout(r: &rusqlite::Row<'_>) -> rusqlite::Result<BriefWorkout> {
@@ -318,9 +374,13 @@ fn print_brief_human(report: &BriefReport, days: u32, day_label: &str) {
         for c in &report.consumption_today {
             let name = c.product_name.as_deref().unwrap_or("?");
             let unit = c.unit.as_deref().unwrap_or("?");
+            let sup = c
+                .supersedes_id
+                .map(|s| format!(" [supersedes {s}]"))
+                .unwrap_or_default();
             println!(
-                "{}: {} {} {} on {}",
-                c.id, name, c.quantity, unit, c.consumed_at
+                "{}: {} {} {} on {}{}",
+                c.id, name, c.quantity, unit, c.consumed_at, sup
             );
         }
     }
@@ -347,6 +407,20 @@ fn print_brief_human(report: &BriefReport, days: u32, day_label: &str) {
                 println!();
             }
             super::workout::print_workout_detail(w);
+        }
+    }
+
+    println!();
+    println!("=== Corrections (last {days} days) ===");
+    if report.corrections.is_empty() {
+        println!("(no supersede corrections)");
+    } else {
+        for c in &report.corrections {
+            let reason = c.reason.as_deref().unwrap_or("-");
+            println!(
+                "{}: corrected {} → {} at {} ({})",
+                c.entity, c.from_id, c.to_id, c.at, reason
+            );
         }
     }
 

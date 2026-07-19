@@ -17,7 +17,8 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
   - Imports append and stay idempotent (`INSERT OR IGNORE` / hash skip). Never replace domain history as a side effect. Reports and checks **read** the log as stored; day-series aggregation (e.g. last-by-`created_at` per date) is read-side only and never deletes prior samples.
   - Event time and storage time stay independent: appending a late log never backdates `created_at` (see time model below).
   - Existing `update` / `delete` on log rows are **legacy correction debt**, not a model for new work. New features must not depend on them. Prefer append (or future supersede/tombstone) over rewrite.
-  - Event `update` is classified: **lifecycle** (fill nulls, e.g. first `finished_at`) vs **correction** (overwrite settled values). Corrections require `--reason` and write audit `kind: correct` with field old/new; inspect via `… audit <id>`.
+  - Prefer **`… correct`** (supersede chain: new row + soft-delete old + `kind: supersede`) for honest event corrections. Available: consumption, purchase, measurement, sleep, set; empty workouts. Inspect via `… audit <id>` (`current.supersedes_id`) and `report brief` → `corrections`.
+  - Event `update` is classified: **lifecycle** (fill nulls, e.g. first `finished_at`) vs **correction** (overwrite settled values). Corrections require `--reason` and write audit `kind: correct`. Prefer supersede `correct` over in-place correction when available.
 - **Quality data produces quality reports. Quality reports are actionable reports.**
   - Logging, imports, sanity checks, and `db check` exist so the data is trustworthy.
   - Reports (`report brief`, domain summaries, HTML) exist so the user (or agent) can act — not just stare at numbers.

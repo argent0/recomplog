@@ -622,6 +622,74 @@ fn set_correct_supersedes() {
 }
 
 #[test]
+fn report_brief_lists_corrections() {
+    use chrono::Local;
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+    seed_product(&db);
+    let today = Local::now().date_naive().format("%Y-%m-%d").to_string();
+    let consumed_at = format!("{today}T13:45:00-03:00");
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "consumption",
+            "create",
+            "--product",
+            "1",
+            "--quantity",
+            "80",
+            "--unit",
+            "g",
+            "--consumed-at",
+            &consumed_at,
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "consumption",
+            "correct",
+            "1",
+            "--quantity",
+            "90",
+            "--reason",
+            "weighed again",
+        ])
+        .assert()
+        .success();
+
+    let brief = json_stdout(
+        bin()
+            .args(["--db", &db, "--json", "report", "brief", "--days", "7"])
+            .assert()
+            .success(),
+    );
+    let corrs = brief["corrections"].as_array().expect("corrections");
+    assert!(
+        !corrs.is_empty(),
+        "expected supersede in brief.corrections: {brief}"
+    );
+    assert_eq!(corrs[0]["entity"], "consumption");
+    assert_eq!(corrs[0]["from_id"], 1);
+    assert_eq!(corrs[0]["to_id"], 2);
+    assert_eq!(corrs[0]["reason"], "weighed again");
+
+    let today_cons = brief["consumption_today"].as_array().unwrap();
+    assert_eq!(today_cons.len(), 1);
+    assert_eq!(today_cons[0]["supersedes_id"], 1);
+    assert_eq!(today_cons[0]["quantity"], 90.0);
+}
+
+#[test]
 fn purchase_correct_supersedes() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("t.db").display().to_string();

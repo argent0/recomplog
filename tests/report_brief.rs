@@ -213,6 +213,9 @@ fn brief_human_has_all_section_headers() {
         .stdout(predicate::str::contains("Hyp/hr"))
         .stdout(predicate::str::contains("=== Workouts (today) ==="))
         .stdout(predicate::str::contains(
+            "=== Corrections (last 7 days) ===",
+        ))
+        .stdout(predicate::str::contains(
             "=== Workouts overview (previous 7 days:",
         ))
         .stdout(predicate::str::contains("Oats"))
@@ -253,6 +256,8 @@ fn brief_json_shape_and_today_data() {
     assert!(!v["measurements"].as_array().unwrap().is_empty());
     assert!(v["sleep"].is_array());
     assert!(!v["sleep"].as_array().unwrap().is_empty());
+
+    assert!(v["corrections"].is_array());
 
     assert!(v["workouts"]["today"].is_array());
     assert!(!v["workouts"]["today"].as_array().unwrap().is_empty());

@@ -36,11 +36,13 @@ This document defines the coding standards for the unified `recomplog` project.
      any future event table). Day aggregation for reports is read-side only.
    - Log `update`/`delete` that still exist are legacy correction debt — do not build
      new features on them; do not teach agents to upsert events.
-   - Event `update` must classify lifecycle (null fills) vs correction (overwrites).
-     Corrections require `--reason` and append audit `kind: correct` with field old/new
-     (`entity_audit::append_field_change`). Prefer **supersede** (`… correct` → new row with
-     `supersedes_id` + soft-delete old) for honest corrections when available (nutrition
-     consumption/purchase); soft-delete + create only when no supersede path exists.
+   - Prefer **`… correct` (supersede)** for honest event corrections: INSERT new row with
+     `supersedes_id`, soft-delete prior head, audit `kind: supersede`. Available for
+     consumption, purchase, measurement, sleep, exercise set; empty workouts only.
+   - Event `update` is **legacy debt** for lifecycle fills (null → value, e.g. first
+     `finished_at`) or trees that cannot supersede yet (workouts with live sets).
+     Overwrites still require `--reason` and audit `kind: correct`. Do not teach agents
+     to use `update` when `correct` exists.
 
    - **Consumption quantity/unit:** canonicalize at insert only. Do not re-run
      migration heuristics (`normalize_nutrition_units`, `promote_whole_package_products`)

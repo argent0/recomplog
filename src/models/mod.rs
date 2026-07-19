@@ -383,6 +383,25 @@ pub struct BriefConsumption {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
     pub consumed_at: String,
+    /// Prior event id this live row supersedes (F1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supersedes_id: Option<i64>,
+}
+
+/// One supersede/correction chain entry for `report brief` (F1d).
+#[derive(Serialize, Debug, Clone)]
+pub struct BriefCorrection {
+    pub entity: String,
+    /// Retired (superseded) event id.
+    pub from_id: i64,
+    /// Live head that replaced it.
+    pub to_id: i64,
+    /// Storage time of the supersede audit row.
+    pub at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 /// Compact workout row for brief report sections.
@@ -436,6 +455,9 @@ pub struct BriefReport {
     pub measurements: Vec<Measurement>,
     pub sleep: Vec<Sleep>,
     pub workouts: BriefWorkouts,
+    /// Supersede chains in the lookback window (storage time of the correction).
+    /// Agents: prefer `… correct` over in-place `update` so rows appear here.
+    pub corrections: Vec<BriefCorrection>,
 }
 
 /// User-level profile / settings (singleton). Managed via `recomplog config ...`.
