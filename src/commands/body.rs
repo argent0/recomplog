@@ -1713,6 +1713,12 @@ fn handle_measurement_audit(repo: &mut Repository, args: AuditBodyArgs, json: bo
     let mut envelopes = Vec::with_capacity(ids.len());
     for sample_id in ids {
         let current = fetch_measurement_audit_current(conn, sample_id)?;
+        let current = entity_audit::enrich_current_supersede(
+            conn,
+            entity_audit::entity::MEASUREMENT,
+            current,
+        )
+        .map_err(|e| RecomplogError::Other(e.to_string()))?;
         let history =
             entity_audit::list_history(conn, entity_audit::entity::MEASUREMENT, sample_id, limit)
                 .map_err(|e| RecomplogError::Other(e.to_string()))?;
@@ -1787,6 +1793,9 @@ fn handle_sleep_audit(repo: &mut Repository, args: AuditBodyArgs, json: bool) ->
     let mut envelopes = Vec::with_capacity(ids.len());
     for sample_id in ids {
         let current = fetch_sleep_audit_current(conn, sample_id)?;
+        let current =
+            entity_audit::enrich_current_supersede(conn, entity_audit::entity::SLEEP, current)
+                .map_err(|e| RecomplogError::Other(e.to_string()))?;
         let history =
             entity_audit::list_history(conn, entity_audit::entity::SLEEP, sample_id, limit)
                 .map_err(|e| RecomplogError::Other(e.to_string()))?;

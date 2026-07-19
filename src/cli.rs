@@ -100,6 +100,19 @@ pub enum Commands {
         action: DbAction,
     },
 
+    /// Cross-domain audit trail inspection (storage-time feed).
+    ///
+    /// Per-entity history remains under each entity (`workout audit`,
+    /// `nutrition consumption audit`, …). This group is for recent mutations
+    /// across all domains:
+    ///
+    ///   recomplog --json audit recent --days 7
+    ///   recomplog --json audit recent --days 7 --entity consumption,workout
+    Audit {
+        #[command(subcommand)]
+        action: AuditAction,
+    },
+
     /// One-time initialization and migration helpers.
     Init {
         #[arg(long)]
@@ -108,6 +121,29 @@ pub enum Commands {
 
     /// Print version (also available as --version).
     Version,
+}
+
+/// Actions under `recomplog audit ...`
+#[derive(Subcommand, Debug, Clone)]
+pub enum AuditAction {
+    /// Recent mutations across entities (storage time of audit rows).
+    ///
+    /// Filters by `entity_audit.at` (when the trail row was written), not event
+    /// time. Newest first. Prefer per-entity `… audit <id>` for a full chain.
+    Recent {
+        /// Last N calendar days inclusive of today (filter by audit `at`).
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+        /// Restrict to one or more entity types (comma-separated or repeated).
+        ///
+        /// Known: workout, exercise_set, exercise, measurement, sleep,
+        /// consumption, purchase, product, store, micronutrient.
+        #[arg(long = "entity", value_delimiter = ',')]
+        entity: Vec<String>,
+        /// Max entries to return (newest first).
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
 }
 
 /// Actions under `recomplog db ...`

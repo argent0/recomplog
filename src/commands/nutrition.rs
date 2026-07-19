@@ -2391,6 +2391,7 @@ where
     F: FnOnce(&rusqlite::Connection, i64) -> Result<Option<serde_json::Value>>,
 {
     let current = fetch_current(conn, id)?;
+    let current = entity_audit::enrich_current_supersede(conn, entity_type, current)?;
     let history = entity_audit::list_history(conn, entity_type, id, limit)?;
     if current.is_none() && history.is_empty() {
         return Err(anyhow!("{entity_type} {id} not found"));

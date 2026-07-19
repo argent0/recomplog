@@ -337,6 +337,111 @@ pub mod entity {
     pub const PRODUCT: &str = "product";
     pub const STORE: &str = "store";
     pub const MICRONUTRIENT: &str = "micronutrient";
+
+    /// All known entity_type values for `audit recent --entity` validation.
+    pub const ALL: &[&str] = &[
+        WORKOUT,
+        EXERCISE_SET,
+        EXERCISE,
+        MEASUREMENT,
+        SLEEP,
+        CONSUMPTION,
+        PURCHASE,
+        PRODUCT,
+        STORE,
+        MICRONUTRIENT,
+    ];
+}
+
+/// Map audit `entity_type` to the SQLite event table that holds `supersedes_id`.
+/// Catalog entities return `None`.
+pub fn event_table_for_entity(entity_type: &str) -> Option<&'static str> {
+    match entity_type {
+        entity::WORKOUT => Some("workouts"),
+        entity::EXERCISE_SET => Some("exercise_sets"),
+        entity::MEASUREMENT => Some("measurements"),
+        entity::SLEEP => Some("sleep"),
+        entity::CONSUMPTION => Some("consumptions"),
+        entity::PURCHASE => Some("purchases"),
+        _ => None,
+    }
+}
+
+/// Validate `--entity` filter tokens; returns normalized type list or an error.
+pub fn parse_entity_filter(raw: &[String]) -> Result<Vec<String>> {
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(raw.len());
+    for token in raw {
+        let t = token.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // Accept common CLI aliases.
+        let normalized = match t {
+            "set" => entity::EXERCISE_SET,
+            other => other,
+        };
+        if !entity::ALL.contains(&normalized) {
+            return Err(anyhow!(
+                "unknown entity type '{t}'; expected one of: {}",
+                entity::ALL.join(", ")
+            ));
+        }
+        if !out.iter().any(|e| e == normalized) {
+            out.push(normalized.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// Live successor of a superseded head (`WHERE supersedes_id = id AND deleted_at IS NULL`).
+pub fn lookup_superseded_by(conn: &Connection, table: &str, entity_id: i64) -> Result<Option<i64>> {
+    validate_event_table(table)?;
+    conn.query_row(
+        &format!(
+            "SELECT id FROM {table} WHERE supersedes_id = ?1 AND deleted_at IS NULL \
+             ORDER BY id ASC LIMIT 1"
+        ),
+        [entity_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Attach `superseded_by` onto an audit `current` object when a live successor exists.
+pub fn attach_superseded_by(
+    conn: &Connection,
+    entity_type: &str,
+    current: &mut JsonValue,
+) -> Result<()> {
+    let Some(table) = event_table_for_entity(entity_type) else {
+        return Ok(());
+    };
+    let Some(obj) = current.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(id) = obj.get("id").and_then(|v| v.as_i64()) else {
+        return Ok(());
+    };
+    // Only meaningful when this row was retired (soft-deleted) by supersede.
+    let deleted = obj
+        .get("deleted_at")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !deleted {
+        obj.insert("superseded_by".into(), JsonValue::Null);
+        return Ok(());
+    }
+    let by = lookup_superseded_by(conn, table, id)?;
+    obj.insert(
+        "superseded_by".into(),
+        by.map(JsonValue::from).unwrap_or(JsonValue::Null),
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -778,6 +883,95 @@ pub fn list_history(
     Ok(out)
 }
 
+/// Recent audit rows across entities (newest first). Filters by storage time `at`.
+///
+/// `entity_types` empty = all types. `since_at` / `until_at` are inclusive RFC3339 Z
+/// bounds compared as text (canonical `…Z` sorts lexicographically with time).
+pub fn list_recent(
+    conn: &Connection,
+    since_at: &str,
+    until_at: &str,
+    entity_types: &[String],
+    limit: i64,
+) -> Result<Vec<JsonValue>> {
+    let lim = limit.max(1);
+
+    // Bound parameters first; optional IN-list follows; LIMIT last.
+    let mut sql = String::from(
+        "SELECT id, entity_type, entity_id, at, kind, actor, summary, fields_json, meta_json
+         FROM entity_audit
+         WHERE at >= ?1 AND at <= ?2",
+    );
+    if !entity_types.is_empty() {
+        sql.push_str(" AND entity_type IN (");
+        for i in 0..entity_types.len() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            // 1-based: ?3, ?4, … after since/until
+            sql.push_str(&format!("?{}", i + 3));
+        }
+        sql.push(')');
+    }
+    let limit_ph = if entity_types.is_empty() {
+        3
+    } else {
+        entity_types.len() + 3
+    };
+    sql.push_str(&format!(" ORDER BY at DESC, id DESC LIMIT ?{limit_ph}"));
+
+    let mut stmt = conn.prepare(&sql)?;
+
+    // Collect owned params then borrow for query_map.
+    let mut owned: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(entity_types.len() + 3);
+    owned.push(Box::new(since_at.to_string()));
+    owned.push(Box::new(until_at.to_string()));
+    for t in entity_types {
+        owned.push(Box::new(t.clone()));
+    }
+    owned.push(Box::new(lim));
+    let param_refs: Vec<&dyn rusqlite::ToSql> = owned.iter().map(|p| p.as_ref()).collect();
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |r| {
+            let fields_raw: Option<String> = r.get(7)?;
+            let meta_raw: Option<String> = r.get(8)?;
+            let fields = fields_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(JsonValue::Null);
+            let meta = meta_raw
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(JsonValue::Null);
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "entity_type": r.get::<_, String>(1)?,
+                "entity_id": r.get::<_, i64>(2)?,
+                "at": r.get::<_, String>(3)?,
+                "kind": r.get::<_, String>(4)?,
+                "actor": r.get::<_, Option<String>>(5)?,
+                "summary": r.get::<_, Option<String>>(6)?,
+                "fields": fields,
+                "meta": meta,
+            }))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Enrich optional audit `current` with live `superseded_by` (event entities only).
+pub fn enrich_current_supersede(
+    conn: &Connection,
+    entity_type: &str,
+    mut current: Option<JsonValue>,
+) -> Result<Option<JsonValue>> {
+    if let Some(ref mut c) = current {
+        attach_superseded_by(conn, entity_type, c)?;
+    }
+    Ok(current)
+}
+
 /// If no stored audit rows exist, synthesize a single `create` from `current.created_at`
 /// (S7a v0: inspectable history before writers cover every create path).
 pub fn enrich_history(current: &Option<JsonValue>, history: Vec<JsonValue>) -> Vec<JsonValue> {
@@ -831,10 +1025,25 @@ pub fn print_audit_human(resp: &JsonValue) {
     println!("{entity} {id} audit");
     if resp["current"].is_null() {
         println!("  current: (purged / missing)");
-    } else if let Some(del) = resp["current"]["deleted_at"].as_str() {
-        println!("  current: soft-deleted at {del}");
     } else {
-        println!("  current: present");
+        let cur = &resp["current"];
+        if let Some(del) = cur["deleted_at"].as_str() {
+            print!("  current: soft-deleted at {del}");
+            if let Some(reason) = cur["delete_reason"].as_str() {
+                if !reason.is_empty() {
+                    print!(" ({reason})");
+                }
+            }
+            println!();
+        } else {
+            println!("  current: present");
+        }
+        if let Some(sid) = cur["supersedes_id"].as_i64() {
+            println!("  supersedes_id: {sid}");
+        }
+        if let Some(by) = cur["superseded_by"].as_i64() {
+            println!("  superseded_by: {by}");
+        }
     }
     if let Some(hist) = resp["history"].as_array() {
         if hist.is_empty() {
@@ -846,6 +1055,29 @@ pub fn print_audit_human(resp: &JsonValue) {
             let kind = h["kind"].as_str().unwrap_or("?");
             let summary = h["summary"].as_str().unwrap_or("");
             println!("  {seq}. [{at}] {kind} {summary}");
+        }
+    }
+}
+
+/// One-line human dump for `audit recent` entries.
+pub fn print_recent_human(entries: &[JsonValue], quiet: bool) {
+    if !quiet {
+        if entries.is_empty() {
+            println!("audit recent: (none)");
+            return;
+        }
+        println!("audit recent ({} entries, newest first)", entries.len());
+    }
+    for e in entries {
+        let at = e["at"].as_str().unwrap_or("?");
+        let et = e["entity_type"].as_str().unwrap_or("?");
+        let eid = e["entity_id"].as_i64().unwrap_or(0);
+        let kind = e["kind"].as_str().unwrap_or("?");
+        let summary = e["summary"].as_str().unwrap_or("");
+        if summary.is_empty() {
+            println!("[{at}] {et} {eid}  {kind}");
+        } else {
+            println!("[{at}] {et} {eid}  {kind}  {summary}");
         }
     }
 }

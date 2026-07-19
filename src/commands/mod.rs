@@ -1,5 +1,6 @@
 //! Command handlers for recomplog (grouped CLI surface).
 
+mod audit;
 mod backup;
 pub mod body;
 mod check;
@@ -110,6 +111,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             },
         },
         Commands::Import { action } => import::handle(action, db_override, json),
+        Commands::Audit { action } => audit::handle(action, db_override, json, quiet),
         Commands::Workout { action } => {
             workout::handle(*action, db_override, &sanity.workout, json, quiet)
         }

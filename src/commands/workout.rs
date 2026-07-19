@@ -4035,6 +4035,8 @@ fn handle_workout_audit(db_override: Option<&str>, id: i64, limit: i64, json: bo
             },
         )
         .optional()?;
+    let current =
+        entity_audit::enrich_current_supersede(&conn, entity_audit::entity::WORKOUT, current)?;
     let history = entity_audit::list_history(&conn, entity_audit::entity::WORKOUT, id, limit)?;
     // If row never existed and no audit, treat as not found.
     if current.is_none() && history.is_empty() {
@@ -4072,6 +4074,8 @@ fn handle_set_audit(db_override: Option<&str>, id: i64, limit: i64, json: bool) 
             },
         )
         .optional()?;
+    let current =
+        entity_audit::enrich_current_supersede(&conn, entity_audit::entity::EXERCISE_SET, current)?;
     let history = entity_audit::list_history(&conn, entity_audit::entity::EXERCISE_SET, id, limit)?;
     if current.is_none() && history.is_empty() {
         return Err(anyhow!("set {id} not found"));

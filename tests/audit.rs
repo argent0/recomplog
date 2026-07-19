@@ -1,4 +1,4 @@
-//! S7a/S7b/S7c: `audit` CLI + event, catalog, merge, and import writers.
+//! S7a–S7d: `audit` CLI + writers + `audit recent` + supersede fields.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -1351,4 +1351,347 @@ fn audit_unknown_id_fails() {
         ])
         .assert()
         .failure();
+}
+
+// ---------- S7d: audit recent + supersede fields ----------
+
+#[test]
+fn audit_recent_empty_db() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    let recent = json_stdout(
+        bin()
+            .args(["--db", &db, "--json", "audit", "recent", "--days", "7"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(recent["success"], true);
+    assert_eq!(recent["days"], 7);
+    assert_eq!(recent["count"], 0);
+    assert!(recent["entries"].as_array().unwrap().is_empty());
+    assert!(recent["since_at"].as_str().is_some());
+    assert!(recent["until_at"].as_str().is_some());
+    assert!(recent["entity_filter"].is_null());
+}
+
+#[test]
+fn audit_recent_lists_creates_newest_first_and_filters() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "body",
+            "measurement",
+            "create",
+            "--date",
+            "2026-07-10",
+            "--weight-kg",
+            "80.0",
+        ])
+        .assert()
+        .success();
+
+    let product = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "product",
+                "create",
+                "Oats",
+            ])
+            .assert()
+            .success(),
+    );
+    let pid = product["id"].as_i64().unwrap().to_string();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "nutrition",
+            "set",
+            &pid,
+            "--reference-quantity",
+            "100",
+            "--reference-unit",
+            "g",
+            "--energy-kcal",
+            "380",
+            "--protein-g",
+            "13",
+            "--carbohydrates-g",
+            "60",
+            "--fat-g",
+            "7",
+            "--fiber-g",
+            "10",
+            "--sugars-g",
+            "1",
+        ])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "consumption",
+            "create",
+            "--product",
+            &pid,
+            "--quantity",
+            "50",
+            "--unit",
+            "g",
+            "--consumed-at",
+            "2026-07-14T08:30:00-03:00",
+        ])
+        .assert()
+        .success();
+
+    let recent = json_stdout(
+        bin()
+            .args(["--db", &db, "--json", "audit", "recent", "--days", "7"])
+            .assert()
+            .success(),
+    );
+    assert!(recent["count"].as_u64().unwrap() >= 3);
+    let entries = recent["entries"].as_array().unwrap();
+    // Newest first: each at >= next
+    for w in entries.windows(2) {
+        let a = w[0]["at"].as_str().unwrap();
+        let b = w[1]["at"].as_str().unwrap();
+        assert!(a >= b, "expected newest-first: {a} then {b}");
+    }
+    let types: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| e["entity_type"].as_str())
+        .collect();
+    assert!(types.contains(&"measurement"));
+    assert!(types.contains(&"consumption"));
+    assert!(types.contains(&"product"));
+
+    let only_cons = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "audit",
+                "recent",
+                "--days",
+                "7",
+                "--entity",
+                "consumption",
+            ])
+            .assert()
+            .success(),
+    );
+    let cons_entries = only_cons["entries"].as_array().unwrap();
+    assert!(!cons_entries.is_empty());
+    for e in cons_entries {
+        assert_eq!(e["entity_type"], "consumption");
+    }
+    assert_eq!(only_cons["entity_filter"][0], "consumption");
+
+    let limited = json_stdout(
+        bin()
+            .args([
+                "--db", &db, "--json", "audit", "recent", "--days", "7", "--limit", "1",
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(limited["count"], 1);
+    assert_eq!(limited["entries"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn audit_recent_unknown_entity_fails() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "audit",
+            "recent",
+            "--entity",
+            "not_a_thing",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown entity type"));
+}
+
+#[test]
+fn audit_recent_shows_supersede_and_current_superseded_by() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    let product = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "product",
+                "create",
+                "Oats",
+            ])
+            .assert()
+            .success(),
+    );
+    let pid = product["id"].as_i64().unwrap().to_string();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "nutrition",
+            "set",
+            &pid,
+            "--reference-quantity",
+            "100",
+            "--reference-unit",
+            "g",
+            "--energy-kcal",
+            "380",
+            "--protein-g",
+            "13",
+            "--carbohydrates-g",
+            "60",
+            "--fat-g",
+            "7",
+            "--fiber-g",
+            "10",
+            "--sugars-g",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let created = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "consumption",
+                "create",
+                "--product",
+                &pid,
+                "--quantity",
+                "80",
+                "--unit",
+                "g",
+                "--consumed-at",
+                "2026-07-14T13:45:00-03:00",
+            ])
+            .assert()
+            .success(),
+    );
+    let old_id = created["id"].as_i64().unwrap();
+
+    let corrected = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "consumption",
+                "correct",
+                &old_id.to_string(),
+                "--quantity",
+                "90",
+                "--unit",
+                "g",
+                "--reason",
+                "weighed again",
+            ])
+            .assert()
+            .success(),
+    );
+    let new_id = corrected["id"].as_i64().unwrap();
+
+    let recent = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "audit",
+                "recent",
+                "--days",
+                "7",
+                "--entity",
+                "consumption",
+            ])
+            .assert()
+            .success(),
+    );
+    let kinds: Vec<&str> = recent["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["kind"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"supersede"),
+        "expected supersede in recent: {kinds:?}"
+    );
+    assert!(kinds.contains(&"create"), "expected create: {kinds:?}");
+
+    let audit_old = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "consumption",
+                "audit",
+                &old_id.to_string(),
+            ])
+            .assert()
+            .success(),
+    );
+    assert!(audit_old["current"]["deleted_at"].as_str().is_some());
+    assert_eq!(audit_old["current"]["superseded_by"], new_id);
+
+    let audit_new = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "consumption",
+                "audit",
+                &new_id.to_string(),
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(audit_new["current"]["supersedes_id"], old_id);
+    assert!(audit_new["current"]["deleted_at"].is_null());
+    assert!(audit_new["current"]["superseded_by"].is_null());
 }

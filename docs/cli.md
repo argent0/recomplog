@@ -101,6 +101,18 @@ recomplog nutrition consumption create --product 3 --quantity 1 --unit unit --da
 recomplog nutrition consumption create --product 16 --quantity 7 --unit g --date today
 ```
 
+### Cross-domain audit (top-level)
+
+Per-entity history lives under each entity (`workout audit`, `nutrition consumption audit`, …).
+For a storage-time feed of recent mutations across domains:
+
+```bash
+# Last 7 calendar days of audit rows (newest first); filter by entity_audit.at
+recomplog --json audit recent --days 7
+recomplog --json audit recent --days 7 --entity consumption,workout
+recomplog --json audit recent --days 3 --entity measurement --limit 20
+```
+
 ### Reports (top-level)
 
 ```bash

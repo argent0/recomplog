@@ -166,6 +166,9 @@ recomplog --json nutrition product audit 14
 recomplog --json body measurement update --id 3 --weight-kg 80.5 --reason "scale typo"
 recomplog --json body measurement audit --id 3
 recomplog --json body sleep audit --date yesterday
+# Cross-domain recent mutations (storage time of audit rows; newest first)
+recomplog --json audit recent --days 7
+recomplog --json audit recent --days 7 --entity consumption,workout
 recomplog --json workout set add --workout 1 --exercise "bench press" --reps 5 --weight 100 --phase full
 recomplog --json workout set update 1 --reps 6 --reason "miscount"
 # body_mass: --weight optional when a body measurement exists
