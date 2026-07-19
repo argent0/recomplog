@@ -77,6 +77,7 @@ pub fn handle(
                 params![started, finished, workout_type, notes, created],
             )?;
             let id = conn.last_insert_rowid();
+            entity_audit::append_create(&conn, entity_audit::entity::WORKOUT, id, None)?;
             if json {
                 print_json(&Success::created_workout(
                     id,
@@ -173,22 +174,44 @@ pub fn handle(
             dry_run,
         } => {
             let conn = db::open_db(db_override)?;
-            let row: Option<(i64, Option<String>)> = conn
+            // before-image for audit field diffs
+            type WorkoutBefore = (
+                Option<String>, // deleted_at
+                Option<String>, // workout_type
+                Option<String>, // notes
+                Option<i64>,    // duration_minutes
+                Option<i64>,    // overall_feeling
+                String,         // started_at
+                Option<String>, // finished_at
+            );
+            let before: Option<WorkoutBefore> = conn
                 .query_row(
-                    "SELECT id, deleted_at FROM workouts WHERE id=?1",
+                    "SELECT deleted_at, workout_type, notes, duration_minutes, overall_feeling, \
+                     started_at, finished_at FROM workouts WHERE id=?1",
                     [id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                        ))
+                    },
                 )
                 .optional()?;
-            match row {
-                None => return Err(anyhow!("workout {id} not found")),
-                Some((_, Some(_))) => {
-                    return Err(anyhow!(
-                        "workout {id} is soft-deleted (restore not implemented; use audit to inspect)"
-                    ));
-                }
-                Some((_, None)) => {}
-            }
+            let (old_type, old_notes, old_duration, old_feeling, old_started, old_finished) =
+                match before {
+                    None => return Err(anyhow!("workout {id} not found")),
+                    Some((Some(_), ..)) => {
+                        return Err(anyhow!(
+                            "workout {id} is soft-deleted (restore not implemented; use audit to inspect)"
+                        ));
+                    }
+                    Some((None, t, n, d, f, s, fin)) => (t, n, d, f, s, fin),
+                };
             if let Some(f) = feeling {
                 if !(1..=5).contains(&f) {
                     return Err(anyhow!("feeling must be 1-5"));
@@ -205,27 +228,58 @@ pub fn handle(
             // Dynamic partial update
             let mut sets = vec![];
             let mut vals: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+            let mut changes: Vec<entity_audit::FieldChange> = Vec::new();
             if let Some(v) = workout_type {
+                changes.push(entity_audit::FieldChange::new(
+                    "workout_type",
+                    opt_str_json(old_type.as_deref()),
+                    serde_json::json!(v),
+                ));
                 sets.push("workout_type = ?");
                 vals.push(Box::new(v));
             }
             if let Some(v) = notes {
+                changes.push(entity_audit::FieldChange::new(
+                    "notes",
+                    opt_str_json(old_notes.as_deref()),
+                    serde_json::json!(v),
+                ));
                 sets.push("notes = ?");
                 vals.push(Box::new(v));
             }
             if let Some(v) = duration {
+                changes.push(entity_audit::FieldChange::new(
+                    "duration_minutes",
+                    opt_i64_json(old_duration),
+                    serde_json::json!(v),
+                ));
                 sets.push("duration_minutes = ?");
                 vals.push(Box::new(v));
             }
             if let Some(v) = feeling {
+                changes.push(entity_audit::FieldChange::new(
+                    "overall_feeling",
+                    opt_i64_json(old_feeling),
+                    serde_json::json!(v),
+                ));
                 sets.push("overall_feeling = ?");
                 vals.push(Box::new(v));
             }
             if let Some(v) = started {
+                changes.push(entity_audit::FieldChange::new(
+                    "started_at",
+                    serde_json::json!(old_started),
+                    serde_json::json!(v),
+                ));
                 sets.push("started_at = ?");
                 vals.push(Box::new(v));
             }
             if let Some(v) = finished {
+                changes.push(entity_audit::FieldChange::new(
+                    "finished_at",
+                    opt_str_json(old_finished.as_deref()),
+                    serde_json::json!(v),
+                ));
                 sets.push("finished_at = ?");
                 vals.push(Box::new(v));
             }
@@ -247,6 +301,7 @@ pub fn handle(
             vals.push(Box::new(id));
             let refs: Vec<&dyn rusqlite::ToSql> = vals.iter().map(|b| b.as_ref()).collect();
             conn.execute(&sql, refs.as_slice())?;
+            entity_audit::append_update(&conn, entity_audit::entity::WORKOUT, id, &changes, None)?;
             if json {
                 print_json(&Success::created(id, "updated", "workout updated"));
             } else {
@@ -1748,7 +1803,9 @@ fn insert_set(
             db::now_utc(),
         ],
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    entity_audit::append_create(conn, entity_audit::entity::EXERCISE_SET, id, None)?;
+    Ok(id)
 }
 
 /// Validate set metrics without writing (for dry-run paths).
@@ -2632,14 +2689,92 @@ fn handle_set(
             dry_run,
         } => {
             let conn = db::open_db(db_override)?;
-            let exists: Option<i64> = conn
-                .query_row("SELECT id FROM exercise_sets WHERE id=?1", [id], |r| {
-                    r.get(0)
-                })
+            // Load before-image for audit (all columns that set update can touch).
+            type SetBefore = (
+                Option<i32>,    // reps
+                Option<f64>,    // weight_kg
+                Option<f64>,    // external_load_kg
+                Option<i32>,    // duration_seconds
+                Option<f64>,    // distance_km
+                Option<f64>,    // rpe
+                Option<f64>,    // rir
+                Option<i32>,    // effective_reps
+                Option<i32>,    // rest_seconds
+                Option<String>, // notes
+                Option<String>, // side
+                String,         // phase
+                Option<f64>,    // avg_heart_rate_bpm
+                Option<f64>,    // max_heart_rate_bpm
+                Option<f64>,    // avg_pace_min_per_km
+                Option<i32>,    // calories_burned
+                Option<f64>,    // avg_cadence_spm
+                Option<f64>,    // total_ascent_m
+                Option<f64>,    // total_descent_m
+                Option<String>, // heart_rate_zones
+                Option<String>, // laps
+            );
+            let before: Option<SetBefore> = conn
+                .query_row(
+                    "SELECT reps, weight_kg, external_load_kg, duration_seconds, distance_km,
+                            rpe, rir, effective_reps, rest_seconds, notes, side, phase,
+                            avg_heart_rate_bpm, max_heart_rate_bpm, avg_pace_min_per_km,
+                            calories_burned, avg_cadence_spm, total_ascent_m, total_descent_m,
+                            heart_rate_zones, laps
+                     FROM exercise_sets WHERE id=?1",
+                    [id],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                            r.get(7)?,
+                            r.get(8)?,
+                            r.get(9)?,
+                            r.get(10)?,
+                            r.get(11)?,
+                            r.get(12)?,
+                            r.get(13)?,
+                            r.get(14)?,
+                            r.get(15)?,
+                            r.get(16)?,
+                            r.get(17)?,
+                            r.get(18)?,
+                            r.get(19)?,
+                            r.get(20)?,
+                        ))
+                    },
+                )
                 .optional()?;
-            if exists.is_none() {
+            let Some((
+                old_reps,
+                old_weight,
+                old_external,
+                old_duration,
+                old_distance,
+                old_rpe,
+                old_rir,
+                old_effective,
+                old_rest,
+                old_notes,
+                old_side,
+                old_phase,
+                old_avg_hr,
+                old_max_hr,
+                old_pace,
+                old_calories,
+                old_cadence,
+                old_ascent,
+                old_descent,
+                old_zones,
+                old_laps,
+            )) = before
+            else {
                 return Err(anyhow!("set {id} not found"));
-            }
+            };
             let resolved_phase = phase
                 .as_ref()
                 .map(|p| phase::normalize_phase(p))
@@ -2672,49 +2807,94 @@ fn handle_set(
 
             let mut sets = vec![];
             let mut vals: Vec<Box<dyn rusqlite::ToSql>> = vec![];
-            macro_rules! push_opt {
-                ($field:expr, $col:expr) => {
+            let mut changes: Vec<entity_audit::FieldChange> = Vec::new();
+            macro_rules! push_opt_i32 {
+                ($field:expr, $col:expr, $old:expr) => {
                     if let Some(v) = $field {
+                        changes.push(entity_audit::FieldChange::new(
+                            $col,
+                            opt_i32_json($old),
+                            serde_json::json!(v),
+                        ));
                         sets.push(concat!($col, " = ?"));
                         vals.push(Box::new(v));
                     }
                 };
             }
-            push_opt!(reps, "reps");
-            push_opt!(weight, "weight_kg");
-            push_opt!(external_load, "external_load_kg");
-            push_opt!(duration, "duration_seconds");
-            push_opt!(distance, "distance_km");
-            push_opt!(rpe, "rpe");
-            push_opt!(rir, "rir");
-            push_opt!(effective_reps, "effective_reps");
-            push_opt!(rest_seconds, "rest_seconds");
+            macro_rules! push_opt_f64 {
+                ($field:expr, $col:expr, $old:expr) => {
+                    if let Some(v) = $field {
+                        changes.push(entity_audit::FieldChange::new(
+                            $col,
+                            opt_f64_json($old),
+                            serde_json::json!(v),
+                        ));
+                        sets.push(concat!($col, " = ?"));
+                        vals.push(Box::new(v));
+                    }
+                };
+            }
+            push_opt_i32!(reps, "reps", old_reps);
+            push_opt_f64!(weight, "weight_kg", old_weight);
+            push_opt_f64!(external_load, "external_load_kg", old_external);
+            push_opt_i32!(duration, "duration_seconds", old_duration);
+            push_opt_f64!(distance, "distance_km", old_distance);
+            push_opt_f64!(rpe, "rpe", old_rpe);
+            push_opt_f64!(rir, "rir", old_rir);
+            push_opt_i32!(effective_reps, "effective_reps", old_effective);
+            push_opt_i32!(rest_seconds, "rest_seconds", old_rest);
             if let Some(v) = notes {
+                changes.push(entity_audit::FieldChange::new(
+                    "notes",
+                    opt_str_json(old_notes.as_deref()),
+                    serde_json::json!(v),
+                ));
                 sets.push("notes = ?");
                 vals.push(Box::new(v));
             }
             if let Some(v) = side {
+                changes.push(entity_audit::FieldChange::new(
+                    "side",
+                    opt_str_json(old_side.as_deref()),
+                    serde_json::json!(v),
+                ));
                 sets.push("side = ?");
                 vals.push(Box::new(v));
             }
             if let Some(v) = resolved_phase {
+                let new_phase = v.to_string();
+                changes.push(entity_audit::FieldChange::new(
+                    "phase",
+                    serde_json::json!(old_phase),
+                    serde_json::json!(new_phase),
+                ));
                 sets.push("phase = ?");
-                vals.push(Box::new(v.to_string()));
+                vals.push(Box::new(new_phase));
             }
-            push_opt!(avg_heart_rate, "avg_heart_rate_bpm");
-            push_opt!(max_heart_rate, "max_heart_rate_bpm");
-            push_opt!(pace, "avg_pace_min_per_km");
-            push_opt!(calories, "calories_burned");
-            push_opt!(cadence, "avg_cadence_spm");
-            push_opt!(ascent, "total_ascent_m");
-            push_opt!(descent, "total_descent_m");
+            push_opt_f64!(avg_heart_rate, "avg_heart_rate_bpm", old_avg_hr);
+            push_opt_f64!(max_heart_rate, "max_heart_rate_bpm", old_max_hr);
+            push_opt_f64!(pace, "avg_pace_min_per_km", old_pace);
+            push_opt_i32!(calories, "calories_burned", old_calories);
+            push_opt_f64!(cadence, "avg_cadence_spm", old_cadence);
+            push_opt_f64!(ascent, "total_ascent_m", old_ascent);
+            push_opt_f64!(descent, "total_descent_m", old_descent);
             if let Some(z) = zones {
                 let zones_json = serde_json::to_string(&z).map_err(|e| anyhow!("{e}"))?;
+                changes.push(entity_audit::FieldChange::new(
+                    "heart_rate_zones",
+                    opt_str_json(old_zones.as_deref()),
+                    serde_json::json!(zones_json),
+                ));
                 sets.push("heart_rate_zones = ?");
                 vals.push(Box::new(zones_json));
             }
             if let Some(l) = laps_v {
                 let laps_json = serde_json::to_string(&l.0).map_err(|e| anyhow!("{e}"))?;
+                changes.push(entity_audit::FieldChange::new(
+                    "laps",
+                    opt_str_json(old_laps.as_deref()),
+                    serde_json::json!(laps_json),
+                ));
                 sets.push("laps = ?");
                 vals.push(Box::new(laps_json));
             }
@@ -2736,6 +2916,13 @@ fn handle_set(
             vals.push(Box::new(id));
             let refs: Vec<&dyn rusqlite::ToSql> = vals.iter().map(|b| b.as_ref()).collect();
             conn.execute(&sql, refs.as_slice())?;
+            entity_audit::append_update(
+                &conn,
+                entity_audit::entity::EXERCISE_SET,
+                id,
+                &changes,
+                None,
+            )?;
             if json {
                 print_json(&Success::created(id, "updated", "set updated"));
             } else {
@@ -3206,4 +3393,32 @@ pub fn seed_default_exercises(conn: &Connection) -> Result<Vec<String>> {
         }
     }
     Ok(added)
+}
+
+fn opt_str_json(v: Option<&str>) -> serde_json::Value {
+    match v {
+        Some(s) => serde_json::json!(s),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn opt_i64_json(v: Option<i64>) -> serde_json::Value {
+    match v {
+        Some(n) => serde_json::json!(n),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn opt_i32_json(v: Option<i32>) -> serde_json::Value {
+    match v {
+        Some(n) => serde_json::json!(n),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn opt_f64_json(v: Option<f64>) -> serde_json::Value {
+    match v {
+        Some(n) => serde_json::json!(n),
+        None => serde_json::Value::Null,
+    }
 }

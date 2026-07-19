@@ -1400,6 +1400,7 @@ fn handle_purchase(
                 params![product, quantity, price_cents, store, when, now],
             )?;
             let id = conn.last_insert_rowid();
+            entity_audit::append_create(&conn, entity_audit::entity::PURCHASE, id, None)?;
             if json {
                 print_json(&Success::created_purchase(
                     id,
@@ -1663,6 +1664,7 @@ fn handle_consumption(
                 params![product, resolved.quantity, resolved.unit, when, now],
             )?;
             let id = conn.last_insert_rowid();
+            entity_audit::append_create(&conn, entity_audit::entity::CONSUMPTION, id, None)?;
             if json {
                 print_json(&serde_json::json!({
                     "success": true,

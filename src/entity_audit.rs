@@ -17,6 +17,111 @@ pub mod kind {
     #[allow(dead_code)]
     pub const RESTORE: &str = "restore";
     pub const CREATE: &str = "create";
+    pub const UPDATE: &str = "update";
+}
+
+/// One field change for `kind: update` (`fields_json` entries).
+#[derive(Debug, Clone)]
+pub struct FieldChange {
+    pub name: String,
+    pub old: JsonValue,
+    pub new: JsonValue,
+}
+
+impl FieldChange {
+    pub fn new(name: impl Into<String>, old: JsonValue, new: JsonValue) -> Self {
+        Self {
+            name: name.into(),
+            old,
+            new,
+        }
+    }
+
+    /// True when old and new serialize to the same JSON (no meaningful change).
+    pub fn is_noop(&self) -> bool {
+        self.old == self.new
+    }
+}
+
+/// Append a `create` audit row (CLI / import / etc.).
+pub fn append_create(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: i64,
+    actor: Option<&str>,
+) -> Result<i64> {
+    append(
+        conn,
+        entity_type,
+        entity_id,
+        kind::CREATE,
+        Some(actor.unwrap_or("cli")),
+        Some("created"),
+        None,
+        None,
+    )
+}
+
+/// Append an `update` audit row with field-level old/new (skips no-op pairs).
+///
+/// Returns `Ok(None)` when every field was a no-op (caller should not call this
+/// after a real SQL update that changed nothing meaningful, but it is safe).
+pub fn append_update(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: i64,
+    fields: &[FieldChange],
+    actor: Option<&str>,
+) -> Result<Option<i64>> {
+    let changed: Vec<&FieldChange> = fields.iter().filter(|f| !f.is_noop()).collect();
+    if changed.is_empty() {
+        return Ok(None);
+    }
+    let fields_json = JsonValue::Array(
+        changed
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "name": f.name,
+                    "old": f.old,
+                    "new": f.new,
+                })
+            })
+            .collect(),
+    );
+    let summary = match changed.len() {
+        1 => {
+            let f = changed[0];
+            Some(format!(
+                "{} {}→{}",
+                f.name,
+                json_compact(&f.old),
+                json_compact(&f.new)
+            ))
+        }
+        n => Some(format!("updated {n} fields")),
+    };
+    let id = append(
+        conn,
+        entity_type,
+        entity_id,
+        kind::UPDATE,
+        Some(actor.unwrap_or("cli")),
+        summary.as_deref(),
+        Some(&fields_json.to_string()),
+        None,
+    )?;
+    Ok(Some(id))
+}
+
+fn json_compact(v: &JsonValue) -> String {
+    match v {
+        JsonValue::Null => "null".into(),
+        JsonValue::Bool(b) => b.to_string(),
+        JsonValue::Number(n) => n.to_string(),
+        JsonValue::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// Entity type strings stored in `entity_audit.entity_type`.

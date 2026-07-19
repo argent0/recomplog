@@ -133,7 +133,9 @@ impl Repository {
                 now
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        entity_audit::append_create(&self.conn, entity_audit::entity::MEASUREMENT, id, None)?;
+        Ok(id)
     }
 
     /// List measurements in [since, until] (inclusive), or all if None.
@@ -240,7 +242,7 @@ impl Repository {
     }
 
     /// Update fields on an existing measurement (by id). Only non-None fields are changed.
-    /// Refreshes updated_at.
+    /// Refreshes updated_at. Appends an `entity_audit` update row for changed fields.
     #[allow(clippy::too_many_arguments)]
     pub fn update_measurement(
         &self,
@@ -252,8 +254,7 @@ impl Repository {
         bmi: Option<f64>,
         resting_metabolism_kcal: Option<i64>,
     ) -> Result<()> {
-        // Ensure exists
-        let _ = self.get_measurement(id)?;
+        let before = self.get_measurement(id)?;
 
         let now = now_utc();
 
@@ -261,30 +262,61 @@ impl Repository {
         // We always touch updated_at.
         let mut sets: Vec<String> = vec!["updated_at = ?".to_string()];
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now)];
+        let mut changes: Vec<entity_audit::FieldChange> = Vec::new();
 
         if let Some(v) = weight_kg {
             sets.push("weight_kg = ?".to_string());
             params.push(Box::new(v));
+            changes.push(entity_audit::FieldChange::new(
+                "weight_kg",
+                opt_f64_json(before.weight_kg),
+                serde_json::json!(v),
+            ));
         }
         if let Some(v) = body_fat_pct {
             sets.push("body_fat_pct = ?".to_string());
             params.push(Box::new(v));
+            changes.push(entity_audit::FieldChange::new(
+                "body_fat_pct",
+                opt_f64_json(before.body_fat_pct),
+                serde_json::json!(v),
+            ));
         }
         if let Some(v) = skeletal_muscle_pct {
             sets.push("skeletal_muscle_pct = ?".to_string());
             params.push(Box::new(v));
+            changes.push(entity_audit::FieldChange::new(
+                "skeletal_muscle_pct",
+                opt_f64_json(before.skeletal_muscle_pct),
+                serde_json::json!(v),
+            ));
         }
         if let Some(v) = visceral_fat_level {
             sets.push("visceral_fat_level = ?".to_string());
             params.push(Box::new(v));
+            changes.push(entity_audit::FieldChange::new(
+                "visceral_fat_level",
+                opt_i64_json(before.visceral_fat_level),
+                serde_json::json!(v),
+            ));
         }
         if let Some(v) = bmi {
             sets.push("bmi = ?".to_string());
             params.push(Box::new(v));
+            changes.push(entity_audit::FieldChange::new(
+                "bmi",
+                opt_f64_json(before.bmi),
+                serde_json::json!(v),
+            ));
         }
         if let Some(v) = resting_metabolism_kcal {
             sets.push("resting_metabolism_kcal = ?".to_string());
             params.push(Box::new(v));
+            changes.push(entity_audit::FieldChange::new(
+                "resting_metabolism_kcal",
+                opt_i64_json(before.resting_metabolism_kcal),
+                serde_json::json!(v),
+            ));
         }
 
         let sql = format!("UPDATE measurements SET {} WHERE id = ?", sets.join(", "));
@@ -297,6 +329,13 @@ impl Repository {
         if affected == 0 {
             return Err(RecomplogError::MeasurementNotFound(id));
         }
+        entity_audit::append_update(
+            &self.conn,
+            entity_audit::entity::MEASUREMENT,
+            id,
+            &changes,
+            None,
+        )?;
         Ok(())
     }
 
@@ -607,7 +646,9 @@ impl Repository {
                 now
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        entity_audit::append_create(&self.conn, entity_audit::entity::SLEEP, id, None)?;
+        Ok(id)
     }
 
     /// List sleep sessions in [since, until] (inclusive), or all if None.
@@ -708,7 +749,7 @@ impl Repository {
     }
 
     /// Update fields on an existing sleep record (by id). Only non-None fields are changed.
-    /// Refreshes updated_at. Partial updates supported.
+    /// Refreshes updated_at. Partial updates supported. Appends entity_audit for changes.
     #[allow(clippy::too_many_arguments)]
     pub fn update_sleep(
         &self,
@@ -730,55 +771,90 @@ impl Repository {
         respiratory_rate: Option<f64>,
         notes: Option<&str>,
     ) -> Result<()> {
-        // Ensure exists
-        let _ = self.get_sleep(id)?;
+        let before = self.get_sleep(id)?;
 
         let now = now_utc();
 
         let mut sets: Vec<String> = vec!["updated_at = ?".to_string()];
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now)];
+        let mut changes: Vec<entity_audit::FieldChange> = Vec::new();
 
         macro_rules! set_opt_str {
-            ($field:ident, $col:literal) => {
+            ($field:ident, $col:literal, $old:expr) => {
                 if let Some(v) = $field {
                     sets.push(format!("{} = ?", $col));
                     params.push(Box::new(v.to_string()));
+                    changes.push(entity_audit::FieldChange::new(
+                        $col,
+                        opt_str_json($old.as_deref()),
+                        serde_json::json!(v),
+                    ));
                 }
             };
         }
         macro_rules! set_opt_i64 {
-            ($field:ident, $col:literal) => {
+            ($field:ident, $col:literal, $old:expr) => {
                 if let Some(v) = $field {
                     sets.push(format!("{} = ?", $col));
                     params.push(Box::new(v));
+                    changes.push(entity_audit::FieldChange::new(
+                        $col,
+                        opt_i64_json($old),
+                        serde_json::json!(v),
+                    ));
                 }
             };
         }
         macro_rules! set_opt_f64 {
-            ($field:ident, $col:literal) => {
+            ($field:ident, $col:literal, $old:expr) => {
                 if let Some(v) = $field {
                     sets.push(format!("{} = ?", $col));
                     params.push(Box::new(v));
+                    changes.push(entity_audit::FieldChange::new(
+                        $col,
+                        opt_f64_json($old),
+                        serde_json::json!(v),
+                    ));
                 }
             };
         }
 
-        set_opt_str!(bedtime, "bedtime");
-        set_opt_str!(wake_time, "wake_time");
-        set_opt_i64!(time_in_bed_minutes, "time_in_bed_minutes");
-        set_opt_i64!(total_sleep_minutes, "total_sleep_minutes");
-        set_opt_i64!(rem_minutes, "rem_minutes");
-        set_opt_i64!(deep_minutes, "deep_minutes");
-        set_opt_i64!(light_minutes, "light_minutes");
-        set_opt_i64!(awake_minutes, "awake_minutes");
-        set_opt_f64!(sleep_efficiency_pct, "sleep_efficiency_pct");
-        set_opt_i64!(sleep_score, "sleep_score");
-        set_opt_i64!(subjective_quality, "subjective_quality");
-        set_opt_i64!(awakenings, "awakenings");
-        set_opt_f64!(heart_rate_bpm, "heart_rate_bpm");
-        set_opt_f64!(hypopnea_per_hr, "hypopnea_per_hr");
-        set_opt_f64!(respiratory_rate, "respiratory_rate");
-        set_opt_str!(notes, "notes");
+        set_opt_str!(bedtime, "bedtime", before.bedtime);
+        set_opt_str!(wake_time, "wake_time", before.wake_time);
+        set_opt_i64!(
+            time_in_bed_minutes,
+            "time_in_bed_minutes",
+            before.time_in_bed_minutes
+        );
+        set_opt_i64!(
+            total_sleep_minutes,
+            "total_sleep_minutes",
+            before.total_sleep_minutes
+        );
+        set_opt_i64!(rem_minutes, "rem_minutes", before.rem_minutes);
+        set_opt_i64!(deep_minutes, "deep_minutes", before.deep_minutes);
+        set_opt_i64!(light_minutes, "light_minutes", before.light_minutes);
+        set_opt_i64!(awake_minutes, "awake_minutes", before.awake_minutes);
+        set_opt_f64!(
+            sleep_efficiency_pct,
+            "sleep_efficiency_pct",
+            before.sleep_efficiency_pct
+        );
+        set_opt_i64!(sleep_score, "sleep_score", before.sleep_score);
+        set_opt_i64!(
+            subjective_quality,
+            "subjective_quality",
+            before.subjective_quality
+        );
+        set_opt_i64!(awakenings, "awakenings", before.awakenings);
+        set_opt_f64!(heart_rate_bpm, "heart_rate_bpm", before.heart_rate_bpm);
+        set_opt_f64!(hypopnea_per_hr, "hypopnea_per_hr", before.hypopnea_per_hr);
+        set_opt_f64!(
+            respiratory_rate,
+            "respiratory_rate",
+            before.respiratory_rate
+        );
+        set_opt_str!(notes, "notes", before.notes);
 
         let sql = format!("UPDATE sleep SET {} WHERE id = ?", sets.join(", "));
         params.push(Box::new(id));
@@ -788,6 +864,7 @@ impl Repository {
         if affected == 0 {
             return Err(RecomplogError::SleepNotFound(id));
         }
+        entity_audit::append_update(&self.conn, entity_audit::entity::SLEEP, id, &changes, None)?;
         Ok(())
     }
 
@@ -1019,6 +1096,27 @@ impl Repository {
             }
         };
         Ok(rows)
+    }
+}
+
+fn opt_f64_json(v: Option<f64>) -> serde_json::Value {
+    match v {
+        Some(n) => serde_json::json!(n),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn opt_i64_json(v: Option<i64>) -> serde_json::Value {
+    match v {
+        Some(n) => serde_json::json!(n),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn opt_str_json(v: Option<&str>) -> serde_json::Value {
+    match v {
+        Some(s) => serde_json::json!(s),
+        None => serde_json::Value::Null,
     }
 }
 

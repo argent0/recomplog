@@ -1,4 +1,4 @@
-//! S7a: `audit` CLI on all matrix entities (current + synthetic/create history).
+//! S7a/S7b: `audit` CLI + real create/update writers on event entities.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -24,8 +24,25 @@ fn history_kinds(audit: &Value) -> Vec<&str> {
         .collect()
 }
 
+/// Real (non-synthetic) create: stored audit row id is an integer.
+fn assert_real_create(audit: &Value) {
+    let hist = audit["history"].as_array().expect("history array");
+    let create = hist
+        .iter()
+        .find(|h| h["kind"] == "create")
+        .expect("create entry");
+    assert!(
+        create["id"].as_i64().is_some(),
+        "expected real audit id, got synthetic?: {create}"
+    );
+    assert_ne!(
+        create["meta"]["synthetic"], true,
+        "expected non-synthetic create: {create}"
+    );
+}
+
 #[test]
-fn measurement_audit_synthetic_create_and_soft_delete() {
+fn measurement_audit_real_create_and_soft_delete() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("t.db").display().to_string();
 
@@ -67,11 +84,7 @@ fn measurement_audit_synthetic_create_and_soft_delete() {
     assert_eq!(audit["id"], id);
     assert_eq!(audit["current"]["weight_kg"], 81.2);
     assert!(audit["current"]["created_at"].as_str().is_some());
-    let kinds = history_kinds(&audit);
-    assert!(
-        kinds.contains(&"create"),
-        "expected synthetic or real create: {audit}"
-    );
+    assert_real_create(&audit);
 
     let del = json_stdout(
         bin()
@@ -196,7 +209,7 @@ fn sleep_audit_by_id() {
             .success(),
     );
     assert_eq!(audit["entity"], "sleep");
-    assert!(history_kinds(&audit).contains(&"create"));
+    assert_real_create(&audit);
 }
 
 #[test]
@@ -340,7 +353,7 @@ fn product_store_micronutrient_exercise_audit() {
 }
 
 #[test]
-fn workout_audit_has_synthetic_create_before_delete() {
+fn workout_audit_has_real_create() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("t.db").display().to_string();
 
@@ -356,8 +369,275 @@ fn workout_audit_has_synthetic_create_before_delete() {
             .success(),
     );
     assert_eq!(audit["entity"], "workout");
-    assert!(history_kinds(&audit).contains(&"create"));
-    assert_eq!(audit["history"][0]["meta"]["synthetic"], true);
+    assert_real_create(&audit);
+}
+
+#[test]
+fn measurement_update_writes_audit_fields() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    let created = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "body",
+                "measurement",
+                "create",
+                "--date",
+                "2026-07-12",
+                "--weight-kg",
+                "81.0",
+            ])
+            .assert()
+            .success(),
+    );
+    let id = created["id"].as_i64().unwrap();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "body",
+            "measurement",
+            "update",
+            "--id",
+            &id.to_string(),
+            "--weight-kg",
+            "80.5",
+            "--no-sanity-check",
+        ])
+        .assert()
+        .success();
+
+    let audit = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "body",
+                "measurement",
+                "audit",
+                "--id",
+                &id.to_string(),
+            ])
+            .assert()
+            .success(),
+    );
+    let kinds = history_kinds(&audit);
+    assert_eq!(kinds, vec!["create", "update"]);
+    let update = &audit["history"][1];
+    assert_eq!(update["kind"], "update");
+    let fields = update["fields"].as_array().expect("fields array");
+    let weight = fields
+        .iter()
+        .find(|f| f["name"] == "weight_kg")
+        .expect("weight_kg field");
+    assert_eq!(weight["old"], 81.0);
+    assert_eq!(weight["new"], 80.5);
+    assert_eq!(audit["current"]["weight_kg"], 80.5);
+}
+
+#[test]
+fn set_create_and_update_audit() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args(["--db", &db, "--json", "workout", "create", "--type", "Push"])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "exercise",
+            "create",
+            "bench press",
+            "--category",
+            "strength",
+        ])
+        .assert()
+        .success();
+
+    let set = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "workout",
+                "set",
+                "add",
+                "--workout",
+                "1",
+                "--exercise",
+                "bench press",
+                "--reps",
+                "5",
+                "--weight",
+                "100",
+                "--phase",
+                "full",
+            ])
+            .assert()
+            .success(),
+    );
+    let set_id = set["id"]
+        .as_i64()
+        .or_else(|| set["set_id"].as_i64())
+        .expect("set id");
+
+    let audit = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "workout",
+                "set",
+                "audit",
+                &set_id.to_string(),
+            ])
+            .assert()
+            .success(),
+    );
+    assert_real_create(&audit);
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "set",
+            "update",
+            &set_id.to_string(),
+            "--reps",
+            "6",
+        ])
+        .assert()
+        .success();
+
+    let audit2 = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "workout",
+                "set",
+                "audit",
+                &set_id.to_string(),
+            ])
+            .assert()
+            .success(),
+    );
+    let kinds = history_kinds(&audit2);
+    assert_eq!(kinds, vec!["create", "update"]);
+    let fields = audit2["history"][1]["fields"].as_array().expect("fields");
+    let reps = fields
+        .iter()
+        .find(|f| f["name"] == "reps")
+        .expect("reps field");
+    assert_eq!(reps["old"], 5);
+    assert_eq!(reps["new"], 6);
+}
+
+#[test]
+fn consumption_create_writes_real_audit() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    let product = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "product",
+                "create",
+                "Oats",
+            ])
+            .assert()
+            .success(),
+    );
+    let pid = product["id"].as_i64().unwrap();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "nutrition",
+            "set",
+            &pid.to_string(),
+            "--reference-quantity",
+            "100",
+            "--reference-unit",
+            "g",
+            "--energy-kcal",
+            "380",
+            "--protein-g",
+            "13",
+            "--carbohydrates-g",
+            "60",
+            "--fat-g",
+            "7",
+            "--fiber-g",
+            "10",
+            "--sugars-g",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let cons = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "consumption",
+                "create",
+                "--product",
+                &pid.to_string(),
+                "--quantity",
+                "80",
+                "--unit",
+                "g",
+                "--consumed-at",
+                "2026-07-14T08:30:00-03:00",
+            ])
+            .assert()
+            .success(),
+    );
+    let cid = cons["id"].as_i64().unwrap();
+
+    let audit = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "consumption",
+                "audit",
+                &cid.to_string(),
+            ])
+            .assert()
+            .success(),
+    );
+    assert_real_create(&audit);
 }
 
 #[test]
