@@ -115,7 +115,7 @@ fn list_measurement_dates(conn: &Connection, since: &str, until: &str) -> Result
     distinct_dates(
         conn,
         "SELECT DISTINCT date FROM measurements
-         WHERE date >= ?1 AND date <= ?2
+         WHERE deleted_at IS NULL AND date >= ?1 AND date <= ?2
          ORDER BY date",
         since,
         until,
@@ -126,7 +126,7 @@ fn list_sleep_dates(conn: &Connection, since: &str, until: &str) -> Result<HashS
     distinct_dates(
         conn,
         "SELECT DISTINCT date FROM sleep
-         WHERE date >= ?1 AND date <= ?2
+         WHERE deleted_at IS NULL AND date >= ?1 AND date <= ?2
          ORDER BY date",
         since,
         until,
@@ -137,7 +137,8 @@ fn list_consumption_dates(conn: &Connection, since: &str, until: &str) -> Result
     distinct_dates(
         conn,
         "SELECT DISTINCT date(consumed_at, 'localtime') FROM consumptions
-         WHERE date(consumed_at, 'localtime') >= date(?1) AND date(consumed_at, 'localtime') <= date(?2)
+         WHERE deleted_at IS NULL
+           AND date(consumed_at, 'localtime') >= date(?1) AND date(consumed_at, 'localtime') <= date(?2)
          ORDER BY 1",
         since,
         until,
@@ -147,7 +148,8 @@ fn list_consumption_dates(conn: &Connection, since: &str, until: &str) -> Result
 fn count_workouts_in_window(conn: &Connection, since: &str, until: &str) -> Result<i64> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM workouts
-         WHERE date(started_at, 'localtime') >= date(?1)
+         WHERE deleted_at IS NULL
+           AND date(started_at, 'localtime') >= date(?1)
            AND date(started_at, 'localtime') <= date(?2)",
         params![since, until],
         |r| r.get(0),
@@ -160,7 +162,8 @@ fn last_workout_date_on_or_before(conn: &Connection, until: &str) -> Result<Opti
     let date: Option<String> = conn
         .query_row(
             "SELECT date(started_at, 'localtime') FROM workouts
-             WHERE date(started_at, 'localtime') <= date(?1)
+             WHERE deleted_at IS NULL
+               AND date(started_at, 'localtime') <= date(?1)
              ORDER BY started_at DESC LIMIT 1",
             params![until],
             |r| r.get(0),

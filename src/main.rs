@@ -4,6 +4,7 @@ mod commands;
 mod completion;
 mod config;
 mod db;
+mod entity_audit;
 mod error;
 mod fit;
 mod hr_zones;

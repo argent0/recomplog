@@ -5,6 +5,7 @@ use crate::cli::{
     ProductNutritionAction, PurchaseAction, StoreAction, TagModifyAction, TaxonomyAction,
 };
 use crate::db;
+use crate::entity_audit;
 use crate::infoods::{self, EnsureMode};
 use crate::macro_names::{is_macronutrient_name, macro_flag_hint};
 use crate::models::Success;
@@ -1393,7 +1394,8 @@ fn handle_purchase(
             let mut sql = String::from(
                 "SELECT pu.id, pu.product_id, p.name, pu.quantity, pu.price_cents, pu.store_id, \
                  pu.purchased_at, pu.created_at
-                 FROM purchases pu LEFT JOIN products p ON p.id = pu.product_id WHERE 1=1",
+                 FROM purchases pu LEFT JOIN products p ON p.id = pu.product_id \
+                 WHERE pu.deleted_at IS NULL",
             );
             let mut binds: Vec<String> = vec![];
             if let Some(s) = since {
@@ -1490,16 +1492,57 @@ fn handle_purchase(
                 None => return Err(anyhow!("purchase not found")),
             }
         }
-        PurchaseAction::Delete { id } => {
-            let n = conn.execute("DELETE FROM purchases WHERE id=?1", [id])?;
-            if n == 0 {
-                return Err(anyhow!("purchase not found"));
-            }
-            if json {
-                print_json(&Success::deleted(id));
-            } else {
-                quiet_print(quiet, format!("Deleted purchase {id}"));
-            }
+        PurchaseAction::Delete {
+            id,
+            reason,
+            purge,
+            force,
+        } => {
+            handle_event_delete(
+                &conn,
+                "purchases",
+                entity_audit::entity::PURCHASE,
+                id,
+                reason.as_deref(),
+                purge,
+                force,
+                json,
+                quiet,
+                "purchase",
+            )?;
+        }
+        PurchaseAction::Audit { id, limit } => {
+            handle_event_audit(
+                &conn,
+                "purchases",
+                entity_audit::entity::PURCHASE,
+                id,
+                limit,
+                json,
+                |c, i| {
+                    c.query_row(
+                        "SELECT id, product_id, quantity, price_cents, store_id, purchased_at, \
+                         created_at, deleted_at, delete_reason
+                         FROM purchases WHERE id=?1",
+                        [i],
+                        |r| {
+                            Ok(serde_json::json!({
+                                "id": r.get::<_, i64>(0)?,
+                                "product_id": r.get::<_, i64>(1)?,
+                                "quantity": r.get::<_, f64>(2)?,
+                                "price_cents": r.get::<_, Option<i64>>(3)?,
+                                "store_id": r.get::<_, Option<i64>>(4)?,
+                                "purchased_at": r.get::<_, String>(5)?,
+                                "created_at": r.get::<_, String>(6)?,
+                                "deleted_at": r.get::<_, Option<String>>(7)?,
+                                "delete_reason": r.get::<_, Option<String>>(8)?,
+                            }))
+                        },
+                    )
+                    .optional()
+                    .map_err(Into::into)
+                },
+            )?;
         }
     }
     Ok(())
@@ -1623,7 +1666,8 @@ fn handle_consumption(
         } => {
             let mut sql = String::from(
                 "SELECT c.id, c.product_id, p.name, c.quantity, c.unit, c.consumed_at, c.created_at
-                 FROM consumptions c LEFT JOIN products p ON p.id = c.product_id WHERE 1=1",
+                 FROM consumptions c LEFT JOIN products p ON p.id = c.product_id \
+                 WHERE c.deleted_at IS NULL",
             );
             let mut binds: Vec<String> = vec![];
             if let Some(s) = since {
@@ -1687,15 +1731,146 @@ fn handle_consumption(
                 }
             }
         }
-        ConsumptionAction::Delete { id } => {
-            let n = conn.execute("DELETE FROM consumptions WHERE id=?1", [id])?;
-            if n == 0 {
-                return Err(anyhow!("consumption not found"));
-            }
-            if json {
-                print_json(&Success::deleted(id));
-            } else {
-                quiet_print(quiet, format!("Deleted consumption {id}"));
+        ConsumptionAction::Delete {
+            id,
+            reason,
+            purge,
+            force,
+        } => {
+            handle_event_delete(
+                &conn,
+                "consumptions",
+                entity_audit::entity::CONSUMPTION,
+                id,
+                reason.as_deref(),
+                purge,
+                force,
+                json,
+                quiet,
+                "consumption",
+            )?;
+        }
+        ConsumptionAction::Audit { id, limit } => {
+            handle_event_audit(
+                &conn,
+                "consumptions",
+                entity_audit::entity::CONSUMPTION,
+                id,
+                limit,
+                json,
+                |c, i| {
+                    c.query_row(
+                        "SELECT id, product_id, quantity, unit, consumed_at, created_at, \
+                         deleted_at, delete_reason
+                         FROM consumptions WHERE id=?1",
+                        [i],
+                        |r| {
+                            Ok(serde_json::json!({
+                                "id": r.get::<_, i64>(0)?,
+                                "product_id": r.get::<_, i64>(1)?,
+                                "quantity": r.get::<_, f64>(2)?,
+                                "unit": r.get::<_, Option<String>>(3)?,
+                                "consumed_at": r.get::<_, String>(4)?,
+                                "created_at": r.get::<_, String>(5)?,
+                                "deleted_at": r.get::<_, Option<String>>(6)?,
+                                "delete_reason": r.get::<_, Option<String>>(7)?,
+                            }))
+                        },
+                    )
+                    .optional()
+                    .map_err(Into::into)
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_event_delete(
+    conn: &rusqlite::Connection,
+    table: &str,
+    entity_type: &str,
+    id: i64,
+    reason: Option<&str>,
+    purge: bool,
+    force: bool,
+    json: bool,
+    quiet: bool,
+    label: &str,
+) -> Result<()> {
+    if purge {
+        if !force {
+            return Err(anyhow!(
+                "{label} --purge requires --force (hard-deletes the row)"
+            ));
+        }
+        entity_audit::purge(conn, table, entity_type, id, reason, None)?;
+        if json {
+            print_json(&serde_json::json!({
+                "success": true,
+                "deleted_id": id,
+                "id": id,
+                "mode": "purge",
+                "message": format!("purged {label} {id}"),
+            }));
+        } else {
+            quiet_print(quiet, format!("Purged {label} {id}"));
+        }
+        return Ok(());
+    }
+    let deleted_at = entity_audit::soft_delete(conn, table, entity_type, id, reason)?;
+    if json {
+        print_json(&serde_json::json!({
+            "success": true,
+            "deleted_id": id,
+            "id": id,
+            "mode": "soft_delete",
+            "deleted_at": deleted_at,
+            "message": format!("soft-deleted {label} {id}"),
+        }));
+    } else {
+        quiet_print(quiet, format!("Soft-deleted {label} {id}"));
+    }
+    Ok(())
+}
+
+fn handle_event_audit<F>(
+    conn: &rusqlite::Connection,
+    _table: &str,
+    entity_type: &str,
+    id: i64,
+    limit: i64,
+    json: bool,
+    fetch_current: F,
+) -> Result<()>
+where
+    F: FnOnce(&rusqlite::Connection, i64) -> Result<Option<serde_json::Value>>,
+{
+    let current = fetch_current(conn, id)?;
+    let history = entity_audit::list_history(conn, entity_type, id, limit)?;
+    if current.is_none() && history.is_empty() {
+        return Err(anyhow!("{entity_type} {id} not found"));
+    }
+    let resp = entity_audit::audit_response(entity_type, id, current, history);
+    if json {
+        print_json(&resp);
+    } else {
+        println!("{entity_type} {id} audit");
+        if resp["current"].is_null() {
+            println!("  current: (purged / missing)");
+        } else if let Some(del) = resp["current"]["deleted_at"].as_str() {
+            println!("  current: soft-deleted at {del}");
+        } else {
+            println!("  current: present");
+        }
+        if let Some(hist) = resp["history"].as_array() {
+            for h in hist {
+                let seq = h["seq"].as_i64().unwrap_or(0);
+                let at = h["at"].as_str().unwrap_or("?");
+                let kind = h["kind"].as_str().unwrap_or("?");
+                let summary = h["summary"].as_str().unwrap_or("");
+                println!("  {seq}. [{at}] {kind} {summary}");
             }
         }
     }

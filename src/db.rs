@@ -61,7 +61,7 @@ pub fn open_db_readonly_for_completion(override_path: Option<&str>) -> Option<Co
 }
 
 /// Current schema version. Bump when adding a new migration block.
-const CURRENT_VERSION: i32 = 9;
+const CURRENT_VERSION: i32 = 10;
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i32 = conn
@@ -115,6 +115,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     if current < 9 {
         apply_v9_product_merge_alias(conn)?;
         conn.execute("PRAGMA user_version = 9", [])?;
+    }
+    if current < 10 {
+        apply_v10_event_soft_delete_and_audit(conn)?;
+        conn.execute("PRAGMA user_version = 10", [])?;
     }
 
     Ok(())
@@ -794,6 +798,57 @@ fn apply_v9_product_merge_alias(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Event soft-delete + entity_audit (schema v10). See migrations/010_*.sql and
+/// reports/append/S3-hard-delete-cascade-event-trees.md.
+fn apply_v10_event_soft_delete_and_audit(conn: &Connection) -> Result<()> {
+    const EVENT_TABLES: &[&str] = &[
+        "workouts",
+        "exercise_sets",
+        "measurements",
+        "sleep",
+        "consumptions",
+        "purchases",
+    ];
+    for table in EVENT_TABLES {
+        if !table_exists(conn, table)? {
+            continue;
+        }
+        if !column_exists(conn, table, "deleted_at")? {
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN deleted_at TEXT"),
+                [],
+            )?;
+        }
+        if !column_exists(conn, table, "delete_reason")? {
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN delete_reason TEXT"),
+                [],
+            )?;
+        }
+    }
+
+    if !table_exists(conn, "entity_audit")? {
+        conn.execute_batch(
+            r#"
+CREATE TABLE entity_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type TEXT NOT NULL,
+    entity_id INTEGER NOT NULL,
+    at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    actor TEXT,
+    summary TEXT,
+    fields_json TEXT,
+    meta_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_entity_audit_lookup ON entity_audit(entity_type, entity_id, at);
+CREATE INDEX IF NOT EXISTS idx_entity_audit_at ON entity_audit(at);
+"#,
+        )?;
+    }
+    Ok(())
+}
+
 /// One-time migration (user_version < 3): normalize nutrition units to `g`|`ml`|`unit`.
 ///
 /// Mutates both catalog (`product_nutritions`) and historical consumptions.
@@ -1068,7 +1123,9 @@ CREATE TABLE IF NOT EXISTS workouts (
     notes TEXT,
     overall_feeling INTEGER CHECK (overall_feeling BETWEEN 1 AND 5 OR overall_feeling IS NULL),
     duration_minutes INTEGER,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT,
+    delete_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS workout_exercises (
@@ -1109,7 +1166,9 @@ CREATE TABLE IF NOT EXISTS exercise_sets (
     resting_hr_bpm REAL,
     heart_rate_zones TEXT,
     laps TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT,
+    delete_reason TEXT
 );
 
 -- FIT / activity import provenance
@@ -1157,7 +1216,9 @@ CREATE TABLE IF NOT EXISTS measurements (
     bmi REAL,
     resting_metabolism_kcal INTEGER,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    delete_reason TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_measurements_date ON measurements(date);
@@ -1189,7 +1250,9 @@ CREATE TABLE IF NOT EXISTS sleep (
     respiratory_rate REAL,
     notes TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    delete_reason TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_sleep_date ON sleep(date);
@@ -1274,7 +1337,9 @@ CREATE TABLE IF NOT EXISTS purchases (
     price_cents INTEGER,
     store_id INTEGER REFERENCES stores(id),
     purchased_at TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    deleted_at TEXT,
+    delete_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS consumptions (
@@ -1283,12 +1348,29 @@ CREATE TABLE IF NOT EXISTS consumptions (
     quantity REAL NOT NULL,
     unit TEXT,
     consumed_at TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    deleted_at TEXT,
+    delete_reason TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_purchases_product ON purchases(product_id);
 CREATE INDEX IF NOT EXISTS idx_consumptions_product ON consumptions(product_id);
 CREATE INDEX IF NOT EXISTS idx_purchases_date ON purchases(purchased_at);
+
+-- Append-only mutation trail (no FK to entities — purge must not erase history)
+CREATE TABLE IF NOT EXISTS entity_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type TEXT NOT NULL,
+    entity_id INTEGER NOT NULL,
+    at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    actor TEXT,
+    summary TEXT,
+    fields_json TEXT,
+    meta_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_entity_audit_lookup ON entity_audit(entity_type, entity_id, at);
+CREATE INDEX IF NOT EXISTS idx_entity_audit_at ON entity_audit(at);
 "#;
 
     conn.execute_batch(schema)?;

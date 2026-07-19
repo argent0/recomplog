@@ -5,6 +5,7 @@ use crate::cli::{ExerciseAction, SetAction, WorkoutAction, WorkoutStatsAction};
 use crate::commands::workout_stats;
 use crate::config::WorkoutSanityLimits;
 use crate::db;
+use crate::entity_audit::{self, CascadeCounts};
 use crate::load_type;
 use crate::models::{Exercise, HeartRateZones, Laps, Success, Trackpoint};
 use crate::phase;
@@ -98,7 +99,7 @@ pub fn handle(
             let mut sql = String::from(
                 "SELECT id, started_at, finished_at, workout_type, notes, duration_minutes, \
                  overall_feeling, created_at
-                 FROM workouts WHERE 1=1",
+                 FROM workouts WHERE deleted_at IS NULL",
             );
             let mut binds: Vec<String> = vec![];
             if let Some(d) = days {
@@ -172,11 +173,21 @@ pub fn handle(
             dry_run,
         } => {
             let conn = db::open_db(db_override)?;
-            let exists: Option<i64> = conn
-                .query_row("SELECT id FROM workouts WHERE id=?1", [id], |r| r.get(0))
+            let row: Option<(i64, Option<String>)> = conn
+                .query_row(
+                    "SELECT id, deleted_at FROM workouts WHERE id=?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
                 .optional()?;
-            if exists.is_none() {
-                return Err(anyhow!("workout {id} not found"));
+            match row {
+                None => return Err(anyhow!("workout {id} not found")),
+                Some((_, Some(_))) => {
+                    return Err(anyhow!(
+                        "workout {id} is soft-deleted (restore not implemented; use audit to inspect)"
+                    ));
+                }
+                Some((_, None)) => {}
             }
             if let Some(f) = feeling {
                 if !(1..=5).contains(&f) {
@@ -243,32 +254,14 @@ pub fn handle(
             }
             Ok(())
         }
-        WorkoutAction::Delete { id, dry_run } => {
-            let conn = db::open_db(db_override)?;
-            let exists: Option<i64> = conn
-                .query_row("SELECT id FROM workouts WHERE id = ?1", [id], |r| r.get(0))
-                .optional()?;
-            if exists.is_none() {
-                return Err(anyhow!("workout {id} not found"));
-            }
-            if dry_run {
-                return emit_dry_run(
-                    json,
-                    quiet,
-                    serde_json::json!({
-                        "action": "workout delete",
-                        "delete_id": id,
-                    }),
-                );
-            }
-            conn.execute("DELETE FROM workouts WHERE id = ?1", [id])?;
-            if json {
-                print_json(&Success::deleted(id));
-            } else {
-                quiet_print(quiet, format!("Deleted workout {id}"));
-            }
-            Ok(())
-        }
+        WorkoutAction::Delete {
+            id,
+            reason,
+            purge,
+            force,
+            dry_run,
+        } => handle_workout_delete(db_override, id, reason, purge, force, dry_run, json, quiet),
+        WorkoutAction::Audit { id, limit } => handle_workout_audit(db_override, id, limit, json),
         WorkoutAction::Stats { action, days } => {
             let conn = db::open_db(db_override)?;
             match action {
@@ -374,7 +367,7 @@ fn workout_list_summary(
         r#"SELECT s.distance_km, s.duration_seconds, s.avg_heart_rate_bpm
            FROM exercise_sets s
            JOIN workout_exercises we ON we.id = s.workout_exercise_id
-           WHERE we.workout_id = ?1"#,
+           WHERE we.workout_id = ?1 AND s.deleted_at IS NULL"#,
     )?;
     let mut total_distance = 0.0f64;
     let mut total_duration: u32 = 0;
@@ -726,7 +719,7 @@ fn print_track_metrics(
 }
 
 /// Load full workout detail (header + exercises + sets), same shape as `workout show`.
-/// Returns `Ok(None)` when the workout id does not exist.
+/// Returns `Ok(None)` when the workout id does not exist or is soft-deleted.
 pub(crate) fn fetch_workout_detail(
     conn: &Connection,
     id: i64,
@@ -734,8 +727,8 @@ pub(crate) fn fetch_workout_detail(
     let row = conn
         .query_row(
             "SELECT id, started_at, finished_at, workout_type, notes, overall_feeling, \
-             duration_minutes, created_at
-             FROM workouts WHERE id = ?1",
+             duration_minutes, created_at, deleted_at
+             FROM workouts WHERE id = ?1 AND deleted_at IS NULL",
             [id],
             |r| {
                 Ok(serde_json::json!({
@@ -747,6 +740,7 @@ pub(crate) fn fetch_workout_detail(
                     "overall_feeling": r.get::<_, Option<i64>>(5)?,
                     "duration_minutes": r.get::<_, Option<i64>>(6)?,
                     "created_at": r.get::<_, String>(7)?,
+                    "deleted_at": r.get::<_, Option<String>>(8)?,
                 }))
             },
         )
@@ -1123,7 +1117,8 @@ fn list_sets_json(
                 avg_heart_rate_bpm, max_heart_rate_bpm, avg_pace_min_per_km, calories_burned,
                 avg_cadence_spm, total_ascent_m, total_descent_m,
                 heart_rate_zones, laps, date_of_birth, resting_hr_bpm
-         FROM exercise_sets WHERE workout_exercise_id = ?1 ORDER BY set_number",
+         FROM exercise_sets WHERE workout_exercise_id = ?1 AND deleted_at IS NULL
+         ORDER BY set_number",
     )?;
     let mut sets = Vec::new();
     let mut rows = sstmt.query([we_id])?;
@@ -1447,9 +1442,11 @@ fn resolve_we_id(
         .ok_or_else(|| anyhow!("provide --workout and --exercise, or --workout-exercise"))?;
     let ex = resolve_exercise(conn, exercise)?;
     let _: i64 = conn
-        .query_row("SELECT id FROM workouts WHERE id = ?1", [workout], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT id FROM workouts WHERE id = ?1 AND deleted_at IS NULL",
+            [workout],
+            |r| r.get(0),
+        )
         .map_err(|_| anyhow!("workout not found: {workout}"))?;
     match conn
         .query_row(
@@ -2787,33 +2784,304 @@ fn handle_set(
             }
             Ok(())
         }
-        SetAction::Delete { id, dry_run } => {
-            let conn = db::open_db(db_override)?;
-            let exists: Option<i64> = conn
-                .query_row("SELECT id FROM exercise_sets WHERE id = ?1", [id], |r| {
-                    r.get(0)
-                })
-                .optional()?;
-            if exists.is_none() {
-                return Err(anyhow!("set {id} not found"));
+        SetAction::Delete {
+            id,
+            reason,
+            purge,
+            force,
+            dry_run,
+        } => handle_set_delete(db_override, id, reason, purge, force, dry_run, json, quiet),
+        SetAction::Audit { id, limit } => handle_set_audit(db_override, id, limit, json),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_workout_delete(
+    db_override: Option<&str>,
+    id: i64,
+    reason: Option<String>,
+    purge: bool,
+    force: bool,
+    dry_run: bool,
+    json: bool,
+    quiet: bool,
+) -> Result<()> {
+    let conn = db::open_db(db_override)?;
+    let row: Option<(Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT workout_type, deleted_at FROM workouts WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((workout_type, deleted_at)) = row else {
+        return Err(anyhow!("workout {id} not found"));
+    };
+    let cascade = entity_audit::cascade_counts_workout(&conn, id)?;
+    let mode = if purge { "purge" } else { "soft_delete" };
+
+    if dry_run {
+        return emit_dry_run(
+            json,
+            quiet,
+            serde_json::json!({
+                "action": "workout delete",
+                "delete_id": id,
+                "mode": mode,
+                "already_soft_deleted": deleted_at.is_some(),
+                "workout_type": workout_type,
+                "cascade": cascade.to_json(),
+            }),
+        );
+    }
+
+    if purge {
+        if cascade.total_children() > 0 && !force {
+            return Err(anyhow!(
+                "workout {id} purge would CASCADE-remove {} child row(s); re-run with --purge --force\n{}",
+                cascade.total_children(),
+                entity_audit::format_cascade_human(&cascade)
+            ));
+        }
+        entity_audit::purge(
+            &conn,
+            "workouts",
+            entity_audit::entity::WORKOUT,
+            id,
+            reason.as_deref(),
+            Some(serde_json::json!({ "cascade": cascade.to_json() })),
+        )?;
+        emit_delete_result(
+            json,
+            quiet,
+            id,
+            "purge",
+            None,
+            Some(&cascade),
+            "purged workout",
+        )
+    } else {
+        let deleted_at = entity_audit::soft_delete(
+            &conn,
+            "workouts",
+            entity_audit::entity::WORKOUT,
+            id,
+            reason.as_deref(),
+        )?;
+        emit_delete_result(
+            json,
+            quiet,
+            id,
+            "soft_delete",
+            Some(&deleted_at),
+            Some(&cascade),
+            "soft-deleted workout",
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_set_delete(
+    db_override: Option<&str>,
+    id: i64,
+    reason: Option<String>,
+    purge: bool,
+    force: bool,
+    dry_run: bool,
+    json: bool,
+    quiet: bool,
+) -> Result<()> {
+    let conn = db::open_db(db_override)?;
+    let exists: Option<Option<String>> = conn
+        .query_row(
+            "SELECT deleted_at FROM exercise_sets WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if exists.is_none() {
+        return Err(anyhow!("set {id} not found"));
+    }
+    let cascade = entity_audit::cascade_counts_set(&conn, id)?;
+    let mode = if purge { "purge" } else { "soft_delete" };
+
+    if dry_run {
+        return emit_dry_run(
+            json,
+            quiet,
+            serde_json::json!({
+                "action": "set delete",
+                "delete_id": id,
+                "mode": mode,
+                "cascade": cascade.to_json(),
+            }),
+        );
+    }
+
+    if purge {
+        if cascade.total_children() > 0 && !force {
+            return Err(anyhow!(
+                "set {id} purge would CASCADE-remove {} trackpoint(s); re-run with --purge --force\n{}",
+                cascade.activity_trackpoints.unwrap_or(0),
+                entity_audit::format_cascade_human(&cascade)
+            ));
+        }
+        entity_audit::purge(
+            &conn,
+            "exercise_sets",
+            entity_audit::entity::EXERCISE_SET,
+            id,
+            reason.as_deref(),
+            Some(serde_json::json!({ "cascade": cascade.to_json() })),
+        )?;
+        emit_delete_result(json, quiet, id, "purge", None, Some(&cascade), "purged set")
+    } else {
+        let deleted_at = entity_audit::soft_delete(
+            &conn,
+            "exercise_sets",
+            entity_audit::entity::EXERCISE_SET,
+            id,
+            reason.as_deref(),
+        )?;
+        emit_delete_result(
+            json,
+            quiet,
+            id,
+            "soft_delete",
+            Some(&deleted_at),
+            Some(&cascade),
+            "soft-deleted set",
+        )
+    }
+}
+
+fn emit_delete_result(
+    json: bool,
+    quiet: bool,
+    id: i64,
+    mode: &str,
+    deleted_at: Option<&str>,
+    cascade: Option<&CascadeCounts>,
+    human_verb: &str,
+) -> Result<()> {
+    if json {
+        print_json(&serde_json::json!({
+            "success": true,
+            "id": id,
+            "deleted_id": id,
+            "mode": mode,
+            "deleted_at": deleted_at,
+            "cascade": cascade.map(|c| c.to_json()),
+            "message": format!("{human_verb} {id}"),
+        }));
+    } else {
+        let mut msg = format!("{human_verb} {id}");
+        if let Some(c) = cascade {
+            if c.total_children() > 0 {
+                msg.push('\n');
+                msg.push_str(&entity_audit::format_cascade_human(c));
             }
-            if dry_run {
-                return emit_dry_run(
-                    json,
-                    quiet,
-                    serde_json::json!({
-                        "action": "set delete",
-                        "delete_id": id,
-                    }),
-                );
-            }
-            conn.execute("DELETE FROM exercise_sets WHERE id = ?1", [id])?;
-            if json {
-                print_json(&Success::deleted(id));
-            } else {
-                quiet_print(quiet, format!("Deleted set {id}"));
-            }
-            Ok(())
+        }
+        quiet_print(quiet, msg);
+    }
+    Ok(())
+}
+
+fn handle_workout_audit(db_override: Option<&str>, id: i64, limit: i64, json: bool) -> Result<()> {
+    let conn = db::open_db(db_override)?;
+    let current = conn
+        .query_row(
+            "SELECT id, started_at, finished_at, workout_type, notes, overall_feeling, \
+             duration_minutes, created_at, deleted_at, delete_reason
+             FROM workouts WHERE id = ?1",
+            [id],
+            |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "started_at": r.get::<_, String>(1)?,
+                    "finished_at": r.get::<_, Option<String>>(2)?,
+                    "workout_type": r.get::<_, Option<String>>(3)?,
+                    "notes": r.get::<_, Option<String>>(4)?,
+                    "overall_feeling": r.get::<_, Option<i64>>(5)?,
+                    "duration_minutes": r.get::<_, Option<i64>>(6)?,
+                    "created_at": r.get::<_, String>(7)?,
+                    "deleted_at": r.get::<_, Option<String>>(8)?,
+                    "delete_reason": r.get::<_, Option<String>>(9)?,
+                }))
+            },
+        )
+        .optional()?;
+    let history = entity_audit::list_history(&conn, entity_audit::entity::WORKOUT, id, limit)?;
+    // If row never existed and no audit, treat as not found.
+    if current.is_none() && history.is_empty() {
+        return Err(anyhow!("workout {id} not found"));
+    }
+    let resp = entity_audit::audit_response(entity_audit::entity::WORKOUT, id, current, history);
+    if json {
+        print_json(&resp);
+    } else {
+        print_audit_human(&resp);
+    }
+    Ok(())
+}
+
+fn handle_set_audit(db_override: Option<&str>, id: i64, limit: i64, json: bool) -> Result<()> {
+    let conn = db::open_db(db_override)?;
+    let current = conn
+        .query_row(
+            "SELECT id, workout_exercise_id, set_number, reps, weight_kg, created_at, \
+             deleted_at, delete_reason
+             FROM exercise_sets WHERE id = ?1",
+            [id],
+            |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "workout_exercise_id": r.get::<_, i64>(1)?,
+                    "set_number": r.get::<_, i64>(2)?,
+                    "reps": r.get::<_, Option<i32>>(3)?,
+                    "weight_kg": r.get::<_, Option<f64>>(4)?,
+                    "created_at": r.get::<_, Option<String>>(5)?,
+                    "deleted_at": r.get::<_, Option<String>>(6)?,
+                    "delete_reason": r.get::<_, Option<String>>(7)?,
+                }))
+            },
+        )
+        .optional()?;
+    let history = entity_audit::list_history(&conn, entity_audit::entity::EXERCISE_SET, id, limit)?;
+    if current.is_none() && history.is_empty() {
+        return Err(anyhow!("set {id} not found"));
+    }
+    let resp =
+        entity_audit::audit_response(entity_audit::entity::EXERCISE_SET, id, current, history);
+    if json {
+        print_json(&resp);
+    } else {
+        print_audit_human(&resp);
+    }
+    Ok(())
+}
+
+fn print_audit_human(resp: &serde_json::Value) {
+    let entity = resp["entity"].as_str().unwrap_or("?");
+    let id = resp["id"].as_i64().unwrap_or(0);
+    println!("{entity} {id} audit");
+    if resp["current"].is_null() {
+        println!("  current: (purged / missing)");
+    } else if let Some(del) = resp["current"]["deleted_at"].as_str() {
+        println!("  current: soft-deleted at {del}");
+    } else {
+        println!("  current: present");
+    }
+    if let Some(hist) = resp["history"].as_array() {
+        if hist.is_empty() {
+            println!("  history: (none)");
+        }
+        for h in hist {
+            let seq = h["seq"].as_i64().unwrap_or(0);
+            let at = h["at"].as_str().unwrap_or("?");
+            let kind = h["kind"].as_str().unwrap_or("?");
+            let summary = h["summary"].as_str().unwrap_or("");
+            println!("  {seq}. [{at}] {kind} {summary}");
         }
     }
 }

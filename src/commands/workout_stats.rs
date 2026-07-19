@@ -55,10 +55,12 @@ pub fn handle_prs(conn: &Connection, exercise: Option<&str>, json: bool) -> Resu
                 MAX(s.reps) as max_reps
          FROM exercise_sets s
          JOIN workout_exercises we ON s.workout_exercise_id = we.id
-         JOIN exercises e ON we.exercise_id = e.id",
+         JOIN exercises e ON we.exercise_id = e.id
+         JOIN workouts w ON we.workout_id = w.id
+         WHERE s.deleted_at IS NULL AND w.deleted_at IS NULL",
     );
     if exercise_name.is_some() {
-        sql.push_str(" WHERE e.name = ?1");
+        sql.push_str(" AND e.name = ?1");
     }
     sql.push_str(" GROUP BY e.name ORDER BY e.name");
 
@@ -137,7 +139,8 @@ pub fn handle_volume(
          JOIN workout_exercises we ON s.workout_exercise_id = we.id
          JOIN exercises e ON we.exercise_id = e.id
          JOIN workouts w ON we.workout_id = w.id
-         WHERE date(w.started_at, 'localtime') >= date('now', 'localtime', ?1)",
+         WHERE s.deleted_at IS NULL AND w.deleted_at IS NULL
+           AND date(w.started_at, 'localtime') >= date('now', 'localtime', ?1)",
     );
     if exercise_name.is_some() {
         sql.push_str(" AND e.name = ?2");
@@ -221,7 +224,8 @@ pub fn handle_summary(conn: &Connection, days: i64, json: bool) -> Result<()> {
     let mut stmt = conn.prepare(
         "SELECT id, duration_minutes, date(started_at, 'localtime')
          FROM workouts
-         WHERE date(started_at, 'localtime') >= date('now', 'localtime', ?1)
+         WHERE deleted_at IS NULL
+           AND date(started_at, 'localtime') >= date('now', 'localtime', ?1)
          ORDER BY started_at DESC",
     )?;
     let workouts: Vec<(i64, Option<i32>, String)> = stmt
@@ -247,7 +251,8 @@ pub fn handle_summary(conn: &Connection, days: i64, json: bool) -> Result<()> {
              FROM exercise_sets s
              JOIN workout_exercises we ON s.workout_exercise_id = we.id
              JOIN workouts w ON we.workout_id = w.id
-             WHERE date(w.started_at, 'localtime') >= date('now', 'localtime', ?1)",
+             WHERE s.deleted_at IS NULL AND w.deleted_at IS NULL
+               AND date(w.started_at, 'localtime') >= date('now', 'localtime', ?1)",
             params![since],
             |r| r.get(0),
         )
@@ -301,7 +306,8 @@ pub fn handle_history(conn: &Connection, exercise: &str, days: i64, json: bool) 
          JOIN workout_exercises we ON s.workout_exercise_id = we.id
          JOIN exercises e ON we.exercise_id = e.id
          JOIN workouts w ON we.workout_id = w.id
-         WHERE e.name = ?1 AND date(w.started_at, 'localtime') >= date('now', 'localtime', ?2)
+         WHERE s.deleted_at IS NULL AND w.deleted_at IS NULL
+           AND e.name = ?1 AND date(w.started_at, 'localtime') >= date('now', 'localtime', ?2)
          ORDER BY w.started_at ASC, s.set_number ASC",
     )?;
 
@@ -407,7 +413,8 @@ pub fn handle_weight(conn: &Connection, exercise: &str, json: bool) -> Result<()
          JOIN workout_exercises we ON s.workout_exercise_id = we.id
          JOIN exercises e ON we.exercise_id = e.id
          JOIN workouts w ON we.workout_id = w.id
-         WHERE e.name = ?1 AND s.weight_kg IS NOT NULL
+         WHERE s.deleted_at IS NULL AND w.deleted_at IS NULL
+           AND e.name = ?1 AND s.weight_kg IS NOT NULL
          ORDER BY w.started_at ASC, s.set_number ASC",
     )?;
 

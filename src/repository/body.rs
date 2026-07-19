@@ -1,3 +1,4 @@
+use crate::entity_audit;
 use crate::error::{RecomplogError, Result};
 use crate::models::{Measurement, MeasurementPoint, Sleep, UserProfile};
 use crate::sanity::PreviousMetrics;
@@ -146,26 +147,31 @@ impl Repository {
         let order = "ORDER BY date DESC, created_at DESC, id DESC";
         let rows = match (since, until) {
             (None, None) => {
-                let sql = format!("SELECT {cols} FROM measurements {order}");
+                let sql =
+                    format!("SELECT {cols} FROM measurements WHERE deleted_at IS NULL {order}");
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([], Self::row_to_measurement)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (Some(s), None) => {
-                let sql = format!("SELECT {cols} FROM measurements WHERE date >= ?1 {order}");
+                let sql = format!(
+                    "SELECT {cols} FROM measurements WHERE deleted_at IS NULL AND date >= ?1 {order}"
+                );
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([s], Self::row_to_measurement)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (None, Some(u)) => {
-                let sql = format!("SELECT {cols} FROM measurements WHERE date <= ?1 {order}");
+                let sql = format!(
+                    "SELECT {cols} FROM measurements WHERE deleted_at IS NULL AND date <= ?1 {order}"
+                );
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([u], Self::row_to_measurement)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (Some(s), Some(u)) => {
                 let sql = format!(
-                    "SELECT {cols} FROM measurements WHERE date >= ?1 AND date <= ?2 {order}"
+                    "SELECT {cols} FROM measurements WHERE deleted_at IS NULL AND date >= ?1 AND date <= ?2 {order}"
                 );
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([s, u], Self::row_to_measurement)?;
@@ -175,13 +181,13 @@ impl Repository {
         Ok(rows)
     }
 
-    /// Get a single measurement by id.
+    /// Get a single measurement by id (active rows only).
     pub fn get_measurement(&self, id: i64) -> Result<Measurement> {
         let m: Option<Measurement> = self
             .conn
             .query_row(
                 "SELECT id, date, weight_kg, body_fat_pct, skeletal_muscle_pct, visceral_fat_level, bmi, resting_metabolism_kcal, created_at, updated_at
-                 FROM measurements WHERE id = ?1",
+                 FROM measurements WHERE id = ?1 AND deleted_at IS NULL",
                 [id],
                 Self::row_to_measurement,
             )
@@ -194,7 +200,7 @@ impl Repository {
     pub fn get_measurement_by_date(&self, date: &str) -> Result<Measurement> {
         let cols = Self::MEASUREMENT_SELECT_COLS;
         let sql = format!(
-            "SELECT {cols} FROM measurements WHERE date = ?1 \
+            "SELECT {cols} FROM measurements WHERE deleted_at IS NULL AND date = ?1 \
              ORDER BY created_at DESC, id DESC LIMIT 1"
         );
         let m: Option<Measurement> = self
@@ -206,7 +212,7 @@ impl Repository {
 
     fn count_measurements_for_date(&self, date: &str) -> Result<i64> {
         let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM measurements WHERE date = ?1",
+            "SELECT COUNT(*) FROM measurements WHERE deleted_at IS NULL AND date = ?1",
             [date],
             |r| r.get(0),
         )?;
@@ -225,11 +231,11 @@ impl Repository {
                 count,
             });
         }
-        let id: i64 =
-            self.conn
-                .query_row("SELECT id FROM measurements WHERE date = ?1", [date], |r| {
-                    r.get(0)
-                })?;
+        let id: i64 = self.conn.query_row(
+            "SELECT id FROM measurements WHERE deleted_at IS NULL AND date = ?1",
+            [date],
+            |r| r.get(0),
+        )?;
         Ok(id)
     }
 
@@ -320,24 +326,66 @@ impl Repository {
         Ok(id)
     }
 
-    /// Delete by id. Returns the deleted id on success.
-    pub fn delete_measurement(&self, id: i64) -> Result<i64> {
-        let affected = self
+    /// Soft-delete by id (default). Returns `(id, deleted_at)`.
+    pub fn soft_delete_measurement(&self, id: i64, reason: Option<&str>) -> Result<(i64, String)> {
+        // Ensure row exists (including already-deleted → clearer error from soft_delete).
+        let exists: Option<i64> = self
             .conn
-            .execute("DELETE FROM measurements WHERE id = ?1", [id])?;
-        if affected == 0 {
+            .query_row("SELECT id FROM measurements WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if exists.is_none() {
             return Err(RecomplogError::MeasurementNotFound(id));
         }
+        let deleted_at = entity_audit::soft_delete(
+            &self.conn,
+            "measurements",
+            entity_audit::entity::MEASUREMENT,
+            id,
+            reason,
+        )
+        .map_err(|e| RecomplogError::InvalidInput(e.to_string()))?;
+        Ok((id, deleted_at))
+    }
+
+    /// Soft-delete by date when exactly one active sample exists.
+    pub fn soft_delete_measurement_by_date(
+        &self,
+        date: &str,
+        reason: Option<&str>,
+    ) -> Result<(i64, String)> {
+        let id = self.sole_measurement_id_for_date(date)?;
+        self.soft_delete_measurement(id, reason)
+    }
+
+    /// Hard-purge by id (CASCADE N/A). Requires caller to pass force policy.
+    pub fn purge_measurement(&self, id: i64, reason: Option<&str>) -> Result<i64> {
+        let exists: Option<i64> = self
+            .conn
+            .query_row("SELECT id FROM measurements WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if exists.is_none() {
+            return Err(RecomplogError::MeasurementNotFound(id));
+        }
+        entity_audit::purge(
+            &self.conn,
+            "measurements",
+            entity_audit::entity::MEASUREMENT,
+            id,
+            reason,
+            None,
+        )
+        .map_err(|e| RecomplogError::InvalidInput(e.to_string()))?;
         Ok(id)
     }
 
-    /// Delete by date when exactly one sample exists. Returns the deleted id.
-    /// If multiple samples share the date, fails with `MeasurementAmbiguousForDate`.
-    pub fn delete_measurement_by_date(&self, date: &str) -> Result<i64> {
+    pub fn purge_measurement_by_date(&self, date: &str, reason: Option<&str>) -> Result<i64> {
         let id = self.sole_measurement_id_for_date(date)?;
-        self.conn
-            .execute("DELETE FROM measurements WHERE id = ?1", [id])?;
-        Ok(id)
+        // sole_* only sees active rows; for purge of soft-deleted-only days, require --id.
+        self.purge_measurement(id, reason)
     }
 
     /// Latest non-null value for each metric with `date < before_date` (YYYY-MM-DD).
@@ -361,7 +409,7 @@ impl Repository {
         // column is a fixed identifier from call sites, not user input
         let sql = format!(
             "SELECT date, {column} FROM measurements \
-             WHERE date < ?1 AND {column} IS NOT NULL \
+             WHERE deleted_at IS NULL AND date < ?1 AND {column} IS NOT NULL \
              ORDER BY date DESC, created_at DESC, id DESC LIMIT 1"
         );
         let row: Option<(String, f64)> = self
@@ -374,7 +422,7 @@ impl Repository {
     fn latest_i64_before(&self, column: &str, before_date: &str) -> Result<Option<(String, i64)>> {
         let sql = format!(
             "SELECT date, {column} FROM measurements \
-             WHERE date < ?1 AND {column} IS NOT NULL \
+             WHERE deleted_at IS NULL AND date < ?1 AND {column} IS NOT NULL \
              ORDER BY date DESC, created_at DESC, id DESC LIMIT 1"
         );
         let row: Option<(String, i64)> = self
@@ -456,9 +504,10 @@ impl Repository {
         let base = "SELECT date, weight_kg, body_fat_pct, skeletal_muscle_pct, \
                     visceral_fat_level, bmi, resting_metabolism_kcal \
                     FROM measurements m \
-                    WHERE id = ( \
+                    WHERE m.deleted_at IS NULL \
+                    AND id = ( \
                         SELECT id FROM measurements m2 \
-                        WHERE m2.date = m.date \
+                        WHERE m2.date = m.date AND m2.deleted_at IS NULL \
                         ORDER BY m2.created_at DESC, m2.id DESC LIMIT 1 \
                     )";
 
@@ -568,26 +617,31 @@ impl Repository {
         let order = "ORDER BY date DESC, created_at DESC, id DESC";
         let rows = match (since, until) {
             (None, None) => {
-                let sql = format!("SELECT {cols} FROM sleep {order}");
+                let sql = format!("SELECT {cols} FROM sleep WHERE deleted_at IS NULL {order}");
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([], Self::row_to_sleep)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (Some(s), None) => {
-                let sql = format!("SELECT {cols} FROM sleep WHERE date >= ?1 {order}");
+                let sql = format!(
+                    "SELECT {cols} FROM sleep WHERE deleted_at IS NULL AND date >= ?1 {order}"
+                );
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([s], Self::row_to_sleep)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (None, Some(u)) => {
-                let sql = format!("SELECT {cols} FROM sleep WHERE date <= ?1 {order}");
+                let sql = format!(
+                    "SELECT {cols} FROM sleep WHERE deleted_at IS NULL AND date <= ?1 {order}"
+                );
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([u], Self::row_to_sleep)?;
                 rows.filter_map(|r| r.ok()).collect()
             }
             (Some(s), Some(u)) => {
-                let sql =
-                    format!("SELECT {cols} FROM sleep WHERE date >= ?1 AND date <= ?2 {order}");
+                let sql = format!(
+                    "SELECT {cols} FROM sleep WHERE deleted_at IS NULL AND date >= ?1 AND date <= ?2 {order}"
+                );
                 let mut stmt = self.conn.prepare(&sql)?;
                 let rows = stmt.query_map([s, u], Self::row_to_sleep)?;
                 rows.filter_map(|r| r.ok()).collect()
@@ -596,10 +650,10 @@ impl Repository {
         Ok(rows)
     }
 
-    /// Get a single sleep record by id.
+    /// Get a single sleep record by id (active only).
     pub fn get_sleep(&self, id: i64) -> Result<Sleep> {
         let sql = format!(
-            "SELECT {} FROM sleep WHERE id = ?1",
+            "SELECT {} FROM sleep WHERE id = ?1 AND deleted_at IS NULL",
             Self::SLEEP_SELECT_COLS
         );
         let s: Option<Sleep> = self
@@ -613,7 +667,7 @@ impl Repository {
     /// Multiple samples per day are allowed; this picks the last-written one.
     pub fn get_sleep_by_date(&self, date: &str) -> Result<Sleep> {
         let sql = format!(
-            "SELECT {} FROM sleep WHERE date = ?1 \
+            "SELECT {} FROM sleep WHERE deleted_at IS NULL AND date = ?1 \
              ORDER BY created_at DESC, id DESC LIMIT 1",
             Self::SLEEP_SELECT_COLS
         );
@@ -625,11 +679,11 @@ impl Repository {
     }
 
     fn count_sleeps_for_date(&self, date: &str) -> Result<i64> {
-        let n: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM sleep WHERE date = ?1", [date], |r| {
-                    r.get(0)
-                })?;
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sleep WHERE deleted_at IS NULL AND date = ?1",
+            [date],
+            |r| r.get(0),
+        )?;
         Ok(n)
     }
 
@@ -645,9 +699,11 @@ impl Repository {
                 count,
             });
         }
-        let id: i64 = self
-            .conn
-            .query_row("SELECT id FROM sleep WHERE date = ?1", [date], |r| r.get(0))?;
+        let id: i64 = self.conn.query_row(
+            "SELECT id FROM sleep WHERE deleted_at IS NULL AND date = ?1",
+            [date],
+            |r| r.get(0),
+        )?;
         Ok(id)
     }
 
@@ -781,21 +837,52 @@ impl Repository {
         Ok(id)
     }
 
-    /// Delete by id. Returns the deleted id.
-    pub fn delete_sleep(&self, id: i64) -> Result<i64> {
-        let affected = self.conn.execute("DELETE FROM sleep WHERE id = ?1", [id])?;
-        if affected == 0 {
+    pub fn soft_delete_sleep(&self, id: i64, reason: Option<&str>) -> Result<(i64, String)> {
+        let exists: Option<i64> = self
+            .conn
+            .query_row("SELECT id FROM sleep WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?;
+        if exists.is_none() {
             return Err(RecomplogError::SleepNotFound(id));
         }
+        let deleted_at =
+            entity_audit::soft_delete(&self.conn, "sleep", entity_audit::entity::SLEEP, id, reason)
+                .map_err(|e| RecomplogError::InvalidInput(e.to_string()))?;
+        Ok((id, deleted_at))
+    }
+
+    pub fn soft_delete_sleep_by_date(
+        &self,
+        date: &str,
+        reason: Option<&str>,
+    ) -> Result<(i64, String)> {
+        let id = self.sole_sleep_id_for_date(date)?;
+        self.soft_delete_sleep(id, reason)
+    }
+
+    pub fn purge_sleep(&self, id: i64, reason: Option<&str>) -> Result<i64> {
+        let exists: Option<i64> = self
+            .conn
+            .query_row("SELECT id FROM sleep WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?;
+        if exists.is_none() {
+            return Err(RecomplogError::SleepNotFound(id));
+        }
+        entity_audit::purge(
+            &self.conn,
+            "sleep",
+            entity_audit::entity::SLEEP,
+            id,
+            reason,
+            None,
+        )
+        .map_err(|e| RecomplogError::InvalidInput(e.to_string()))?;
         Ok(id)
     }
 
-    /// Delete by date when exactly one sample exists. Returns the deleted id.
-    /// If multiple samples share the date, fails with `SleepAmbiguousForDate`.
-    pub fn delete_sleep_by_date(&self, date: &str) -> Result<i64> {
+    pub fn purge_sleep_by_date(&self, date: &str, reason: Option<&str>) -> Result<i64> {
         let id = self.sole_sleep_id_for_date(date)?;
-        self.conn.execute("DELETE FROM sleep WHERE id = ?1", [id])?;
-        Ok(id)
+        self.purge_sleep(id, reason)
     }
 
     /// One sleep sample per wake-up date (last by `created_at`, then `id`), date ASC.
@@ -808,9 +895,10 @@ impl Repository {
         let cols = Self::SLEEP_SELECT_COLS;
         let base = format!(
             "SELECT {cols} FROM sleep s \
-             WHERE id = ( \
+             WHERE s.deleted_at IS NULL \
+             AND id = ( \
                  SELECT id FROM sleep s2 \
-                 WHERE s2.date = s.date \
+                 WHERE s2.date = s.date AND s2.deleted_at IS NULL \
                  ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1 \
              )"
         );
@@ -857,6 +945,7 @@ impl Repository {
         JOIN workout_exercises we ON we.id = s.workout_exercise_id
         JOIN workouts w ON w.id = we.workout_id
         JOIN exercises e ON e.id = we.exercise_id
+        WHERE s.deleted_at IS NULL AND w.deleted_at IS NULL
     ";
 
     fn row_to_set_audit(row: &Row) -> rusqlite::Result<SetAuditRow> {
@@ -902,7 +991,7 @@ impl Repository {
             }
             (Some(s), None) => {
                 let sql = format!(
-                    "{} WHERE date(w.started_at, 'localtime') >= ?1 ORDER BY date(w.started_at, 'localtime'), s.id",
+                    "{} AND date(w.started_at, 'localtime') >= ?1 ORDER BY date(w.started_at, 'localtime'), s.id",
                     base
                 );
                 let mut stmt = self.conn.prepare(&sql)?;
@@ -911,7 +1000,7 @@ impl Repository {
             }
             (None, Some(u)) => {
                 let sql = format!(
-                    "{} WHERE date(w.started_at, 'localtime') <= ?1 ORDER BY date(w.started_at, 'localtime'), s.id",
+                    "{} AND date(w.started_at, 'localtime') <= ?1 ORDER BY date(w.started_at, 'localtime'), s.id",
                     base
                 );
                 let mut stmt = self.conn.prepare(&sql)?;
@@ -920,7 +1009,7 @@ impl Repository {
             }
             (Some(s), Some(u)) => {
                 let sql = format!(
-                    "{} WHERE date(w.started_at, 'localtime') >= ?1 AND date(w.started_at, 'localtime') <= ?2 \
+                    "{} AND date(w.started_at, 'localtime') >= ?1 AND date(w.started_at, 'localtime') <= ?2 \
                      ORDER BY date(w.started_at, 'localtime'), s.id",
                     base
                 );

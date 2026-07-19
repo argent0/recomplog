@@ -130,6 +130,11 @@ recomplog --json nutrition consumption create --product 12 --quantity 80 --unit 
 recomplog --json nutrition purchase create --product 3 --quantity 2 --purchased-at 2026-07-14T18:00:00-03:00
 recomplog --json workout create --type Push --started-at 2026-07-14T17:00:00-03:00
 recomplog --json workout list --days 14
+# Soft-delete keeps history; --purge --force hard-removes CASCADE trees
+recomplog --json workout delete 1 --reason "abandoned"
+recomplog --json workout audit 1
+recomplog --json nutrition consumption delete 88 --reason "duplicate"
+recomplog --json nutrition consumption audit 88
 recomplog --json workout set add --workout 1 --exercise "bench press" --reps 5 --weight 100 --phase full
 # body_mass: --weight optional when a body measurement exists
 recomplog --json workout set add --workout 1 --exercise "pull up" --reps 8

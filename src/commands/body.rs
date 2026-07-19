@@ -656,6 +656,7 @@ fn list_consumptions_with_incomplete_macros(
     let mut stmt = conn.prepare(
         "SELECT c.id, c.product_id, c.consumed_at
          FROM consumptions c
+         WHERE c.deleted_at IS NULL
          ORDER BY c.consumed_at DESC, c.id DESC",
     )?;
     let raw: Vec<(i64, i64, String)> = stmt
@@ -1480,20 +1481,54 @@ fn handle_update(
 
 fn handle_delete(repo: &mut Repository, args: DeleteArgs, json: bool, quiet: bool) -> Result<()> {
     let (id, date) = resolve_identifier(args.id, args.date)?;
+    let reason = args.reason.as_deref();
 
-    let deleted_id = if let Some(i) = id {
-        repo.delete_measurement(i)?
+    if args.purge {
+        if !args.force {
+            return Err(RecomplogError::InvalidInput(
+                "measurement --purge requires --force (hard-deletes the row)".into(),
+            ));
+        }
+        let deleted_id = if let Some(i) = id {
+            repo.purge_measurement(i, reason)?
+        } else if let Some(d) = date {
+            repo.purge_measurement_by_date(&d, reason)?
+        } else {
+            unreachable!()
+        };
+        if json {
+            print_json(&serde_json::json!({
+                "success": true,
+                "deleted_id": deleted_id,
+                "id": deleted_id,
+                "mode": "purge",
+                "message": format!("purged measurement {deleted_id}"),
+            }));
+        } else {
+            quiet_print(&format!("Purged measurement {deleted_id}"), quiet);
+        }
+        return Ok(());
+    }
+
+    let (deleted_id, deleted_at) = if let Some(i) = id {
+        repo.soft_delete_measurement(i, reason)?
     } else if let Some(d) = date {
-        repo.delete_measurement_by_date(&d)?
+        repo.soft_delete_measurement_by_date(&d, reason)?
     } else {
         unreachable!()
     };
 
     if json {
-        print_json(&Success::deleted(deleted_id));
+        print_json(&serde_json::json!({
+            "success": true,
+            "deleted_id": deleted_id,
+            "id": deleted_id,
+            "mode": "soft_delete",
+            "deleted_at": deleted_at,
+            "message": format!("soft-deleted measurement {deleted_id}"),
+        }));
     } else {
-        let msg = format!("Deleted measurement {}", deleted_id);
-        quiet_print(&msg, quiet);
+        quiet_print(&format!("Soft-deleted measurement {deleted_id}"), quiet);
     }
     Ok(())
 }
@@ -2504,53 +2539,64 @@ fn handle_sleep_delete(
     quiet: bool,
 ) -> Result<()> {
     let (id, date) = resolve_identifier(args.id, args.date)?;
+    let reason = args.reason.as_deref();
 
-    let deleted_id = if let Some(i) = id {
-        // capture date for nicer JSON
+    if args.purge {
+        if !args.force {
+            return Err(RecomplogError::InvalidInput(
+                "sleep --purge requires --force (hard-deletes the row)".into(),
+            ));
+        }
+        let (deleted_id, event_date) = if let Some(i) = id {
+            let s = repo.get_sleep(i).ok();
+            let did = repo.purge_sleep(i, reason)?;
+            (did, s.map(|x| x.date))
+        } else if let Some(d) = date {
+            let did = repo.purge_sleep_by_date(&d, reason)?;
+            (did, Some(d))
+        } else {
+            unreachable!()
+        };
+        if json {
+            print_json(&serde_json::json!({
+                "success": true,
+                "deleted_id": deleted_id,
+                "id": deleted_id,
+                "mode": "purge",
+                "date": event_date,
+                "message": format!("purged sleep {deleted_id}"),
+            }));
+        } else {
+            quiet_print(&format!("Purged sleep entry {deleted_id}"), quiet);
+        }
+        return Ok(());
+    }
+
+    let (deleted_id, deleted_at, event_date) = if let Some(i) = id {
         let s = repo.get_sleep(i)?;
-        let did = repo.delete_sleep(i)?;
-        if json {
-            print_json(&SleepDeleteSuccess {
-                success: true,
-                deleted_id: did,
-                date: Some(s.date),
-            });
-        } else {
-            let msg = format!("Deleted sleep entry {}", did);
-            quiet_print(&msg, quiet);
-        }
-        did
+        let (did, at) = repo.soft_delete_sleep(i, reason)?;
+        (did, at, Some(s.date))
     } else if let Some(d) = date {
-        let did = repo.delete_sleep_by_date(&d)?;
-        if json {
-            print_json(&SleepDeleteSuccess {
-                success: true,
-                deleted_id: did,
-                date: Some(d.clone()),
-            });
-        } else {
-            let msg = format!("Deleted sleep entry {}", did);
-            quiet_print(&msg, quiet);
-        }
-        did
+        let (did, at) = repo.soft_delete_sleep_by_date(&d, reason)?;
+        (did, at, Some(d))
     } else {
         unreachable!()
     };
 
-    // For non-json path we already printed; for id path without date we still have deleted_id above.
-    if !json {
-        // already handled
+    if json {
+        print_json(&serde_json::json!({
+            "success": true,
+            "deleted_id": deleted_id,
+            "id": deleted_id,
+            "mode": "soft_delete",
+            "deleted_at": deleted_at,
+            "date": event_date,
+            "message": format!("soft-deleted sleep {deleted_id}"),
+        }));
+    } else {
+        quiet_print(&format!("Soft-deleted sleep entry {deleted_id}"), quiet);
     }
-    let _ = deleted_id;
     Ok(())
-}
-
-#[derive(serde::Serialize)]
-struct SleepDeleteSuccess {
-    success: bool,
-    deleted_id: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    date: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]

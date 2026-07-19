@@ -156,7 +156,7 @@ fn query_workouts(conn: &Connection, prefix: &str) -> rusqlite::Result<Vec<Compl
     let like = format!("{}%", prefix);
     let mut stmt = conn.prepare(
         "SELECT id, COALESCE(workout_type, ''), started_at FROM workouts
-         WHERE CAST(id AS TEXT) LIKE ?1
+         WHERE deleted_at IS NULL AND CAST(id AS TEXT) LIKE ?1
          ORDER BY started_at DESC
          LIMIT ?2",
     )?;
@@ -252,7 +252,8 @@ mod tests {
                  CREATE TABLE workouts (
                    id INTEGER PRIMARY KEY,
                    workout_type TEXT,
-                   started_at TEXT NOT NULL
+                   started_at TEXT NOT NULL,
+                   deleted_at TEXT
                  );
                  INSERT INTO exercises (name) VALUES ('bench press'), ('pull up');
                  INSERT INTO products (id, name) VALUES (3, 'Oats'), (12, 'Whey');

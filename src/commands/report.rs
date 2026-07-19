@@ -170,7 +170,8 @@ fn fetch_brief_consumptions(conn: &Connection, today_ymd: &str) -> Result<Vec<Br
     let mut stmt = conn.prepare(
         "SELECT c.id, c.product_id, c.quantity, c.unit, c.consumed_at
          FROM consumptions c
-         WHERE date(c.consumed_at, 'localtime') = date(?1)
+         WHERE c.deleted_at IS NULL
+           AND date(c.consumed_at, 'localtime') = date(?1)
          ORDER BY c.consumed_at DESC
          LIMIT 100",
     )?;
@@ -226,7 +227,8 @@ fn fetch_brief_workouts_detail_on_day(
 ) -> Result<Vec<serde_json::Value>> {
     let mut stmt = conn.prepare(
         "SELECT id FROM workouts
-         WHERE date(started_at, 'localtime') = date(?1)
+         WHERE deleted_at IS NULL
+           AND date(started_at, 'localtime') = date(?1)
          ORDER BY started_at DESC",
     )?;
     let ids: Vec<i64> = stmt
@@ -249,7 +251,8 @@ fn fetch_brief_workouts_in_range(
     let mut stmt = conn.prepare(
         "SELECT id, started_at, finished_at, workout_type, notes, duration_minutes, overall_feeling
          FROM workouts
-         WHERE date(started_at, 'localtime') >= date(?1)
+         WHERE deleted_at IS NULL
+           AND date(started_at, 'localtime') >= date(?1)
            AND date(started_at, 'localtime') <= date(?2)
          ORDER BY started_at DESC",
     )?;
@@ -271,7 +274,8 @@ fn fetch_workout_period_overview(
         "SELECT COUNT(*) AS workout_count,
                 COUNT(DISTINCT date(started_at, 'localtime')) AS days_trained
          FROM workouts
-         WHERE date(started_at, 'localtime') >= date(?1)
+         WHERE deleted_at IS NULL
+           AND date(started_at, 'localtime') >= date(?1)
            AND date(started_at, 'localtime') <= date(?2)",
         params![since, until],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -289,7 +293,8 @@ fn fetch_workout_period_overview(
          JOIN workout_exercises we ON s.workout_exercise_id = we.id
          JOIN exercises e ON we.exercise_id = e.id
          JOIN workouts w ON we.workout_id = w.id
-         WHERE date(w.started_at, 'localtime') >= date(?1)
+         WHERE s.deleted_at IS NULL AND w.deleted_at IS NULL
+           AND date(w.started_at, 'localtime') >= date(?1)
            AND date(w.started_at, 'localtime') <= date(?2)",
         params![since, until],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -602,7 +607,7 @@ fn fetch_nutrition_consumptions(
     let mut sql = String::from(
         "SELECT c.quantity, c.unit, c.product_id, c.consumed_at
          FROM consumptions c
-         WHERE 1=1",
+         WHERE c.deleted_at IS NULL",
     );
     let mut bind: Vec<String> = vec![];
     if let Some(ref s) = resolved.since_ymd {
@@ -1016,8 +1021,9 @@ fn nutrition_spending(
     };
     let resolved = resolve_nutrition_report_period(&period_args)?;
 
-    let mut total_sql =
-        String::from("SELECT COALESCE(SUM(price_cents), 0) FROM purchases pu WHERE 1=1");
+    let mut total_sql = String::from(
+        "SELECT COALESCE(SUM(price_cents), 0) FROM purchases pu WHERE pu.deleted_at IS NULL",
+    );
     let mut total_bind: Vec<String> = vec![];
     push_date_filters(
         &mut total_sql,
@@ -1034,7 +1040,7 @@ fn nutrition_spending(
         "SELECT pu.store_id, COALESCE(s.name, '(no store)'), COALESCE(SUM(pu.price_cents),0), COUNT(*)
          FROM purchases pu
          LEFT JOIN stores s ON s.id = pu.store_id
-         WHERE 1=1",
+         WHERE pu.deleted_at IS NULL",
     );
     let mut store_bind: Vec<String> = vec![];
     push_date_filters(
@@ -1068,7 +1074,7 @@ fn nutrition_spending(
         let mut psql = String::from(
             "SELECT pu.product_id, pu.price_cents
              FROM purchases pu
-             WHERE 1=1",
+             WHERE pu.deleted_at IS NULL",
         );
         let mut pbind: Vec<String> = vec![];
         push_date_filters(&mut psql, &mut pbind, "pu.purchased_at", &resolved);

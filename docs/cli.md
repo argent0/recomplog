@@ -18,6 +18,10 @@ This document describes the unified command structure.
 ```bash
 recomplog workout create --type Push
 recomplog workout create --type Push --started-at "2026-07-10T17:00:00-03:00" --finished-at "2026-07-10T18:30:00-03:00"
+# Soft-delete (default) keeps the session tree; list/report exclude it. Hard purge needs --force when non-empty.
+recomplog workout delete 1 --reason "abandoned"
+recomplog --json workout audit 1
+recomplog workout delete 1 --purge --force
 recomplog workout update 1 --finished-at "2026-07-10 19:00"
 recomplog workout list --days 14
 recomplog workout show 42

@@ -198,13 +198,34 @@ pub enum WorkoutAction {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Delete a workout (cascades exercises/sets).
+    /// Soft-delete a workout (default) or hard-purge with --purge.
+    ///
+    /// Soft-delete sets `deleted_at` and keeps the session tree for audit.
+    /// Reports/list exclude soft-deleted rows. Hard purge uses CASCADE and
+    /// requires `--force` when the tree has sets, trackpoints, or imports.
     Delete {
         #[arg(add = ArgValueCompleter::new(completion::complete_workout))]
         id: i64,
-        /// Show what would be deleted without writing.
+        /// Optional reason stored on the row and in entity_audit.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Hard-delete the row (CASCADE children). Prefer soft-delete first.
+        #[arg(long)]
+        purge: bool,
+        /// Required for --purge when the workout tree is non-empty.
+        #[arg(long)]
+        force: bool,
+        /// Show cascade counts / mode without writing.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Inspect create/soft-delete/purge history for a workout.
+    Audit {
+        #[arg(add = ArgValueCompleter::new(completion::complete_workout))]
+        id: i64,
+        /// Max history entries (default 50).
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
     },
     /// Workout analysis: volume, PRs, history, load progression.
     ///
@@ -630,12 +651,27 @@ pub enum SetAction {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Delete a set by id.
+    /// Soft-delete a set (default) or hard-purge with --purge.
+    ///
+    /// Soft-delete keeps trackpoints; reports exclude the set. Purge CASCADE
+    /// deletes trackpoints and requires `--force` when any exist.
     Delete {
         id: i64,
-        /// Show what would be deleted without writing.
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        purge: bool,
+        #[arg(long)]
+        force: bool,
+        /// Show cascade counts / mode without writing.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Inspect soft-delete/purge history for a set.
+    Audit {
+        id: i64,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
     },
 }
 
@@ -778,6 +814,15 @@ pub struct DeleteArgs {
     pub id: Option<i64>,
     #[arg(long, add = ArgValueCompleter::new(completion::complete_date_shortcut))]
     pub date: Option<String>,
+    /// Optional reason stored on the row and in entity_audit.
+    #[arg(long)]
+    pub reason: Option<String>,
+    /// Hard-delete the row. Prefer soft-delete (default).
+    #[arg(long)]
+    pub purge: bool,
+    /// Required for --purge (body events have no CASCADE tree, but keep the flag explicit).
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -1116,8 +1161,21 @@ pub enum PurchaseAction {
     Show {
         id: i64,
     },
+    /// Soft-delete a purchase (default) or hard-purge with --purge.
     Delete {
         id: i64,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        purge: bool,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Inspect soft-delete/purge history for a purchase.
+    Audit {
+        id: i64,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
     },
 }
 
@@ -1151,8 +1209,21 @@ pub enum ConsumptionAction {
         #[arg(long, add = ArgValueCompleter::new(completion::complete_product))]
         product: Option<i64>,
     },
+    /// Soft-delete a consumption (default) or hard-purge with --purge.
     Delete {
         id: i64,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        purge: bool,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Inspect soft-delete/purge history for a consumption.
+    Audit {
+        id: i64,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
     },
 }
 

@@ -105,10 +105,11 @@ fn fetch_html_measurements(conn: &Connection, since: &str, until: &str) -> Resul
     let mut stmt = conn.prepare(
         "SELECT date, weight_kg, body_fat_pct, skeletal_muscle_pct, resting_metabolism_kcal
          FROM measurements m
-         WHERE date >= ?1 AND date <= ?2
+         WHERE m.deleted_at IS NULL
+           AND date >= ?1 AND date <= ?2
            AND id = (
              SELECT id FROM measurements m2
-             WHERE m2.date = m.date
+             WHERE m2.date = m.date AND m2.deleted_at IS NULL
              ORDER BY m2.created_at DESC, m2.id DESC LIMIT 1
            )
          ORDER BY date ASC",
@@ -141,10 +142,11 @@ fn fetch_html_sleep(conn: &Connection, since: &str, until: &str) -> Result<Vec<S
         "SELECT date, total_sleep_minutes, rem_minutes, deep_minutes, light_minutes,
                 awake_minutes, sleep_efficiency_pct, sleep_score
          FROM sleep s
-         WHERE date >= ?1 AND date <= ?2
+         WHERE s.deleted_at IS NULL
+           AND date >= ?1 AND date <= ?2
            AND id = (
              SELECT id FROM sleep s2
-             WHERE s2.date = s.date
+             WHERE s2.date = s.date AND s2.deleted_at IS NULL
              ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1
            )
          ORDER BY date ASC",
@@ -185,7 +187,8 @@ fn fetch_html_nutrition_daily(conn: &Connection, since: &str, until: &str) -> Re
         "SELECT date(c.consumed_at, 'localtime') AS d,
                 c.quantity, c.unit, c.product_id
          FROM consumptions c
-         WHERE date(c.consumed_at, 'localtime') >= date(?1)
+         WHERE c.deleted_at IS NULL
+           AND date(c.consumed_at, 'localtime') >= date(?1)
            AND date(c.consumed_at, 'localtime') <= date(?2)
          ORDER BY d ASC",
     )?;
@@ -266,7 +269,8 @@ fn fetch_html_training(conn: &Connection, since: &str, until: &str) -> Result<Tr
         "SELECT COUNT(*) AS workout_count,
                 COUNT(DISTINCT date(started_at, 'localtime')) AS days_trained
          FROM workouts
-         WHERE date(started_at, 'localtime') >= date(?1)
+         WHERE deleted_at IS NULL
+           AND date(started_at, 'localtime') >= date(?1)
            AND date(started_at, 'localtime') <= date(?2)",
         params![since, until],
         |r| Ok((r.get(0)?, r.get(1)?)),
@@ -285,7 +289,8 @@ fn fetch_html_training(conn: &Connection, since: &str, until: &str) -> Result<Tr
          JOIN workout_exercises we ON s.workout_exercise_id = we.id
          JOIN exercises e ON we.exercise_id = e.id
          JOIN workouts w ON we.workout_id = w.id
-         WHERE date(w.started_at, 'localtime') >= date(?1)
+         WHERE s.deleted_at IS NULL AND w.deleted_at IS NULL
+           AND date(w.started_at, 'localtime') >= date(?1)
            AND date(w.started_at, 'localtime') <= date(?2)",
         params![since, until],
         |r| Ok((r.get(0)?, r.get(1)?)),
