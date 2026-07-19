@@ -115,8 +115,10 @@ cargo test
 
 # Typical agent usage
 recomplog --json body measurement create --date today --weight-kg 81.2
+recomplog --json body measurement correct --id 3 --weight-kg 80.5 --reason "scale typo"
 recomplog --json body measurement medians --window 7 --days 7
 recomplog --json body sleep create --date today --total-sleep "7h 45m"
+recomplog --json body sleep correct --id 5 --total-sleep "7h 50m" --reason "watch resync"
 recomplog --json nutrition product create "Oats" --tags breakfast
 # Merge duplicates as aliases: retire sources onto --into (event product_ids stay; tags/nutrition gaps copy)
 recomplog --json nutrition product merge --into 14 61

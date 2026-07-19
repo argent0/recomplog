@@ -747,8 +747,14 @@ pub enum MeasurementAction {
     /// Update fields on an existing measurement (prefer append create for new samples).
     ///
     /// Overwriting settled values requires `--reason`. New readings: `create` again
-    /// for the same day. Inspect with `body measurement audit --id …`.
+    /// for the same day. Prefer `correct` for honest corrections (supersede chain).
+    /// Inspect with `body measurement audit --id …`.
     Update(UpdateMeasurementArgs),
+    /// Append a correcting measurement that supersedes an existing sample (append-only).
+    ///
+    /// Inserts a new row with `supersedes_id` and soft-deletes the old head.
+    /// Omitted metric fields copy from the superseded sample. Requires `--reason`.
+    Correct(CorrectMeasurementArgs),
     /// Delete a measurement.
     Delete(DeleteArgs),
     /// Inspect create/soft-delete/purge history for a measurement.
@@ -840,6 +846,38 @@ pub struct UpdateMeasurementArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct CorrectMeasurementArgs {
+    /// Measurement id to supersede (preferred).
+    #[arg(long)]
+    pub id: Option<i64>,
+    /// When exactly one sample exists for the day, resolve by date.
+    #[arg(long, add = ArgValueCompleter::new(completion::complete_date_shortcut))]
+    pub date: Option<String>,
+    /// Override event calendar day on the new sample (default: keep old date).
+    #[arg(long = "new-date", add = ArgValueCompleter::new(completion::complete_date_shortcut))]
+    pub new_date: Option<String>,
+    #[arg(long)]
+    pub weight_kg: Option<f64>,
+    #[arg(long)]
+    pub body_fat_pct: Option<f64>,
+    #[arg(long)]
+    pub skeletal_muscle_pct: Option<f64>,
+    #[arg(long)]
+    pub visceral_fat_level: Option<i64>,
+    #[arg(long)]
+    pub bmi: Option<f64>,
+    #[arg(long)]
+    pub resting_metabolism_kcal: Option<i64>,
+    /// Required non-empty reason.
+    #[arg(long)]
+    pub reason: String,
+    #[arg(long)]
+    pub no_sanity_check: bool,
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct DeleteArgs {
     #[arg(long)]
     pub id: Option<i64>,
@@ -866,8 +904,11 @@ pub enum SleepAction {
     Show(ShowArgs),
     /// Update fields on an existing sleep entry (prefer append create for new samples).
     ///
-    /// Overwriting settled values requires `--reason`. Inspect with `body sleep audit`.
+    /// Overwriting settled values requires `--reason`. Prefer `correct` for honest
+    /// corrections (supersede chain). Inspect with `body sleep audit`.
     Update(SleepUpdateArgs),
+    /// Append a correcting sleep sample that supersedes an existing entry (append-only).
+    Correct(SleepCorrectArgs),
     /// Delete a sleep entry.
     Delete(DeleteArgs),
     /// Inspect create/soft-delete/purge history for a sleep entry.
@@ -970,6 +1011,52 @@ pub struct SleepUpdateArgs {
     /// Required when overwriting settled fields; optional for null fills.
     #[arg(long)]
     pub reason: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SleepCorrectArgs {
+    #[arg(long)]
+    pub id: Option<i64>,
+    #[arg(long, add = ArgValueCompleter::new(completion::complete_date_shortcut))]
+    pub date: Option<String>,
+    #[arg(long = "new-date", add = ArgValueCompleter::new(completion::complete_date_shortcut))]
+    pub new_date: Option<String>,
+    #[arg(long)]
+    pub bedtime: Option<String>,
+    #[arg(long)]
+    pub wake_time: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub time_in_bed: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub total_sleep: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub rem: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub deep: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub light: Option<String>,
+    #[arg(long, value_name = "DURATION")]
+    pub awake: Option<String>,
+    #[arg(long)]
+    pub sleep_efficiency: Option<f64>,
+    #[arg(long)]
+    pub sleep_score: Option<i64>,
+    #[arg(long)]
+    pub quality: Option<i64>,
+    #[arg(long)]
+    pub awakenings: Option<i64>,
+    #[arg(long, alias = "heart-rate-bpm")]
+    pub heart_rate: Option<f64>,
+    #[arg(long, alias = "hypopnea-per-hr")]
+    pub hypopnea: Option<f64>,
+    #[arg(long)]
+    pub respiratory_rate: Option<f64>,
+    #[arg(long)]
+    pub notes: Option<String>,
+    #[arg(long)]
+    pub reason: String,
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Actions under `recomplog nutrition ...`

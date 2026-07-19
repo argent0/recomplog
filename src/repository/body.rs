@@ -222,7 +222,7 @@ impl Repository {
     }
 
     /// Sole measurement id for date when mutating by date. Errors if 0 or >1 rows.
-    fn sole_measurement_id_for_date(&self, date: &str) -> Result<i64> {
+    pub fn sole_measurement_id_for_date(&self, date: &str) -> Result<i64> {
         let count = self.count_measurements_for_date(date)?;
         if count == 0 {
             return Err(RecomplogError::MeasurementNotFoundForDate(date.to_string()));
@@ -380,6 +380,79 @@ impl Repository {
             reason,
         )?;
         Ok((id, class, reason_stored))
+    }
+
+    /// Append a new measurement that supersedes `old_id` (soft-deletes old head).
+    /// Field values are the fully merged payload (caller copies from old + overrides).
+    /// Returns `(new_id, old_deleted_at)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn supersede_measurement(
+        &self,
+        old_id: i64,
+        date: &str,
+        weight_kg: Option<f64>,
+        body_fat_pct: Option<f64>,
+        skeletal_muscle_pct: Option<f64>,
+        visceral_fat_level: Option<i64>,
+        bmi: Option<f64>,
+        resting_metabolism_kcal: Option<i64>,
+        reason: &str,
+        changes: &[entity_audit::FieldChange],
+    ) -> Result<(i64, String)> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(RecomplogError::InvalidInput(
+                "measurement correct requires a non-empty --reason".into(),
+            ));
+        }
+        // Ensure old is active
+        let _before = self.get_measurement(old_id)?;
+        let now = now_utc();
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| RecomplogError::Other(e.to_string()))?;
+        tx.execute(
+            "INSERT INTO measurements
+             (date, weight_kg, body_fat_pct, skeletal_muscle_pct, visceral_fat_level, bmi,
+              resting_metabolism_kcal, created_at, updated_at, supersedes_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)",
+            params![
+                date,
+                weight_kg,
+                body_fat_pct,
+                skeletal_muscle_pct,
+                visceral_fat_level,
+                bmi,
+                resting_metabolism_kcal,
+                now,
+                old_id
+            ],
+        )
+        .map_err(|e| RecomplogError::Other(e.to_string()))?;
+        let new_id = tx.last_insert_rowid();
+        entity_audit::append_supersede_create(
+            &tx,
+            entity_audit::entity::MEASUREMENT,
+            new_id,
+            old_id,
+            reason,
+            Some(changes),
+        )
+        .map_err(|e| RecomplogError::Other(e.to_string()))?;
+        let deleted_at = entity_audit::supersede_retire(
+            &tx,
+            "measurements",
+            entity_audit::entity::MEASUREMENT,
+            old_id,
+            new_id,
+            reason,
+            Some(changes),
+        )
+        .map_err(|e| RecomplogError::InvalidInput(e.to_string()))?;
+        tx.commit()
+            .map_err(|e| RecomplogError::Other(e.to_string()))?;
+        Ok((new_id, deleted_at))
     }
 
     /// Soft-delete by id (default). Returns `(id, deleted_at)`.
@@ -746,7 +819,7 @@ impl Repository {
     }
 
     /// Sole sleep id for date when mutating by date. Errors if 0 or >1 rows.
-    fn sole_sleep_id_for_date(&self, date: &str) -> Result<i64> {
+    pub fn sole_sleep_id_for_date(&self, date: &str) -> Result<i64> {
         let count = self.count_sleeps_for_date(date)?;
         if count == 0 {
             return Err(RecomplogError::SleepNotFoundForDate(date.to_string()));
@@ -904,6 +977,100 @@ impl Repository {
             None,
         )?;
         Ok((class, reason_stored))
+    }
+
+    /// Append a new sleep sample that supersedes `old_id` (soft-deletes old head).
+    /// Returns `(new_id, old_deleted_at)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn supersede_sleep(
+        &self,
+        old_id: i64,
+        date: &str,
+        bedtime: Option<&str>,
+        wake_time: Option<&str>,
+        time_in_bed_minutes: Option<i64>,
+        total_sleep_minutes: Option<i64>,
+        rem_minutes: Option<i64>,
+        deep_minutes: Option<i64>,
+        light_minutes: Option<i64>,
+        awake_minutes: Option<i64>,
+        sleep_efficiency_pct: Option<f64>,
+        sleep_score: Option<i64>,
+        subjective_quality: Option<i64>,
+        awakenings: Option<i64>,
+        heart_rate_bpm: Option<f64>,
+        hypopnea_per_hr: Option<f64>,
+        respiratory_rate: Option<f64>,
+        notes: Option<&str>,
+        reason: &str,
+        changes: &[entity_audit::FieldChange],
+    ) -> Result<(i64, String)> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(RecomplogError::InvalidInput(
+                "sleep correct requires a non-empty --reason".into(),
+            ));
+        }
+        let _before = self.get_sleep(old_id)?;
+        let now = now_utc();
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| RecomplogError::Other(e.to_string()))?;
+        tx.execute(
+            "INSERT INTO sleep
+             (date, bedtime, wake_time, time_in_bed_minutes, total_sleep_minutes,
+              rem_minutes, deep_minutes, light_minutes, awake_minutes,
+              sleep_efficiency_pct, sleep_score, subjective_quality, awakenings,
+              heart_rate_bpm, hypopnea_per_hr, respiratory_rate, notes,
+              created_at, updated_at, supersedes_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?18, ?19)",
+            params![
+                date,
+                bedtime,
+                wake_time,
+                time_in_bed_minutes,
+                total_sleep_minutes,
+                rem_minutes,
+                deep_minutes,
+                light_minutes,
+                awake_minutes,
+                sleep_efficiency_pct,
+                sleep_score,
+                subjective_quality,
+                awakenings,
+                heart_rate_bpm,
+                hypopnea_per_hr,
+                respiratory_rate,
+                notes,
+                now,
+                old_id
+            ],
+        )
+        .map_err(|e| RecomplogError::Other(e.to_string()))?;
+        let new_id = tx.last_insert_rowid();
+        entity_audit::append_supersede_create(
+            &tx,
+            entity_audit::entity::SLEEP,
+            new_id,
+            old_id,
+            reason,
+            Some(changes),
+        )
+        .map_err(|e| RecomplogError::Other(e.to_string()))?;
+        let deleted_at = entity_audit::supersede_retire(
+            &tx,
+            "sleep",
+            entity_audit::entity::SLEEP,
+            old_id,
+            new_id,
+            reason,
+            Some(changes),
+        )
+        .map_err(|e| RecomplogError::InvalidInput(e.to_string()))?;
+        tx.commit()
+            .map_err(|e| RecomplogError::Other(e.to_string()))?;
+        Ok((new_id, deleted_at))
     }
 
     /// Update by date when exactly one sample exists. Returns id + class + reason.

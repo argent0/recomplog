@@ -1,7 +1,8 @@
 use crate::cli::{
-    AuditBodyArgs, BodyReportAction, CheckArgs, CreateMeasurementArgs, DeleteArgs, ListArgs,
-    MediansArgs, ProfileAction, ProfileSetArgs, ReportRangeArgs, ShowArgs, SleepAction,
-    SleepCreateArgs, SleepUpdateArgs, SummaryArgs, UpdateMeasurementArgs,
+    AuditBodyArgs, BodyReportAction, CheckArgs, CorrectMeasurementArgs, CreateMeasurementArgs,
+    DeleteArgs, ListArgs, MediansArgs, ProfileAction, ProfileSetArgs, ReportRangeArgs, ShowArgs,
+    SleepAction, SleepCorrectArgs, SleepCreateArgs, SleepUpdateArgs, SummaryArgs,
+    UpdateMeasurementArgs,
 };
 use crate::config::SanityLimits;
 use crate::entity_audit;
@@ -85,6 +86,9 @@ pub fn handle_measurement(
         crate::cli::MeasurementAction::Show(args) => handle_show(repo, args, json),
         crate::cli::MeasurementAction::Update(args) => {
             handle_update(repo, args, limits, json, quiet)
+        }
+        crate::cli::MeasurementAction::Correct(args) => {
+            handle_measurement_correct(repo, args, limits, json, quiet)
         }
         crate::cli::MeasurementAction::Delete(args) => handle_delete(repo, args, json, quiet),
         crate::cli::MeasurementAction::Audit(args) => handle_measurement_audit(repo, args, json),
@@ -1493,6 +1497,197 @@ fn handle_update(
     Ok(())
 }
 
+fn handle_measurement_correct(
+    repo: &mut Repository,
+    args: CorrectMeasurementArgs,
+    limits: &SanityLimits,
+    json: bool,
+    quiet: bool,
+) -> Result<()> {
+    let reason = args.reason.trim();
+    if reason.is_empty() {
+        return Err(RecomplogError::InvalidInput(
+            "measurement correct requires a non-empty --reason".into(),
+        ));
+    }
+    let (id_opt, date_opt) = resolve_identifier(args.id, args.date)?;
+    let old_id = if let Some(i) = id_opt {
+        i
+    } else if let Some(d) = date_opt {
+        repo.sole_measurement_id_for_date(&d)?
+    } else {
+        unreachable!()
+    };
+    let before = repo.get_measurement(old_id)?;
+    let new_date = if let Some(ref d) = args.new_date {
+        parse_date_to_ymd(d).map_err(|e| RecomplogError::InvalidDate(e.to_string()))?
+    } else {
+        before.date.clone()
+    };
+    let weight_kg = args.weight_kg.or(before.weight_kg);
+    let body_fat_pct = args.body_fat_pct.or(before.body_fat_pct);
+    let skeletal_muscle_pct = args.skeletal_muscle_pct.or(before.skeletal_muscle_pct);
+    let visceral_fat_level = args.visceral_fat_level.or(before.visceral_fat_level);
+    let bmi = args.bmi.or(before.bmi);
+    let resting_metabolism_kcal = args
+        .resting_metabolism_kcal
+        .or(before.resting_metabolism_kcal);
+
+    let mut changes: Vec<entity_audit::FieldChange> = Vec::new();
+    push_opt_f64_change(&mut changes, "weight_kg", before.weight_kg, weight_kg);
+    push_opt_f64_change(
+        &mut changes,
+        "body_fat_pct",
+        before.body_fat_pct,
+        body_fat_pct,
+    );
+    push_opt_f64_change(
+        &mut changes,
+        "skeletal_muscle_pct",
+        before.skeletal_muscle_pct,
+        skeletal_muscle_pct,
+    );
+    push_opt_i64_change(
+        &mut changes,
+        "visceral_fat_level",
+        before.visceral_fat_level,
+        visceral_fat_level,
+    );
+    push_opt_f64_change(&mut changes, "bmi", before.bmi, bmi);
+    push_opt_i64_change(
+        &mut changes,
+        "resting_metabolism_kcal",
+        before.resting_metabolism_kcal,
+        resting_metabolism_kcal,
+    );
+    if new_date != before.date {
+        changes.push(entity_audit::FieldChange::new(
+            "date",
+            serde_json::json!(before.date),
+            serde_json::json!(new_date),
+        ));
+    }
+
+    let proposed = proposed_from_args(
+        weight_kg,
+        body_fat_pct,
+        skeletal_muscle_pct,
+        visceral_fat_level,
+        bmi,
+        resting_metabolism_kcal,
+    );
+    let warnings =
+        run_measurement_sanity(repo, &new_date, &proposed, limits, args.no_sanity_check)?;
+
+    if args.dry_run {
+        if json {
+            print_json(&serde_json::json!({
+                "success": true,
+                "dry_run": true,
+                "mode": "supersede",
+                "supersedes_id": old_id,
+                "date": new_date,
+                "weight_kg": weight_kg,
+                "reason": reason,
+                "fields": changes.iter().map(|f| serde_json::json!({
+                    "name": f.name, "old": f.old, "new": f.new
+                })).collect::<Vec<_>>(),
+                "warnings": warnings,
+            }));
+        } else {
+            quiet_print(
+                &format!("Dry-run: would supersede measurement {old_id}"),
+                quiet,
+            );
+        }
+        return Ok(());
+    }
+
+    let (new_id, deleted_at) = repo.supersede_measurement(
+        old_id,
+        &new_date,
+        weight_kg,
+        body_fat_pct,
+        skeletal_muscle_pct,
+        visceral_fat_level,
+        bmi,
+        resting_metabolism_kcal,
+        reason,
+        &changes,
+    )?;
+    emit_sanity_warnings(&warnings);
+    if json {
+        print_json(&serde_json::json!({
+            "success": true,
+            "id": new_id,
+            "supersedes_id": old_id,
+            "mode": "supersede",
+            "date": new_date,
+            "weight_kg": weight_kg,
+            "old_deleted_at": deleted_at,
+            "reason": reason,
+            "message": "measurement corrected (supersede)",
+            "warnings": warnings,
+        }));
+    } else {
+        quiet_print(
+            &format!("Measurement {new_id} supersedes {old_id} (reason: {reason})"),
+            quiet,
+        );
+    }
+    Ok(())
+}
+
+fn push_opt_f64_change(
+    changes: &mut Vec<entity_audit::FieldChange>,
+    name: &str,
+    old: Option<f64>,
+    new: Option<f64>,
+) {
+    let changed = match (old, new) {
+        (None, None) => false,
+        (Some(a), Some(b)) => (a - b).abs() > f64::EPSILON,
+        _ => true,
+    };
+    if changed {
+        changes.push(entity_audit::FieldChange::new(
+            name,
+            serde_json::json!(old),
+            serde_json::json!(new),
+        ));
+    }
+}
+
+fn push_opt_i64_change(
+    changes: &mut Vec<entity_audit::FieldChange>,
+    name: &str,
+    old: Option<i64>,
+    new: Option<i64>,
+) {
+    if old != new {
+        changes.push(entity_audit::FieldChange::new(
+            name,
+            serde_json::json!(old),
+            serde_json::json!(new),
+        ));
+    }
+}
+
+fn push_opt_str_change(
+    changes: &mut Vec<entity_audit::FieldChange>,
+    name: &str,
+    old: &Option<String>,
+    new: &Option<String>,
+) {
+    if old != new {
+        changes.push(entity_audit::FieldChange::new(
+            name,
+            serde_json::json!(old),
+            serde_json::json!(new),
+        ));
+    }
+}
+
 fn handle_measurement_audit(repo: &mut Repository, args: AuditBodyArgs, json: bool) -> Result<()> {
     let (id, date) = resolve_identifier(args.id, args.date)?;
     let limit = args.limit;
@@ -1542,7 +1737,8 @@ fn fetch_measurement_audit_current(
     use rusqlite::OptionalExtension;
     conn.query_row(
         "SELECT id, date, weight_kg, body_fat_pct, skeletal_muscle_pct, visceral_fat_level,
-                bmi, resting_metabolism_kcal, created_at, updated_at, deleted_at, delete_reason
+                bmi, resting_metabolism_kcal, created_at, updated_at, supersedes_id,
+                deleted_at, delete_reason
          FROM measurements WHERE id = ?1",
         [id],
         |r| {
@@ -1557,8 +1753,9 @@ fn fetch_measurement_audit_current(
                 "resting_metabolism_kcal": r.get::<_, Option<i64>>(7)?,
                 "created_at": r.get::<_, String>(8)?,
                 "updated_at": r.get::<_, String>(9)?,
-                "deleted_at": r.get::<_, Option<String>>(10)?,
-                "delete_reason": r.get::<_, Option<String>>(11)?,
+                "supersedes_id": r.get::<_, Option<i64>>(10)?,
+                "deleted_at": r.get::<_, Option<String>>(11)?,
+                "delete_reason": r.get::<_, Option<String>>(12)?,
             }))
         },
     )
@@ -1614,7 +1811,7 @@ fn fetch_sleep_audit_current(
     use rusqlite::OptionalExtension;
     conn.query_row(
         "SELECT id, date, total_sleep_minutes, time_in_bed_minutes, created_at, updated_at,
-                deleted_at, delete_reason
+                supersedes_id, deleted_at, delete_reason
          FROM sleep WHERE id = ?1",
         [id],
         |r| {
@@ -1625,8 +1822,9 @@ fn fetch_sleep_audit_current(
                 "time_in_bed_minutes": r.get::<_, Option<i64>>(3)?,
                 "created_at": r.get::<_, String>(4)?,
                 "updated_at": r.get::<_, String>(5)?,
-                "deleted_at": r.get::<_, Option<String>>(6)?,
-                "delete_reason": r.get::<_, Option<String>>(7)?,
+                "supersedes_id": r.get::<_, Option<i64>>(6)?,
+                "deleted_at": r.get::<_, Option<String>>(7)?,
+                "delete_reason": r.get::<_, Option<String>>(8)?,
             }))
         },
     )
@@ -2160,6 +2358,7 @@ pub fn handle_sleep(
         SleepAction::List(args) => handle_sleep_list(repo, args, json, quiet),
         SleepAction::Show(args) => handle_sleep_show(repo, args, json),
         SleepAction::Update(args) => handle_sleep_update(repo, args, limits, json, quiet),
+        SleepAction::Correct(args) => handle_sleep_correct(repo, args, limits, json, quiet),
         SleepAction::Delete(args) => handle_sleep_delete(repo, args, json, quiet),
         SleepAction::Audit(args) => handle_sleep_audit(repo, args, json),
     }
@@ -2318,6 +2517,213 @@ fn warn_if_stages_exceed_bed(
             );
         }
     }
+}
+
+fn handle_sleep_correct(
+    repo: &mut Repository,
+    args: SleepCorrectArgs,
+    limits: &SanityLimits,
+    json: bool,
+    quiet: bool,
+) -> Result<()> {
+    let reason = args.reason.trim();
+    if reason.is_empty() {
+        return Err(RecomplogError::InvalidInput(
+            "sleep correct requires a non-empty --reason".into(),
+        ));
+    }
+    let (id_opt, date_opt) = resolve_identifier(args.id, args.date)?;
+    let old_id = if let Some(i) = id_opt {
+        i
+    } else if let Some(d) = date_opt {
+        repo.sole_sleep_id_for_date(&d)?
+    } else {
+        unreachable!()
+    };
+    let before = repo.get_sleep(old_id)?;
+    let new_date = if let Some(ref d) = args.new_date {
+        parse_date_to_ymd(d).map_err(|e| RecomplogError::InvalidDate(e.to_string()))?
+    } else {
+        before.date.clone()
+    };
+
+    let bedtime = args.bedtime.clone().or_else(|| before.bedtime.clone());
+    let wake_time = args.wake_time.clone().or_else(|| before.wake_time.clone());
+    let time_in_bed = match &args.time_in_bed {
+        Some(s) => Some(parse_duration_to_minutes(s)?),
+        None => before.time_in_bed_minutes,
+    };
+    let total_sleep = match &args.total_sleep {
+        Some(s) => Some(parse_duration_to_minutes(s)?),
+        None => before.total_sleep_minutes,
+    };
+    let rem = match &args.rem {
+        Some(s) => Some(parse_duration_to_minutes(s)?),
+        None => before.rem_minutes,
+    };
+    let deep = match &args.deep {
+        Some(s) => Some(parse_duration_to_minutes(s)?),
+        None => before.deep_minutes,
+    };
+    let light = match &args.light {
+        Some(s) => Some(parse_duration_to_minutes(s)?),
+        None => before.light_minutes,
+    };
+    let awake = match &args.awake {
+        Some(s) => Some(parse_duration_to_minutes(s)?),
+        None => before.awake_minutes,
+    };
+    let efficiency = auto_efficiency(
+        args.sleep_efficiency.or(before.sleep_efficiency_pct),
+        time_in_bed,
+        total_sleep,
+    );
+    let sleep_score = args.sleep_score.or(before.sleep_score);
+    let quality = args.quality.or(before.subjective_quality);
+    let awakenings = args.awakenings.or(before.awakenings);
+    let heart_rate = args.heart_rate.or(before.heart_rate_bpm);
+    let hypopnea = args.hypopnea.or(before.hypopnea_per_hr);
+    let respiratory_rate = args.respiratory_rate.or(before.respiratory_rate);
+    let notes = args.notes.clone().or_else(|| before.notes.clone());
+
+    let mut changes: Vec<entity_audit::FieldChange> = Vec::new();
+    if new_date != before.date {
+        changes.push(entity_audit::FieldChange::new(
+            "date",
+            serde_json::json!(before.date),
+            serde_json::json!(new_date),
+        ));
+    }
+    push_opt_str_change(&mut changes, "bedtime", &before.bedtime, &bedtime);
+    push_opt_str_change(&mut changes, "wake_time", &before.wake_time, &wake_time);
+    push_opt_i64_change(
+        &mut changes,
+        "time_in_bed_minutes",
+        before.time_in_bed_minutes,
+        time_in_bed,
+    );
+    push_opt_i64_change(
+        &mut changes,
+        "total_sleep_minutes",
+        before.total_sleep_minutes,
+        total_sleep,
+    );
+    push_opt_i64_change(&mut changes, "rem_minutes", before.rem_minutes, rem);
+    push_opt_i64_change(&mut changes, "deep_minutes", before.deep_minutes, deep);
+    push_opt_i64_change(&mut changes, "light_minutes", before.light_minutes, light);
+    push_opt_i64_change(&mut changes, "awake_minutes", before.awake_minutes, awake);
+    push_opt_f64_change(
+        &mut changes,
+        "sleep_efficiency_pct",
+        before.sleep_efficiency_pct,
+        efficiency,
+    );
+    push_opt_i64_change(&mut changes, "sleep_score", before.sleep_score, sleep_score);
+    push_opt_i64_change(
+        &mut changes,
+        "subjective_quality",
+        before.subjective_quality,
+        quality,
+    );
+    push_opt_i64_change(&mut changes, "awakenings", before.awakenings, awakenings);
+    push_opt_f64_change(
+        &mut changes,
+        "heart_rate_bpm",
+        before.heart_rate_bpm,
+        heart_rate,
+    );
+    push_opt_f64_change(
+        &mut changes,
+        "hypopnea_per_hr",
+        before.hypopnea_per_hr,
+        hypopnea,
+    );
+    push_opt_f64_change(
+        &mut changes,
+        "respiratory_rate",
+        before.respiratory_rate,
+        respiratory_rate,
+    );
+    push_opt_str_change(&mut changes, "notes", &before.notes, &notes);
+
+    let proposed = proposed_sleep_metrics(
+        time_in_bed,
+        total_sleep,
+        rem,
+        deep,
+        light,
+        awake,
+        efficiency,
+        sleep_score,
+        quality,
+        awakenings,
+        heart_rate,
+        hypopnea,
+        respiratory_rate,
+    );
+    run_sleep_sanity(&proposed, limits)?;
+
+    if args.dry_run {
+        if json {
+            print_json(&serde_json::json!({
+                "success": true,
+                "dry_run": true,
+                "mode": "supersede",
+                "supersedes_id": old_id,
+                "date": new_date,
+                "total_sleep_minutes": total_sleep,
+                "reason": reason,
+                "fields": changes.iter().map(|f| serde_json::json!({
+                    "name": f.name, "old": f.old, "new": f.new
+                })).collect::<Vec<_>>(),
+            }));
+        } else {
+            quiet_print(&format!("Dry-run: would supersede sleep {old_id}"), quiet);
+        }
+        return Ok(());
+    }
+
+    let (new_id, deleted_at) = repo.supersede_sleep(
+        old_id,
+        &new_date,
+        bedtime.as_deref(),
+        wake_time.as_deref(),
+        time_in_bed,
+        total_sleep,
+        rem,
+        deep,
+        light,
+        awake,
+        efficiency,
+        sleep_score,
+        quality,
+        awakenings,
+        heart_rate,
+        hypopnea,
+        respiratory_rate,
+        notes.as_deref(),
+        reason,
+        &changes,
+    )?;
+    if json {
+        print_json(&serde_json::json!({
+            "success": true,
+            "id": new_id,
+            "supersedes_id": old_id,
+            "mode": "supersede",
+            "date": new_date,
+            "total_sleep_minutes": total_sleep,
+            "old_deleted_at": deleted_at,
+            "reason": reason,
+            "message": "sleep corrected (supersede)",
+        }));
+    } else {
+        quiet_print(
+            &format!("Sleep {new_id} supersedes {old_id} (reason: {reason})"),
+            quiet,
+        );
+    }
+    Ok(())
 }
 
 fn handle_sleep_create(

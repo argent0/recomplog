@@ -327,6 +327,130 @@ fn consumption_correct_dry_run_no_write() {
 }
 
 #[test]
+fn measurement_correct_supersedes() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    let created = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "body",
+                "measurement",
+                "create",
+                "--date",
+                "2026-07-10",
+                "--weight-kg",
+                "81.2",
+            ])
+            .assert()
+            .success(),
+    );
+    let old_id = created["id"].as_i64().unwrap();
+
+    let corrected = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "body",
+                "measurement",
+                "correct",
+                "--id",
+                &old_id.to_string(),
+                "--weight-kg",
+                "80.5",
+                "--reason",
+                "scale typo",
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(corrected["mode"], "supersede");
+    assert_eq!(corrected["supersedes_id"], old_id);
+    assert_eq!(corrected["weight_kg"], 80.5);
+    let new_id = corrected["id"].as_i64().unwrap();
+
+    let list = json_stdout(
+        bin()
+            .args(["--db", &db, "--json", "body", "measurement", "list"])
+            .assert()
+            .success(),
+    );
+    let rows = list.as_array().expect("list array");
+    assert!(rows.iter().any(|r| r["id"] == new_id));
+    assert!(!rows.iter().any(|r| r["id"] == old_id));
+
+    let audit_new = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "body",
+                "measurement",
+                "audit",
+                "--id",
+                &new_id.to_string(),
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(audit_new["current"]["supersedes_id"], old_id);
+}
+
+#[test]
+fn sleep_correct_supersedes() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    let created = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "body",
+                "sleep",
+                "create",
+                "--date",
+                "2026-07-10",
+                "--total-sleep",
+                "7h 30m",
+            ])
+            .assert()
+            .success(),
+    );
+    let old_id = created["id"].as_i64().unwrap();
+
+    let corrected = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "body",
+                "sleep",
+                "correct",
+                "--id",
+                &old_id.to_string(),
+                "--total-sleep",
+                "7h 45m",
+                "--reason",
+                "watch resync",
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(corrected["mode"], "supersede");
+    assert_eq!(corrected["supersedes_id"], old_id);
+    assert_eq!(corrected["total_sleep_minutes"], 465);
+}
+
+#[test]
 fn purchase_correct_supersedes() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("t.db").display().to_string();
