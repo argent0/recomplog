@@ -165,11 +165,13 @@ fn set_update_and_move() {
         .success();
     bin()
         .args([
-            "--db", &db, "--json", "workout", "set", "update", "1", "--reps", "6",
+            "--db", &db, "--json", "workout", "set", "update", "1", "--reps", "6", "--reason",
+            "miscount",
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("set updated"));
+        .stdout(predicate::str::contains("set updated"))
+        .stdout(predicate::str::contains("\"kind\": \"correction\""));
     bin()
         .args([
             "--db", &db, "--json", "workout", "set", "move", "2", "--to", "1",
@@ -624,6 +626,8 @@ fn cardio_cadence_ascent_and_update_zones() {
             "172",
             "--ascent",
             "125",
+            "--reason",
+            "device reprocess",
         ])
         .assert()
         .success()

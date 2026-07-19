@@ -1440,8 +1440,8 @@ fn handle_update(
             }
         };
 
-    let updated_id = if let Some(i) = id {
-        repo.update_measurement(
+    let (updated_id, class, reason_stored) = if let Some(i) = id {
+        let (class, reason_stored) = repo.update_measurement(
             i,
             args.weight_kg,
             args.body_fat_pct,
@@ -1449,8 +1449,9 @@ fn handle_update(
             args.visceral_fat_level,
             args.bmi,
             args.resting_metabolism_kcal,
+            args.reason.as_deref(),
         )?;
-        i
+        (i, class, reason_stored)
     } else if let Some(d) = date {
         repo.update_measurement_by_date(
             &d,
@@ -1460,6 +1461,7 @@ fn handle_update(
             args.visceral_fat_level,
             args.bmi,
             args.resting_metabolism_kcal,
+            args.reason.as_deref(),
         )?
     } else {
         unreachable!()
@@ -1467,13 +1469,23 @@ fn handle_update(
 
     // Fetch the (now updated) record to know the canonical date for the response
     let m = repo.get_measurement(updated_id)?;
-    let msg = format!("Updated measurement {} ({})", updated_id, m.date);
+    let msg = format!(
+        "Updated measurement {} ({}) [{}]",
+        updated_id,
+        m.date,
+        class.as_str()
+    );
 
     emit_sanity_warnings(&warnings);
 
     if json {
-        print_json(&Success::created_with_warnings(
-            updated_id, m.date, msg, warnings,
+        print_json(&Success::updated_log_day_with_warnings(
+            updated_id,
+            m.date,
+            class.as_str(),
+            reason_stored,
+            msg,
+            warnings,
         ));
     } else {
         quiet_print(&msg, quiet);
@@ -2654,8 +2666,8 @@ fn handle_sleep_update(
         warn_if_stages_exceed_bed(time_in_bed, rem, deep, light, awake);
     }
 
-    let updated_id = if let Some(i) = id {
-        repo.update_sleep(
+    let (updated_id, class, reason_stored) = if let Some(i) = id {
+        let (class, reason_stored) = repo.update_sleep(
             i,
             args.bedtime.as_deref(),
             args.wake_time.as_deref(),
@@ -2673,8 +2685,9 @@ fn handle_sleep_update(
             args.hypopnea,
             args.respiratory_rate,
             args.notes.as_deref(),
+            args.reason.as_deref(),
         )?;
-        i
+        (i, class, reason_stored)
     } else if let Some(d) = date {
         repo.update_sleep_by_date(
             &d,
@@ -2694,16 +2707,28 @@ fn handle_sleep_update(
             args.hypopnea,
             args.respiratory_rate,
             args.notes.as_deref(),
+            args.reason.as_deref(),
         )?
     } else {
         unreachable!()
     };
 
     let s = repo.get_sleep(updated_id)?;
-    let msg = format!("Updated sleep entry {} ({})", updated_id, s.date);
+    let msg = format!(
+        "Updated sleep entry {} ({}) [{}]",
+        updated_id,
+        s.date,
+        class.as_str()
+    );
 
     if json {
-        print_json(&Success::created(updated_id, s.date, msg));
+        print_json(&Success::updated_log_day(
+            updated_id,
+            s.date,
+            class.as_str(),
+            reason_stored,
+            msg,
+        ));
     } else {
         quiet_print(&msg, quiet);
     }

@@ -27,6 +27,12 @@ pub struct Success {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_id: Option<i64>,
+    /// Event update class: `lifecycle` (fill nulls) or `correction` (overwrite; needs reason).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Correction/lifecycle reason when provided (`--reason`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// Non-fatal sanity warnings (e.g. large delta vs previous measurement).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<SanityWarning>>,
@@ -135,6 +141,57 @@ impl Success {
             deleted_id: Some(id),
             ..Default::default()
         }
+    }
+
+    /// Event log `update` result: lifecycle fill vs correction with optional reason.
+    pub fn updated(
+        id: i64,
+        kind: impl Into<String>,
+        reason: Option<String>,
+        msg: impl Into<String>,
+    ) -> Self {
+        Self {
+            success: true,
+            id: Some(id),
+            kind: Some(kind.into()),
+            reason,
+            message: Some(msg.into()),
+            ..Default::default()
+        }
+    }
+
+    /// Body measurement/sleep update with event calendar day + class.
+    pub fn updated_log_day(
+        id: i64,
+        event_date: impl Into<String>,
+        kind: impl Into<String>,
+        reason: Option<String>,
+        msg: impl Into<String>,
+    ) -> Self {
+        Self {
+            success: true,
+            id: Some(id),
+            date: Some(event_date.into()),
+            kind: Some(kind.into()),
+            reason,
+            message: Some(msg.into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn updated_log_day_with_warnings(
+        id: i64,
+        event_date: impl Into<String>,
+        kind: impl Into<String>,
+        reason: Option<String>,
+        msg: impl Into<String>,
+        warnings: Vec<SanityWarning>,
+    ) -> Self {
+        let mut s = Self::updated_log_day(id, event_date, kind, reason, msg);
+        if !warnings.is_empty() {
+            s.warnings = Some(warnings);
+        }
+        s
     }
 }
 

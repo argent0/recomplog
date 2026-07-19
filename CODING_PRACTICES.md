@@ -36,6 +36,9 @@ This document defines the coding standards for the unified `recomplog` project.
      any future event table). Day aggregation for reports is read-side only.
    - Log `update`/`delete` that still exist are legacy correction debt — do not build
      new features on them; do not teach agents to upsert events.
+   - Event `update` must classify lifecycle (null fills) vs correction (overwrites).
+     Corrections require `--reason` and append audit `kind: correct` with field old/new
+     (`entity_audit::append_field_change`). Prefer soft-delete + create for large mistakes.
    - **Consumption quantity/unit:** canonicalize at insert only. Do not re-run
      migration heuristics (`normalize_nutrition_units`, `promote_whole_package_products`)
      on open, import, or as a silent repair path. Those run once under `user_version`

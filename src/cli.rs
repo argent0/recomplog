@@ -177,6 +177,10 @@ pub enum WorkoutAction {
         id: i64,
     },
     /// Update workout fields (partial).
+    ///
+    /// Lifecycle fills (e.g. first `--finished-at` on an open session) need no
+    /// reason. Overwriting settled values is a correction and requires `--reason`.
+    /// Inspect history with `workout audit <id>`. Large mistakes: soft-delete + create.
     Update {
         #[arg(add = ArgValueCompleter::new(completion::complete_workout))]
         id: i64,
@@ -188,12 +192,15 @@ pub enum WorkoutAction {
         duration: Option<i32>,
         #[arg(long)]
         feeling: Option<i32>,
-        /// When the session **started** (event time, RFC3339).
+        /// When the session **started** (event time, RFC3339). Always a correction.
         #[arg(long)]
         started_at: Option<String>,
-        /// When the session **ended** (event time, RFC3339).
+        /// When the session **ended** (event time, RFC3339). First set is lifecycle.
         #[arg(long = "finished-at")]
         finished_at: Option<String>,
+        /// Required when overwriting settled fields (correction); optional for lifecycle fills.
+        #[arg(long)]
+        reason: Option<String>,
         /// Validate and show what would be updated without writing.
         #[arg(long)]
         dry_run: bool,
@@ -595,6 +602,10 @@ pub enum SetAction {
         dry_run: bool,
     },
     /// Update fields on an existing set.
+    ///
+    /// Filling null metrics is lifecycle (no reason). Overwriting settled values
+    /// requires `--reason`. Prefer soft-delete + add for large mistakes; inspect with
+    /// `workout set audit <id>`.
     Update {
         id: i64,
         #[arg(long)]
@@ -646,6 +657,9 @@ pub enum SetAction {
         hr_zones: Option<String>,
         #[arg(long)]
         laps: Option<String>,
+        /// Required when overwriting settled fields; optional for null fills.
+        #[arg(long)]
+        reason: Option<String>,
         /// Validate and show resolved payload without writing.
         #[arg(long)]
         dry_run: bool,
@@ -730,7 +744,10 @@ pub enum MeasurementAction {
     Medians(MediansArgs),
     /// Show a single measurement.
     Show(ShowArgs),
-    /// Update fields on an existing measurement.
+    /// Update fields on an existing measurement (prefer append create for new samples).
+    ///
+    /// Overwriting settled values requires `--reason`. New readings: `create` again
+    /// for the same day. Inspect with `body measurement audit --id …`.
     Update(UpdateMeasurementArgs),
     /// Delete a measurement.
     Delete(DeleteArgs),
@@ -815,6 +832,9 @@ pub struct UpdateMeasurementArgs {
     pub bmi: Option<f64>,
     #[arg(long)]
     pub resting_metabolism_kcal: Option<i64>,
+    /// Required when overwriting settled fields; optional for null fills.
+    #[arg(long)]
+    pub reason: Option<String>,
     #[arg(long)]
     pub no_sanity_check: bool,
 }
@@ -844,7 +864,9 @@ pub enum SleepAction {
     List(ListArgs),
     /// Show a single sleep entry by id or --date.
     Show(ShowArgs),
-    /// Update fields on an existing sleep entry.
+    /// Update fields on an existing sleep entry (prefer append create for new samples).
+    ///
+    /// Overwriting settled values requires `--reason`. Inspect with `body sleep audit`.
     Update(SleepUpdateArgs),
     /// Delete a sleep entry.
     Delete(DeleteArgs),
@@ -945,6 +967,9 @@ pub struct SleepUpdateArgs {
     pub respiratory_rate: Option<f64>,
     #[arg(long)]
     pub notes: Option<String>,
+    /// Required when overwriting settled fields; optional for null fills.
+    #[arg(long)]
+    pub reason: Option<String>,
 }
 
 /// Actions under `recomplog nutrition ...`

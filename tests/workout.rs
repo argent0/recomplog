@@ -277,10 +277,13 @@ fn finished_at_create_update_list_show() {
             "1",
             "--finished-at",
             "2026-07-10T19:00:00Z",
+            "--reason",
+            "extended cooldown",
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("workout updated"));
+        .stdout(predicate::str::contains("workout updated"))
+        .stdout(predicate::str::contains("\"kind\": \"correction\""));
 
     bin()
         .args(["--db", &db, "--json", "workout", "show", "1"])

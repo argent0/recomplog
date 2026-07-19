@@ -741,6 +741,8 @@ fn measurement_update_writes_audit_fields() {
             &id.to_string(),
             "--weight-kg",
             "80.5",
+            "--reason",
+            "scale typo",
             "--no-sanity-check",
         ])
         .assert()
@@ -762,9 +764,10 @@ fn measurement_update_writes_audit_fields() {
             .success(),
     );
     let kinds = history_kinds(&audit);
-    assert_eq!(kinds, vec!["create", "update"]);
+    assert_eq!(kinds, vec!["create", "correct"]);
     let update = &audit["history"][1];
-    assert_eq!(update["kind"], "update");
+    assert_eq!(update["kind"], "correct");
+    assert_eq!(update["meta"]["reason"], "scale typo");
     let fields = update["fields"].as_array().expect("fields array");
     let weight = fields
         .iter()
@@ -854,6 +857,8 @@ fn set_create_and_update_audit() {
             &set_id.to_string(),
             "--reps",
             "6",
+            "--reason",
+            "miscount",
         ])
         .assert()
         .success();
@@ -873,7 +878,8 @@ fn set_create_and_update_audit() {
             .success(),
     );
     let kinds = history_kinds(&audit2);
-    assert_eq!(kinds, vec!["create", "update"]);
+    assert_eq!(kinds, vec!["create", "correct"]);
+    assert_eq!(audit2["history"][1]["meta"]["reason"], "miscount");
     let fields = audit2["history"][1]["fields"].as_array().expect("fields");
     let reps = fields
         .iter()
@@ -881,6 +887,346 @@ fn set_create_and_update_audit() {
         .expect("reps field");
     assert_eq!(reps["old"], 5);
     assert_eq!(reps["new"], 6);
+}
+
+/// S5: lifecycle finish (null finished_at) needs no reason; audit kind `update`.
+#[test]
+fn workout_lifecycle_finish_no_reason() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    let created = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "workout",
+                "create",
+                "--type",
+                "Push",
+                "--started-at",
+                "2026-07-10T17:00:00Z",
+            ])
+            .assert()
+            .success(),
+    );
+    let id = created["id"].as_i64().unwrap();
+
+    let updated = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "workout",
+                "update",
+                &id.to_string(),
+                "--finished-at",
+                "2026-07-10T18:30:00Z",
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(updated["kind"], "lifecycle");
+    assert!(updated["reason"].is_null());
+
+    let audit = json_stdout(
+        bin()
+            .args(["--db", &db, "--json", "workout", "audit", &id.to_string()])
+            .assert()
+            .success(),
+    );
+    assert!(history_kinds(&audit).contains(&"update"));
+    let finish = audit["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["kind"] == "update")
+        .expect("lifecycle update");
+    assert!(finish["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["name"] == "finished_at" && f["old"].is_null()));
+}
+
+/// S5: overwriting settled finished_at requires --reason; audit kind `correct`.
+#[test]
+fn workout_correction_requires_reason() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "create",
+            "--type",
+            "Push",
+            "--started-at",
+            "2026-07-10T17:00:00Z",
+            "--finished-at",
+            "2026-07-10T18:00:00Z",
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "update",
+            "1",
+            "--finished-at",
+            "2026-07-10T19:00:00Z",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--reason"));
+
+    let updated = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "workout",
+                "update",
+                "1",
+                "--finished-at",
+                "2026-07-10T19:00:00Z",
+                "--reason",
+                "clock typo",
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(updated["kind"], "correction");
+    assert_eq!(updated["reason"], "clock typo");
+
+    let audit = json_stdout(
+        bin()
+            .args(["--db", &db, "--json", "workout", "audit", "1"])
+            .assert()
+            .success(),
+    );
+    assert!(history_kinds(&audit).contains(&"correct"));
+    let correct = audit["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["kind"] == "correct")
+        .expect("correct entry");
+    assert_eq!(correct["meta"]["reason"], "clock typo");
+}
+
+/// S5: set metric rewrite without reason fails; with reason writes correct audit.
+#[test]
+fn set_correction_requires_reason() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args(["--db", &db, "--json", "workout", "create", "--type", "Push"])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "exercise",
+            "create",
+            "bench press",
+            "--category",
+            "strength",
+        ])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "set",
+            "add",
+            "--workout",
+            "1",
+            "--exercise",
+            "bench press",
+            "--reps",
+            "5",
+            "--weight",
+            "100",
+            "--phase",
+            "full",
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--db", &db, "--json", "workout", "set", "update", "1", "--reps", "6",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--reason"));
+
+    let updated = json_stdout(
+        bin()
+            .args([
+                "--db", &db, "--json", "workout", "set", "update", "1", "--reps", "6", "--reason",
+                "miscount",
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(updated["kind"], "correction");
+}
+
+/// S5: measurement weight rewrite needs reason; sleep fill of notes is lifecycle.
+#[test]
+fn body_update_correction_and_lifecycle() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    let m = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "body",
+                "measurement",
+                "create",
+                "--date",
+                "2026-07-10",
+                "--weight-kg",
+                "81.0",
+            ])
+            .assert()
+            .success(),
+    );
+    let mid = m["id"].as_i64().unwrap();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "body",
+            "measurement",
+            "update",
+            "--id",
+            &mid.to_string(),
+            "--weight-kg",
+            "80.5",
+            "--no-sanity-check",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--reason"));
+
+    // Fill null body_fat is lifecycle (no reason).
+    let fill = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "body",
+                "measurement",
+                "update",
+                "--id",
+                &mid.to_string(),
+                "--body-fat-pct",
+                "18.5",
+                "--no-sanity-check",
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(fill["kind"], "lifecycle");
+
+    let s = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "body",
+                "sleep",
+                "create",
+                "--date",
+                "2026-07-10",
+                "--total-sleep",
+                "7h 30m",
+            ])
+            .assert()
+            .success(),
+    );
+    let sid = s["id"].as_i64().unwrap();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "body",
+            "sleep",
+            "update",
+            &sid.to_string(),
+            "--total-sleep",
+            "8h",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--reason"));
+
+    let sleep_corr = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "body",
+                "sleep",
+                "update",
+                &sid.to_string(),
+                "--total-sleep",
+                "8h",
+                "--reason",
+                "watch re-sync",
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(sleep_corr["kind"], "correction");
+    assert_eq!(sleep_corr["reason"], "watch re-sync");
+
+    let audit = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "body",
+                "sleep",
+                "audit",
+                "--id",
+                &sid.to_string(),
+            ])
+            .assert()
+            .success(),
+    );
+    assert!(history_kinds(&audit).contains(&"correct"));
 }
 
 #[test]

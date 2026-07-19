@@ -171,6 +171,7 @@ pub fn handle(
             feeling,
             started_at,
             finished_at,
+            reason,
             dry_run,
         } => {
             let conn = db::open_db(db_override)?;
@@ -286,7 +287,9 @@ pub fn handle(
             if sets.is_empty() {
                 return Err(anyhow!("provide at least one field to update"));
             }
+            let class = entity_audit::classify_field_changes(&changes);
             if dry_run {
+                let reason_preview = reason.as_deref().map(str::trim).filter(|s| !s.is_empty());
                 return emit_dry_run(
                     json,
                     quiet,
@@ -294,18 +297,35 @@ pub fn handle(
                         "action": "workout update",
                         "id": id,
                         "fields": sets,
+                        "kind": class.as_str(),
+                        "reason_required": class == entity_audit::UpdateClass::Correction,
+                        "reason": reason_preview,
                     }),
                 );
             }
+            let reason_stored = entity_audit::require_reason_for_class(class, reason.as_deref())?;
             let sql = format!("UPDATE workouts SET {} WHERE id = ?", sets.join(", "));
             vals.push(Box::new(id));
             let refs: Vec<&dyn rusqlite::ToSql> = vals.iter().map(|b| b.as_ref()).collect();
             conn.execute(&sql, refs.as_slice())?;
-            entity_audit::append_update(&conn, entity_audit::entity::WORKOUT, id, &changes, None)?;
+            entity_audit::append_field_change(
+                &conn,
+                entity_audit::entity::WORKOUT,
+                id,
+                &changes,
+                class,
+                reason_stored.as_deref(),
+                None,
+            )?;
             if json {
-                print_json(&Success::created(id, "updated", "workout updated"));
+                print_json(&Success::updated(
+                    id,
+                    class.as_str(),
+                    reason_stored,
+                    "workout updated",
+                ));
             } else {
-                quiet_print(quiet, format!("Updated workout {id}"));
+                quiet_print(quiet, format!("Updated workout {id} ({})", class.as_str()));
             }
             Ok(())
         }
@@ -2695,6 +2715,7 @@ fn handle_set(
             descent,
             hr_zones,
             laps,
+            reason,
             dry_run,
         } => {
             let conn = db::open_db(db_override)?;
@@ -2910,7 +2931,9 @@ fn handle_set(
             if sets.is_empty() {
                 return Err(anyhow!("provide at least one field to update"));
             }
+            let class = entity_audit::classify_field_changes(&changes);
             if dry_run {
+                let reason_preview = reason.as_deref().map(str::trim).filter(|s| !s.is_empty());
                 return emit_dry_run(
                     json,
                     quiet,
@@ -2918,24 +2941,35 @@ fn handle_set(
                         "action": "set update",
                         "id": id,
                         "fields": sets,
+                        "kind": class.as_str(),
+                        "reason_required": class == entity_audit::UpdateClass::Correction,
+                        "reason": reason_preview,
                     }),
                 );
             }
+            let reason_stored = entity_audit::require_reason_for_class(class, reason.as_deref())?;
             let sql = format!("UPDATE exercise_sets SET {} WHERE id = ?", sets.join(", "));
             vals.push(Box::new(id));
             let refs: Vec<&dyn rusqlite::ToSql> = vals.iter().map(|b| b.as_ref()).collect();
             conn.execute(&sql, refs.as_slice())?;
-            entity_audit::append_update(
+            entity_audit::append_field_change(
                 &conn,
                 entity_audit::entity::EXERCISE_SET,
                 id,
                 &changes,
+                class,
+                reason_stored.as_deref(),
                 None,
             )?;
             if json {
-                print_json(&Success::created(id, "updated", "set updated"));
+                print_json(&Success::updated(
+                    id,
+                    class.as_str(),
+                    reason_stored,
+                    "set updated",
+                ));
             } else {
-                quiet_print(quiet, format!("Updated set {id}"));
+                quiet_print(quiet, format!("Updated set {id} ({})", class.as_str()));
             }
             Ok(())
         }

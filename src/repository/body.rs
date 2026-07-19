@@ -242,7 +242,9 @@ impl Repository {
     }
 
     /// Update fields on an existing measurement (by id). Only non-None fields are changed.
-    /// Refreshes updated_at. Appends an `entity_audit` update row for changed fields.
+    /// Refreshes updated_at. Appends lifecycle/correct `entity_audit` for changed fields.
+    ///
+    /// Returns the update class and stored reason (for JSON). Corrections require non-empty reason.
     #[allow(clippy::too_many_arguments)]
     pub fn update_measurement(
         &self,
@@ -253,7 +255,8 @@ impl Repository {
         visceral_fat_level: Option<i64>,
         bmi: Option<f64>,
         resting_metabolism_kcal: Option<i64>,
-    ) -> Result<()> {
+        reason: Option<&str>,
+    ) -> Result<(entity_audit::UpdateClass, Option<String>)> {
         let before = self.get_measurement(id)?;
 
         let now = now_utc();
@@ -319,6 +322,16 @@ impl Repository {
             ));
         }
 
+        if changes.is_empty() {
+            return Err(RecomplogError::Other(
+                "provide at least one field to update".into(),
+            ));
+        }
+
+        let class = entity_audit::classify_field_changes(&changes);
+        let reason_stored = entity_audit::require_reason_for_class(class, reason)
+            .map_err(|e| RecomplogError::Other(e.to_string()))?;
+
         let sql = format!("UPDATE measurements SET {} WHERE id = ?", sets.join(", "));
         // Append id as last param
         params.push(Box::new(id));
@@ -329,17 +342,19 @@ impl Repository {
         if affected == 0 {
             return Err(RecomplogError::MeasurementNotFound(id));
         }
-        entity_audit::append_update(
+        entity_audit::append_field_change(
             &self.conn,
             entity_audit::entity::MEASUREMENT,
             id,
             &changes,
+            class,
+            reason_stored.as_deref(),
             None,
         )?;
-        Ok(())
+        Ok((class, reason_stored))
     }
 
-    /// Update by date when exactly one sample exists. Returns the updated id.
+    /// Update by date when exactly one sample exists. Returns the updated id + class.
     /// If multiple samples share the date, fails with `MeasurementAmbiguousForDate`.
     #[allow(clippy::too_many_arguments)]
     pub fn update_measurement_by_date(
@@ -351,9 +366,10 @@ impl Repository {
         visceral_fat_level: Option<i64>,
         bmi: Option<f64>,
         resting_metabolism_kcal: Option<i64>,
-    ) -> Result<i64> {
+        reason: Option<&str>,
+    ) -> Result<(i64, entity_audit::UpdateClass, Option<String>)> {
         let id = self.sole_measurement_id_for_date(date)?;
-        self.update_measurement(
+        let (class, reason_stored) = self.update_measurement(
             id,
             weight_kg,
             body_fat_pct,
@@ -361,8 +377,9 @@ impl Repository {
             visceral_fat_level,
             bmi,
             resting_metabolism_kcal,
+            reason,
         )?;
-        Ok(id)
+        Ok((id, class, reason_stored))
     }
 
     /// Soft-delete by id (default). Returns `(id, deleted_at)`.
@@ -749,7 +766,9 @@ impl Repository {
     }
 
     /// Update fields on an existing sleep record (by id). Only non-None fields are changed.
-    /// Refreshes updated_at. Partial updates supported. Appends entity_audit for changes.
+    /// Refreshes updated_at. Appends lifecycle/correct entity_audit for changes.
+    ///
+    /// Returns the update class and stored reason (for JSON).
     #[allow(clippy::too_many_arguments)]
     pub fn update_sleep(
         &self,
@@ -770,7 +789,8 @@ impl Repository {
         hypopnea_per_hr: Option<f64>,
         respiratory_rate: Option<f64>,
         notes: Option<&str>,
-    ) -> Result<()> {
+        reason: Option<&str>,
+    ) -> Result<(entity_audit::UpdateClass, Option<String>)> {
         let before = self.get_sleep(id)?;
 
         let now = now_utc();
@@ -856,6 +876,16 @@ impl Repository {
         );
         set_opt_str!(notes, "notes", before.notes);
 
+        if changes.is_empty() {
+            return Err(RecomplogError::Other(
+                "provide at least one field to update".into(),
+            ));
+        }
+
+        let class = entity_audit::classify_field_changes(&changes);
+        let reason_stored = entity_audit::require_reason_for_class(class, reason)
+            .map_err(|e| RecomplogError::Other(e.to_string()))?;
+
         let sql = format!("UPDATE sleep SET {} WHERE id = ?", sets.join(", "));
         params.push(Box::new(id));
 
@@ -864,11 +894,19 @@ impl Repository {
         if affected == 0 {
             return Err(RecomplogError::SleepNotFound(id));
         }
-        entity_audit::append_update(&self.conn, entity_audit::entity::SLEEP, id, &changes, None)?;
-        Ok(())
+        entity_audit::append_field_change(
+            &self.conn,
+            entity_audit::entity::SLEEP,
+            id,
+            &changes,
+            class,
+            reason_stored.as_deref(),
+            None,
+        )?;
+        Ok((class, reason_stored))
     }
 
-    /// Update by date when exactly one sample exists. Returns the updated id.
+    /// Update by date when exactly one sample exists. Returns id + class + reason.
     /// If multiple samples share the date, fails with `SleepAmbiguousForDate`.
     #[allow(clippy::too_many_arguments)]
     pub fn update_sleep_by_date(
@@ -890,9 +928,10 @@ impl Repository {
         hypopnea_per_hr: Option<f64>,
         respiratory_rate: Option<f64>,
         notes: Option<&str>,
-    ) -> Result<i64> {
+        reason: Option<&str>,
+    ) -> Result<(i64, entity_audit::UpdateClass, Option<String>)> {
         let id = self.sole_sleep_id_for_date(date)?;
-        self.update_sleep(
+        let (class, reason_stored) = self.update_sleep(
             id,
             bedtime,
             wake_time,
@@ -910,8 +949,9 @@ impl Repository {
             hypopnea_per_hr,
             respiratory_rate,
             notes,
+            reason,
         )?;
-        Ok(id)
+        Ok((id, class, reason_stored))
     }
 
     pub fn soft_delete_sleep(&self, id: i64, reason: Option<&str>) -> Result<(i64, String)> {

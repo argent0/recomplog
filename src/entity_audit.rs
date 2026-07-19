@@ -17,7 +17,10 @@ pub mod kind {
     #[allow(dead_code)]
     pub const RESTORE: &str = "restore";
     pub const CREATE: &str = "create";
+    /// Lifecycle fill (null → value), e.g. first `finished_at` on a workout.
     pub const UPDATE: &str = "update";
+    /// Honest correction that overwrites a settled field (requires reason).
+    pub const CORRECT: &str = "correct";
     /// Catalog merge (product alias retire onto keeper).
     pub const MERGE: &str = "merge";
     /// Entity created by FIT/legacy import (not CLI create).
@@ -26,7 +29,32 @@ pub mod kind {
     pub const CATALOG: &str = "catalog";
 }
 
-/// One field change for `kind: update` (`fields_json` entries).
+/// Classification of an in-place event field update (S5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateClass {
+    /// Filling null/empty fields only (session completion, late optional metrics).
+    Lifecycle,
+    /// Overwriting at least one settled value (or always-correction fields).
+    Correction,
+}
+
+impl UpdateClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lifecycle => "lifecycle",
+            Self::Correction => "correction",
+        }
+    }
+
+    pub fn audit_kind(self) -> &'static str {
+        match self {
+            Self::Lifecycle => kind::UPDATE,
+            Self::Correction => kind::CORRECT,
+        }
+    }
+}
+
+/// One field change for `kind: update` / `correct` (`fields_json` entries).
 #[derive(Debug, Clone)]
 pub struct FieldChange {
     pub name: String,
@@ -46,6 +74,55 @@ impl FieldChange {
     /// True when old and new serialize to the same JSON (no meaningful change).
     pub fn is_noop(&self) -> bool {
         self.old == self.new
+    }
+
+    /// True when this change only fills a missing value (null or empty string).
+    pub fn is_fill(&self) -> bool {
+        match &self.old {
+            JsonValue::Null => true,
+            JsonValue::String(s) if s.is_empty() => true,
+            _ => false,
+        }
+    }
+}
+
+/// Fields that always count as historical correction (event-time reshape).
+const ALWAYS_CORRECTION_FIELDS: &[&str] = &["started_at"];
+
+/// Classify non-noop field changes: lifecycle only when every change is a fill
+/// and no always-correction field is present.
+pub fn classify_field_changes(fields: &[FieldChange]) -> UpdateClass {
+    let changed: Vec<&FieldChange> = fields.iter().filter(|f| !f.is_noop()).collect();
+    if changed.is_empty() {
+        return UpdateClass::Lifecycle;
+    }
+    for f in &changed {
+        if ALWAYS_CORRECTION_FIELDS.contains(&f.name.as_str()) {
+            return UpdateClass::Correction;
+        }
+        if !f.is_fill() {
+            return UpdateClass::Correction;
+        }
+    }
+    UpdateClass::Lifecycle
+}
+
+/// Require non-empty `--reason` for corrections. Lifecycle may omit it.
+pub fn require_reason_for_class(
+    class: UpdateClass,
+    reason: Option<&str>,
+) -> Result<Option<String>> {
+    let trimmed = reason.map(str::trim).filter(|s| !s.is_empty());
+    match class {
+        UpdateClass::Lifecycle => Ok(trimmed.map(|s| s.to_string())),
+        UpdateClass::Correction => match trimmed {
+            Some(s) => Ok(Some(s.to_string())),
+            None => Err(anyhow!(
+                "this update overwrites settled field(s) and requires --reason \
+                 (lifecycle fills of null fields do not). For large mistakes prefer \
+                 soft-delete + create, then inspect with … audit <id>"
+            )),
+        },
     }
 }
 
@@ -156,15 +233,17 @@ pub fn append_catalog(
     )
 }
 
-/// Append an `update` audit row with field-level old/new (skips no-op pairs).
+/// Append a field-change audit row classified as lifecycle (`update`) or
+/// correction (`correct`). Skips no-op pairs. Stores reason in `meta_json` when set.
 ///
-/// Returns `Ok(None)` when every field was a no-op (caller should not call this
-/// after a real SQL update that changed nothing meaningful, but it is safe).
-pub fn append_update(
+/// Returns `Ok(None)` when every field was a no-op.
+pub fn append_field_change(
     conn: &Connection,
     entity_type: &str,
     entity_id: i64,
     fields: &[FieldChange],
+    class: UpdateClass,
+    reason: Option<&str>,
     actor: Option<&str>,
 ) -> Result<Option<i64>> {
     let changed: Vec<&FieldChange> = fields.iter().filter(|f| !f.is_noop()).collect();
@@ -195,15 +274,19 @@ pub fn append_update(
         }
         n => Some(format!("updated {n} fields")),
     };
+    let meta = reason
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|r| serde_json::json!({ "reason": r }).to_string());
     let id = append(
         conn,
         entity_type,
         entity_id,
-        kind::UPDATE,
+        class.audit_kind(),
         Some(actor.unwrap_or("cli")),
         summary.as_deref(),
         Some(&fields_json.to_string()),
-        None,
+        meta.as_deref(),
     )?;
     Ok(Some(id))
 }

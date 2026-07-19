@@ -95,10 +95,13 @@ fn measurement_update_delete() {
             "2026-01-01",
             "--weight-kg",
             "79.5",
+            "--reason",
+            "scale typo",
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"success\": true"));
+        .stdout(predicate::str::contains("\"success\": true"))
+        .stdout(predicate::str::contains("\"kind\": \"correction\""));
 
     bin()
         .args([

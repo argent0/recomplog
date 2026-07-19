@@ -17,6 +17,7 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
   - Imports append and stay idempotent (`INSERT OR IGNORE` / hash skip). Never replace domain history as a side effect. Reports and checks **read** the log as stored; day-series aggregation (e.g. last-by-`created_at` per date) is read-side only and never deletes prior samples.
   - Event time and storage time stay independent: appending a late log never backdates `created_at` (see time model below).
   - Existing `update` / `delete` on log rows are **legacy correction debt**, not a model for new work. New features must not depend on them. Prefer append (or future supersede/tombstone) over rewrite.
+  - Event `update` is classified: **lifecycle** (fill nulls, e.g. first `finished_at`) vs **correction** (overwrite settled values). Corrections require `--reason` and write audit `kind: correct` with field old/new; inspect via `… audit <id>`.
 - **Quality data produces quality reports. Quality reports are actionable reports.**
   - Logging, imports, sanity checks, and `db check` exist so the data is trustworthy.
   - Reports (`report brief`, domain summaries, HTML) exist so the user (or agent) can act — not just stare at numbers.
@@ -129,6 +130,10 @@ recomplog --json nutrition consumption create --product 3 --quantity 1 --unit un
 recomplog --json nutrition consumption create --product 12 --quantity 80 --unit g --consumed-at 2026-07-14T08:30:00-03:00
 recomplog --json nutrition purchase create --product 3 --quantity 2 --purchased-at 2026-07-14T18:00:00-03:00
 recomplog --json workout create --type Push --started-at 2026-07-14T17:00:00-03:00
+# Lifecycle fill (no --reason): first finished_at on an open session
+recomplog --json workout update 1 --finished-at 2026-07-14T18:30:00-03:00
+# Correction overwrites need --reason; audit shows kind correct + fields
+recomplog --json workout update 1 --finished-at 2026-07-14T19:00:00-03:00 --reason "clock typo"
 recomplog --json workout list --days 14
 # Soft-delete keeps history; --purge --force hard-removes CASCADE trees
 recomplog --json workout delete 1 --reason "abandoned"
@@ -138,9 +143,11 @@ recomplog --json workout set audit 1
 recomplog --json nutrition consumption delete 88 --reason "duplicate"
 recomplog --json nutrition consumption audit 88
 recomplog --json nutrition product audit 14
+recomplog --json body measurement update --id 3 --weight-kg 80.5 --reason "scale typo"
 recomplog --json body measurement audit --id 3
 recomplog --json body sleep audit --date yesterday
 recomplog --json workout set add --workout 1 --exercise "bench press" --reps 5 --weight 100 --phase full
+recomplog --json workout set update 1 --reps 6 --reason "miscount"
 # body_mass: --weight optional when a body measurement exists
 recomplog --json workout set add --workout 1 --exercise "pull up" --reps 8
 recomplog --json workout set add-cluster --workout 1 --exercise "bench press" --reps "10,5,5" --weight 100 --phase full --rir "0,0,1" --effective-reps "6,4,3" --rest 15
