@@ -1,4 +1,4 @@
-//! S7a/S7b: `audit` CLI + real create/update writers on event entities.
+//! S7a/S7b/S7c: `audit` CLI + event, catalog, merge, and import writers.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -248,7 +248,7 @@ fn product_store_micronutrient_exercise_audit() {
     );
     assert_eq!(pa["entity"], "product");
     assert_eq!(pa["current"]["name"], "Oats");
-    assert!(history_kinds(&pa).contains(&"create"));
+    assert_real_create(&pa);
 
     let store = json_stdout(
         bin()
@@ -280,7 +280,7 @@ fn product_store_micronutrient_exercise_audit() {
             .success(),
     );
     assert_eq!(sa["entity"], "store");
-    assert!(history_kinds(&sa).contains(&"create"));
+    assert_real_create(&sa);
 
     let micro = json_stdout(
         bin()
@@ -315,7 +315,7 @@ fn product_store_micronutrient_exercise_audit() {
             .success(),
     );
     assert_eq!(ma["entity"], "micronutrient");
-    assert!(history_kinds(&ma).contains(&"create"));
+    assert_real_create(&ma);
 
     let ex = json_stdout(
         bin()
@@ -349,7 +349,340 @@ fn product_store_micronutrient_exercise_audit() {
             .success(),
     );
     assert_eq!(ea["entity"], "exercise");
-    assert!(history_kinds(&ea).contains(&"create"));
+    assert_real_create(&ea);
+}
+
+#[test]
+fn product_rename_and_nutrition_write_catalog_audit() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    let product = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "product",
+                "create",
+                "Oats",
+            ])
+            .assert()
+            .success(),
+    );
+    let pid = product["id"].as_i64().unwrap().to_string();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "rename",
+            &pid,
+            "--name",
+            "Morixe Oats",
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "nutrition",
+            "set",
+            &pid,
+            "--reference-quantity",
+            "100",
+            "--reference-unit",
+            "g",
+            "--energy-kcal",
+            "380",
+            "--protein-g",
+            "13",
+            "--carbohydrates-g",
+            "60",
+            "--fat-g",
+            "7",
+            "--fiber-g",
+            "10",
+            "--sugars-g",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let audit = json_stdout(
+        bin()
+            .args(["--db", &db, "--json", "nutrition", "product", "audit", &pid])
+            .assert()
+            .success(),
+    );
+    let kinds = history_kinds(&audit);
+    assert_eq!(kinds, vec!["create", "catalog", "catalog"]);
+    assert_eq!(audit["current"]["name"], "Morixe Oats");
+    let rename = &audit["history"][1];
+    assert!(rename["summary"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Morixe Oats"));
+    let fields = rename["fields"].as_array().expect("rename fields");
+    let name_f = fields
+        .iter()
+        .find(|f| f["name"] == "name")
+        .expect("name field");
+    assert_eq!(name_f["old"], "Oats");
+    assert_eq!(name_f["new"], "Morixe Oats");
+    assert!(audit["history"][2]["summary"]
+        .as_str()
+        .unwrap_or("")
+        .contains("nutrition"));
+}
+
+#[test]
+fn product_merge_writes_merge_audit_on_keeper_and_source() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    let keeper = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "product",
+                "create",
+                "Keeper Oats",
+            ])
+            .assert()
+            .success(),
+    );
+    let source = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "product",
+                "create",
+                "Dup Oats",
+            ])
+            .assert()
+            .success(),
+    );
+    let kid = keeper["id"].as_i64().unwrap();
+    let sid = source["id"].as_i64().unwrap();
+
+    // Nutrition required before consumption.
+    for id in [kid, sid] {
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "product",
+                "nutrition",
+                "set",
+                &id.to_string(),
+                "--reference-quantity",
+                "100",
+                "--reference-unit",
+                "g",
+                "--energy-kcal",
+                "380",
+                "--protein-g",
+                "13",
+                "--carbohydrates-g",
+                "60",
+                "--fat-g",
+                "7",
+                "--fiber-g",
+                "10",
+                "--sugars-g",
+                "1",
+            ])
+            .assert()
+            .success();
+    }
+
+    // One consumption on source so merge meta can report counts.
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "consumption",
+            "create",
+            "--product",
+            &sid.to_string(),
+            "--quantity",
+            "50",
+            "--unit",
+            "g",
+            "--consumed-at",
+            "2026-07-14T08:30:00-03:00",
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "nutrition",
+            "product",
+            "merge",
+            "--into",
+            &kid.to_string(),
+            &sid.to_string(),
+        ])
+        .assert()
+        .success();
+
+    let src_audit = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "product",
+                "audit",
+                &sid.to_string(),
+            ])
+            .assert()
+            .success(),
+    );
+    assert!(history_kinds(&src_audit).contains(&"merge"));
+    let merge_src = src_audit["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["kind"] == "merge")
+        .expect("source merge");
+    assert_eq!(merge_src["meta"]["role"], "source");
+    assert_eq!(merge_src["meta"]["into_id"], kid);
+    assert_eq!(merge_src["meta"]["consumptions"], 1);
+    assert!(src_audit["current"]["retired_at"].as_str().is_some());
+    assert_eq!(src_audit["current"]["merged_into_id"], kid);
+
+    let k_audit = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "product",
+                "audit",
+                &kid.to_string(),
+            ])
+            .assert()
+            .success(),
+    );
+    assert!(history_kinds(&k_audit).contains(&"merge"));
+    let merge_k = k_audit["history"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["kind"] == "merge")
+        .expect("keeper merge");
+    assert_eq!(merge_k["meta"]["role"], "keeper");
+    assert_eq!(merge_k["meta"]["from_ids"][0], sid);
+    assert_eq!(merge_k["meta"]["consumptions_aliased"], 1);
+
+    // Event FK still points at source (alias model).
+    let cons = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "nutrition",
+                "consumption",
+                "list",
+                "--since",
+                "2026-07-01",
+                "--until",
+                "2026-07-31",
+            ])
+            .assert()
+            .success(),
+    );
+    let rows = cons.as_array().expect("consumption list");
+    assert_eq!(rows[0]["product_id"], sid);
+}
+
+#[test]
+fn fit_import_writes_import_audit_on_workout_and_set() {
+    let fit = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/Zepp20260710164935.fit");
+    assert!(fit.exists(), "FIT fixture missing: {}", fit.display());
+
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+    let fit_s = fit.display().to_string();
+
+    bin().args(["--db", &db, "init"]).assert().success();
+
+    let imported = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "import",
+                "fit",
+                &fit_s,
+                "--exercise",
+                "running",
+                "--no-profile-hr",
+            ])
+            .assert()
+            .success(),
+    );
+    let wid = imported["workout_id"].as_i64().unwrap();
+    let set_id = imported["set_id"].as_i64().unwrap();
+    let sha = imported["sha256"].as_str().expect("sha256");
+
+    let wa = json_stdout(
+        bin()
+            .args(["--db", &db, "--json", "workout", "audit", &wid.to_string()])
+            .assert()
+            .success(),
+    );
+    assert_eq!(history_kinds(&wa), vec!["import"]);
+    assert_eq!(wa["history"][0]["actor"], "import");
+    assert_eq!(wa["history"][0]["meta"]["source"], "fit");
+    assert_eq!(wa["history"][0]["meta"]["sha256"], sha);
+
+    let sa = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "workout",
+                "set",
+                "audit",
+                &set_id.to_string(),
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(history_kinds(&sa), vec!["import"]);
+    assert_eq!(sa["history"][0]["meta"]["sha256"], sha);
 }
 
 #[test]

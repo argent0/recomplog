@@ -1319,6 +1319,7 @@ fn handle_exercise(
                 params![name, category, eq, lt, muscles, description, db::now_utc()],
             )?;
             let id = conn.last_insert_rowid();
+            entity_audit::append_create(&conn, entity_audit::entity::EXERCISE, id, None)?;
             if json {
                 print_json(&Success::created(
                     id,
@@ -1384,6 +1385,14 @@ fn handle_exercise(
             vals.push(Box::new(ex.id));
             let refs: Vec<&dyn rusqlite::ToSql> = vals.iter().map(|b| b.as_ref()).collect();
             conn.execute(&sql, refs.as_slice())?;
+            entity_audit::append_catalog(
+                &conn,
+                entity_audit::entity::EXERCISE,
+                ex.id,
+                "exercise updated",
+                None,
+                Some(&serde_json::json!({ "fields": sets })),
+            )?;
             if json {
                 print_json(&Success::created(ex.id, ex.name, "exercise updated"));
             } else {

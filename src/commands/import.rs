@@ -2,6 +2,7 @@
 
 use crate::cli::ImportAction;
 use crate::db;
+use crate::entity_audit;
 use crate::fit::{parse_fit_path, ImportPlan};
 use crate::models::HrZoneProfile;
 use crate::utils::print_json;
@@ -369,6 +370,31 @@ fn handle_fit(
             now,
         ],
     )?;
+    let import_id = tx.last_insert_rowid();
+    let filename = path_obj
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path);
+    let import_meta = serde_json::json!({
+        "source": "fit",
+        "sha256": sha,
+        "filename": filename,
+        "import_id": import_id,
+    });
+    entity_audit::append_import(
+        &tx,
+        entity_audit::entity::WORKOUT,
+        workout_id,
+        "imported from FIT",
+        Some(&import_meta),
+    )?;
+    entity_audit::append_import(
+        &tx,
+        entity_audit::entity::EXERCISE_SET,
+        set_id,
+        "imported from FIT",
+        Some(&import_meta),
+    )?;
     tx.commit()?;
 
     let out = serde_json::json!({
@@ -492,6 +518,30 @@ fn handle_legacy_import(
     Ok(())
 }
 
+/// Append `import` audit when an INSERT OR IGNORE actually inserted a row.
+fn audit_legacy_insert(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: i64,
+    domain: &str,
+    n: i64,
+) -> Result<()> {
+    if n <= 0 {
+        return Ok(());
+    }
+    entity_audit::append_import(
+        conn,
+        entity_type,
+        entity_id,
+        &format!("imported from legacy ({domain})"),
+        Some(&serde_json::json!({
+            "source": "legacy",
+            "domain": domain,
+        })),
+    )?;
+    Ok(())
+}
+
 fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value> {
     use crate::macro_names::{extended_macro_column, is_macronutrient_name};
 
@@ -515,10 +565,12 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             let (id, name, ca, ua) = row?;
             let ca = normalize_instant_for_import(&ca);
             let ua = normalize_instant_for_import(&ua);
-            products += tx.execute(
+            let n = tx.execute(
                 "INSERT OR IGNORE INTO products (id, name, created_at, updated_at) VALUES (?1,?2,?3,?4)",
                 params![id, name, ca, ua],
             )? as i64;
+            products += n;
+            audit_legacy_insert(&tx, entity_audit::entity::PRODUCT, id, "nutrition", n)?;
         }
     }
     // Legacy nutlog uses `nutrients`; skip macronutrient catalog rows.
@@ -539,10 +591,12 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
                 continue;
             }
             let ca = normalize_instant_for_import(&ca);
-            micronutrients += tx.execute(
+            let n = tx.execute(
                 "INSERT OR IGNORE INTO micronutrients (id, name, unit, recommended_intake, created_at) VALUES (?1,?2,?3,?4,?5)",
                 params![id, name, unit, rec, ca],
             )? as i64;
+            micronutrients += n;
+            audit_legacy_insert(&tx, entity_audit::entity::MICRONUTRIENT, id, "nutrition", n)?;
         }
     }
     // tags
@@ -611,10 +665,11 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
         })? {
             let (id, name, ca) = row?;
             let ca = normalize_instant_for_import(&ca);
-            let _ = tx.execute(
+            let n = tx.execute(
                 "INSERT OR IGNORE INTO stores (id, name, created_at) VALUES (?1,?2,?3)",
                 params![id, name, ca],
-            );
+            )? as i64;
+            audit_legacy_insert(&tx, entity_audit::entity::STORE, id, "nutrition", n)?;
         }
     }
     if let Ok(mut stmt) = src.prepare("SELECT id, name, created_at FROM store_tags") {
@@ -661,10 +716,12 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             let (id, pid, qty, price, sid, pa, ca) = row?;
             let pa = normalize_instant_for_import(&pa);
             let ca = normalize_instant_for_import(&ca);
-            purchases += tx.execute(
+            let n = tx.execute(
                 "INSERT OR IGNORE INTO purchases (id, product_id, quantity, price_cents, store_id, purchased_at, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
                 params![id, pid, qty, price, sid, pa, ca],
             )? as i64;
+            purchases += n;
+            audit_legacy_insert(&tx, entity_audit::entity::PURCHASE, id, "nutrition", n)?;
         }
     }
     {
@@ -686,10 +743,12 @@ fn copy_nutrition(src: &Connection, dst: &mut Connection) -> Result<serde_json::
             let (qty, unit) = normalize_consumption_unit_for_import(qty, unit);
             let ca_at = normalize_instant_for_import(&ca_at);
             let ca = normalize_instant_for_import(&ca);
-            consumptions += tx.execute(
+            let n = tx.execute(
                 "INSERT OR IGNORE INTO consumptions (id, product_id, quantity, unit, consumed_at, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
                 params![id, pid, qty, unit, ca_at, ca],
             )? as i64;
+            consumptions += n;
+            audit_legacy_insert(&tx, entity_audit::entity::CONSUMPTION, id, "nutrition", n)?;
         }
     }
 
@@ -804,6 +863,7 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
             )? as i64;
             if n > 0 {
                 measurements += n;
+                audit_legacy_insert(&tx, entity_audit::entity::MEASUREMENT, id, "body", n)?;
             } else {
                 measurements_skipped += 1;
             }
@@ -834,6 +894,7 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
             )? as i64;
             if n > 0 {
                 measurements += n;
+                audit_legacy_insert(&tx, entity_audit::entity::MEASUREMENT, id, "body", n)?;
             } else {
                 measurements_skipped += 1;
             }
@@ -915,6 +976,7 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
             )? as i64;
             if n > 0 {
                 sleeps += n;
+                audit_legacy_insert(&tx, entity_audit::entity::SLEEP, id, "body", n)?;
             } else {
                 sleep_skipped += 1;
             }
@@ -940,6 +1002,7 @@ fn copy_body(src: &Connection, dst: &mut Connection) -> Result<serde_json::Value
             )? as i64;
             if n > 0 {
                 sleeps += n;
+                audit_legacy_insert(&tx, entity_audit::entity::SLEEP, id, "body", n)?;
             } else {
                 sleep_skipped += 1;
             }
@@ -1088,7 +1151,13 @@ fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Va
     };
     // Workouts: column intersection so real repslog (no finished_at) works.
     let workouts = if table_exists(src, "workouts") {
-        copy_rows_by_columns(src, &tx, "workouts", WORKOUT_COLUMNS)?
+        copy_rows_by_columns(
+            src,
+            &tx,
+            "workouts",
+            WORKOUT_COLUMNS,
+            Some((entity_audit::entity::WORKOUT, "workout")),
+        )?
     } else {
         0
     };
@@ -1145,6 +1214,17 @@ fn copy_workout(src: &Connection, dst: &mut Connection) -> Result<serde_json::Va
                     }
                     if laps_idx.is_some_and(|i| !matches!(values[i], Value::Null)) {
                         sets_with_laps += 1;
+                    }
+                    if let Some(id_idx) = cols.iter().position(|c| c == "id") {
+                        if let Some(eid) = value_as_i64(&values[id_idx]) {
+                            audit_legacy_insert(
+                                &tx,
+                                entity_audit::entity::EXERCISE_SET,
+                                eid,
+                                "workout",
+                                n,
+                            )?;
+                        }
                     }
                 }
             }
@@ -1252,11 +1332,15 @@ fn sql_column_list(cols: &[String]) -> String {
 }
 
 /// Copy all rows of `table` using the intersection of `preferred` columns present on both DBs.
+///
+/// When `audit` is `Some((entity_type, domain))` and an `id` column is present,
+/// each newly inserted row gets an `import` audit entry.
 fn copy_rows_by_columns(
     src: &Connection,
     tx: &rusqlite::Transaction<'_>,
     table: &str,
     preferred: &[&str],
+    audit: Option<(&str, &str)>,
 ) -> Result<i64> {
     let cols = intersect_columns(
         preferred,
@@ -1266,6 +1350,7 @@ fn copy_rows_by_columns(
     if cols.is_empty() {
         return Ok(0);
     }
+    let id_idx = cols.iter().position(|c| c == "id");
     let col_list = sql_column_list(&cols);
     let placeholders = (1..=cols.len())
         .map(|i| format!("?{i}"))
@@ -1280,7 +1365,15 @@ fn copy_rows_by_columns(
     while let Some(row) = rows.next()? {
         let mut values = row_values(row, cols.len())?;
         normalize_instant_columns_in_row(&cols, &mut values);
-        n += insert.execute(params_from_iter(values.iter()))? as i64;
+        let inserted = insert.execute(params_from_iter(values.iter()))? as i64;
+        n += inserted;
+        if inserted > 0 {
+            if let (Some((entity_type, domain)), Some(ii)) = (audit, id_idx) {
+                if let Some(eid) = value_as_i64(&values[ii]) {
+                    audit_legacy_insert(tx, entity_type, eid, domain, inserted)?;
+                }
+            }
+        }
     }
     Ok(n)
 }
@@ -1364,6 +1457,7 @@ fn copy_exercises_with_remap(
             let new_id = tx.last_insert_rowid();
             map.insert(src_id, new_id);
             inserted += 1;
+            audit_legacy_insert(tx, entity_audit::entity::EXERCISE, new_id, "workout", 1)?;
         } else {
             let ph = (1..=cols.len())
                 .map(|i| format!("?{i}"))
@@ -1375,6 +1469,7 @@ fn copy_exercises_with_remap(
             )?;
             map.insert(src_id, src_id);
             inserted += 1;
+            audit_legacy_insert(tx, entity_audit::entity::EXERCISE, src_id, "workout", 1)?;
         }
     }
 

@@ -18,6 +18,12 @@ pub mod kind {
     pub const RESTORE: &str = "restore";
     pub const CREATE: &str = "create";
     pub const UPDATE: &str = "update";
+    /// Catalog merge (product alias retire onto keeper).
+    pub const MERGE: &str = "merge";
+    /// Entity created by FIT/legacy import (not CLI create).
+    pub const IMPORT: &str = "import";
+    /// Catalog mutation: rename, nutrition set, tag change, etc.
+    pub const CATALOG: &str = "catalog";
 }
 
 /// One field change for `kind: update` (`fields_json` entries).
@@ -43,7 +49,7 @@ impl FieldChange {
     }
 }
 
-/// Append a `create` audit row (CLI / import / etc.).
+/// Append a `create` audit row (CLI / etc.).
 pub fn append_create(
     conn: &Connection,
     entity_type: &str,
@@ -59,6 +65,94 @@ pub fn append_create(
         Some("created"),
         None,
         None,
+    )
+}
+
+/// Append an `import` audit row for an entity created by FIT/legacy import.
+pub fn append_import(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: i64,
+    summary: &str,
+    meta: Option<&JsonValue>,
+) -> Result<i64> {
+    let meta_s = meta.map(|m| m.to_string());
+    append(
+        conn,
+        entity_type,
+        entity_id,
+        kind::IMPORT,
+        Some("import"),
+        Some(summary),
+        None,
+        meta_s.as_deref(),
+    )
+}
+
+/// Append a `merge` audit row (product alias merge, etc.).
+pub fn append_merge(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: i64,
+    summary: &str,
+    meta: Option<&JsonValue>,
+) -> Result<i64> {
+    let meta_s = meta.map(|m| m.to_string());
+    append(
+        conn,
+        entity_type,
+        entity_id,
+        kind::MERGE,
+        Some("cli"),
+        Some(summary),
+        None,
+        meta_s.as_deref(),
+    )
+}
+
+/// Append a `catalog` audit row (rename, nutrition set, tag change, …).
+///
+/// When `fields` is non-empty, stores field-level old/new like `update`.
+pub fn append_catalog(
+    conn: &Connection,
+    entity_type: &str,
+    entity_id: i64,
+    summary: &str,
+    fields: Option<&[FieldChange]>,
+    meta: Option<&JsonValue>,
+) -> Result<i64> {
+    let fields_json = fields.and_then(|fs| {
+        let changed: Vec<&FieldChange> = fs.iter().filter(|f| !f.is_noop()).collect();
+        if changed.is_empty() {
+            None
+        } else {
+            Some(
+                JsonValue::Array(
+                    changed
+                        .iter()
+                        .map(|f| {
+                            serde_json::json!({
+                                "name": f.name,
+                                "old": f.old,
+                                "new": f.new,
+                            })
+                        })
+                        .collect(),
+                )
+                .to_string(),
+            )
+        }
+    });
+    let meta_s = meta.map(|m| m.to_string());
+    append(
+        conn,
+        entity_type,
+        entity_id,
+        kind::CATALOG,
+        Some("cli"),
+        Some(summary),
+        fields_json.as_deref(),
+        meta_s.as_deref(),
     )
 }
 

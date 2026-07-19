@@ -335,6 +335,27 @@ fn set_product_nutrition(
             )?;
         }
     }
+    let micro_n = micros.len();
+    let summary = if micro_n > 0 {
+        format!("nutrition set ({micro_n} micronutrient(s))")
+    } else {
+        "nutrition set".into()
+    };
+    entity_audit::append_catalog(
+        conn,
+        entity_audit::entity::PRODUCT,
+        id,
+        &summary,
+        None,
+        Some(&serde_json::json!({
+            "reference_quantity": reference_quantity,
+            "reference_unit": reference_unit,
+            "energy_kcal": macros.energy_kcal,
+            "protein_g": macros.protein_g,
+            "carbohydrates_g": macros.carbohydrates_g,
+            "fat_g": macros.fat_g,
+        })),
+    )?;
     Ok(())
 }
 
@@ -383,6 +404,7 @@ fn handle_product(
                 params![name, now],
             )?;
             let id = conn.last_insert_rowid();
+            entity_audit::append_create(&conn, entity_audit::entity::PRODUCT, id, None)?;
             if let Some(ts) = tags {
                 for t in ts {
                     let t = t.trim();
@@ -486,6 +508,14 @@ fn handle_product(
         }
         ProductAction::Show { id } => show_product(&conn, id, json)?,
         ProductAction::Rename { id, name } => {
+            let old_name: Option<String> = conn
+                .query_row("SELECT name FROM products WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            let Some(old_name) = old_name else {
+                return Err(anyhow!("product not found"));
+            };
             let n = conn.execute(
                 "UPDATE products SET name = ?1, updated_at = ?2 WHERE id = ?3",
                 params![name, db::now_utc(), id],
@@ -493,6 +523,19 @@ fn handle_product(
             if n == 0 {
                 return Err(anyhow!("product not found"));
             }
+            let fields = [entity_audit::FieldChange::new(
+                "name",
+                serde_json::json!(old_name),
+                serde_json::json!(name),
+            )];
+            entity_audit::append_catalog(
+                &conn,
+                entity_audit::entity::PRODUCT,
+                id,
+                &format!("renamed to {name}"),
+                Some(&fields),
+                None,
+            )?;
             if json {
                 print_json(&Success::created(id, name.clone(), "product renamed"));
             } else {
@@ -968,6 +1011,46 @@ fn merge_products(
             conn.execute(
                 "UPDATE products SET updated_at = ?1 WHERE id = ?2",
                 params![db::now_utc(), into],
+            )?;
+        }
+
+        // Append-only merge trail (keeper + each source). Dry-run never writes.
+        if !dry_run {
+            let from_ids: Vec<i64> = reports.iter().map(|r| r.id).collect();
+            for r in &reports {
+                entity_audit::append_merge(
+                    conn,
+                    entity_audit::entity::PRODUCT,
+                    r.id,
+                    &format!("merged into {into}"),
+                    Some(&serde_json::json!({
+                        "role": "source",
+                        "into_id": into,
+                        "purchases": r.purchases,
+                        "consumptions": r.consumptions,
+                        "tags_copied": r.tags_copied,
+                        "nutrition_copied": r.nutrition_copied,
+                    })),
+                )?;
+            }
+            let mut keeper_meta = serde_json::json!({
+                "role": "keeper",
+                "from_ids": from_ids,
+                "purchases_aliased": total_purchases,
+                "consumptions_aliased": total_consumptions,
+                "tags_copied": total_tags,
+                "nutrition_copied_from": nutrition_copied_from,
+                "micronutrients_filled": total_micros_filled,
+            });
+            if let Some(n) = rename {
+                keeper_meta["name"] = serde_json::json!(n);
+            }
+            entity_audit::append_merge(
+                conn,
+                entity_audit::entity::PRODUCT,
+                into,
+                &format!("merged {} source(s) as aliases", reports.len()),
+                Some(&keeper_meta),
             )?;
         }
         Ok(())
@@ -2143,6 +2226,7 @@ fn create_micronutrient(
         params![name, unit, recommended_intake, now, resolved_tag],
     )?;
     let id = conn.last_insert_rowid();
+    entity_audit::append_create(conn, entity_audit::entity::MICRONUTRIENT, id, None)?;
     if json {
         print_json(&Success::created_with_warnings(
             id,
@@ -2459,6 +2543,7 @@ fn handle_store(
                 params![name, now],
             )?;
             let id = conn.last_insert_rowid();
+            entity_audit::append_create(&conn, entity_audit::entity::STORE, id, None)?;
             if json {
                 print_json(&Success::created(id, name.clone(), "store created"));
             } else {
@@ -2500,6 +2585,12 @@ fn handle_store(
             }
         }
         StoreAction::Rename { id, name } => {
+            let old_name: Option<String> = conn
+                .query_row("SELECT name FROM stores WHERE id = ?1", [id], |r| r.get(0))
+                .optional()?;
+            let Some(old_name) = old_name else {
+                return Err(anyhow!("store not found"));
+            };
             let n = conn.execute(
                 "UPDATE stores SET name = ?1 WHERE id = ?2",
                 params![name, id],
@@ -2507,6 +2598,19 @@ fn handle_store(
             if n == 0 {
                 return Err(anyhow!("store not found"));
             }
+            let fields = [entity_audit::FieldChange::new(
+                "name",
+                serde_json::json!(old_name),
+                serde_json::json!(name),
+            )];
+            entity_audit::append_catalog(
+                &conn,
+                entity_audit::entity::STORE,
+                id,
+                &format!("renamed to {name}"),
+                Some(&fields),
+                None,
+            )?;
             if json {
                 print_json(&Success::created(id, name, "store renamed"));
             } else {
