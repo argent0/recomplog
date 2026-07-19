@@ -1498,6 +1498,32 @@ fn handle_purchase(
                 );
             }
         }
+        PurchaseAction::Correct {
+            id,
+            product,
+            quantity,
+            price,
+            clear_store,
+            store,
+            purchased_at,
+            reason,
+            dry_run,
+        } => {
+            correct_purchase(
+                &conn,
+                id,
+                product,
+                quantity,
+                price.as_deref(),
+                clear_store,
+                store,
+                purchased_at.as_deref(),
+                &reason,
+                dry_run,
+                json,
+                quiet,
+            )?;
+        }
         PurchaseAction::List {
             since,
             until,
@@ -1578,7 +1604,8 @@ fn handle_purchase(
         PurchaseAction::Show { id } => {
             let row = conn
                 .query_row(
-                    "SELECT id, product_id, quantity, price_cents, store_id, purchased_at, created_at \
+                    "SELECT id, product_id, quantity, price_cents, store_id, purchased_at, created_at, \
+                     supersedes_id, deleted_at, delete_reason
                      FROM purchases WHERE id=?1",
                     [id],
                     |r| {
@@ -1590,6 +1617,9 @@ fn handle_purchase(
                             "store_id": r.get::<_, Option<i64>>(4)?,
                             "purchased_at": r.get::<_, String>(5)?,
                             "created_at": r.get::<_, String>(6)?,
+                            "supersedes_id": r.get::<_, Option<i64>>(7)?,
+                            "deleted_at": r.get::<_, Option<String>>(8)?,
+                            "delete_reason": r.get::<_, Option<String>>(9)?,
                         }))
                     },
                 )
@@ -1635,7 +1665,7 @@ fn handle_purchase(
                 |c, i| {
                     c.query_row(
                         "SELECT id, product_id, quantity, price_cents, store_id, purchased_at, \
-                         created_at, deleted_at, delete_reason
+                         created_at, supersedes_id, deleted_at, delete_reason
                          FROM purchases WHERE id=?1",
                         [i],
                         |r| {
@@ -1647,8 +1677,9 @@ fn handle_purchase(
                                 "store_id": r.get::<_, Option<i64>>(4)?,
                                 "purchased_at": r.get::<_, String>(5)?,
                                 "created_at": r.get::<_, String>(6)?,
-                                "deleted_at": r.get::<_, Option<String>>(7)?,
-                                "delete_reason": r.get::<_, Option<String>>(8)?,
+                                "supersedes_id": r.get::<_, Option<i64>>(7)?,
+                                "deleted_at": r.get::<_, Option<String>>(8)?,
+                                "delete_reason": r.get::<_, Option<String>>(9)?,
                             }))
                         },
                     )
@@ -1681,61 +1712,7 @@ fn handle_consumption(
             let when = parse_rfc3339_instant_for_db(&consumed_at)?;
             let now = db::now_utc();
             crate::product_resolve::require_active_product(&conn, product)?;
-            // Ref + classic six for consumption gate.
-            struct ProductNutritionGate {
-                ref_qty: f64,
-                ref_unit: String,
-                energy_kcal: Option<f64>,
-                protein_g: Option<f64>,
-                carbohydrates_g: Option<f64>,
-                fat_g: Option<f64>,
-                fiber_g: Option<f64>,
-                sugars_g: Option<f64>,
-            }
-            let nutrition: Option<ProductNutritionGate> = conn
-                .query_row(
-                    "SELECT reference_quantity, reference_unit,
-                            energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g
-                     FROM product_nutritions
-                     WHERE product_id = ?1",
-                    [product],
-                    |r| {
-                        Ok(ProductNutritionGate {
-                            ref_qty: r.get(0)?,
-                            ref_unit: r.get(1)?,
-                            energy_kcal: r.get(2)?,
-                            protein_g: r.get(3)?,
-                            carbohydrates_g: r.get(4)?,
-                            fat_g: r.get(5)?,
-                            fiber_g: r.get(6)?,
-                            sugars_g: r.get(7)?,
-                        })
-                    },
-                )
-                .optional()?;
-            let Some(nutrition) = nutrition else {
-                return Err(anyhow!(
-                    "product {product} has no nutrition set; run \
-                     `nutrition product nutrition set {product} --reference-quantity … \
-                     --reference-unit g|ml|unit` first"
-                ));
-            };
-            if !classic_macros_complete_opts(
-                nutrition.energy_kcal,
-                nutrition.protein_g,
-                nutrition.carbohydrates_g,
-                nutrition.fat_g,
-                nutrition.fiber_g,
-                nutrition.sugars_g,
-            ) {
-                return Err(anyhow!(
-                    "product {product} has incomplete classic macros \
-                     (energy/protein/carbs/fat/fiber/sugars must all be set); run \
-                     `nutrition product nutrition set {product} --energy-kcal … \
-                     --protein-g … --carbohydrates-g … --fat-g … --fiber-g … --sugars-g …` \
-                     (use explicit 0 when truly zero)"
-                ));
-            }
+            let nutrition = load_product_nutrition_gate(&conn, product)?;
             let resolved = crate::nutrition_units::resolve_consumption(
                 quantity,
                 unit.as_deref(),
@@ -1772,6 +1749,30 @@ fn handle_consumption(
                     ),
                 );
             }
+        }
+        ConsumptionAction::Correct {
+            id,
+            product,
+            quantity,
+            unit,
+            consumed_at,
+            allow_midnight,
+            reason,
+            dry_run,
+        } => {
+            correct_consumption(
+                &conn,
+                id,
+                product,
+                quantity,
+                unit.as_deref(),
+                consumed_at.as_deref(),
+                allow_midnight,
+                &reason,
+                dry_run,
+                json,
+                quiet,
+            )?;
         }
         ConsumptionAction::List {
             since,
@@ -1875,7 +1876,7 @@ fn handle_consumption(
                 |c, i| {
                     c.query_row(
                         "SELECT id, product_id, quantity, unit, consumed_at, created_at, \
-                         deleted_at, delete_reason
+                         supersedes_id, deleted_at, delete_reason
                          FROM consumptions WHERE id=?1",
                         [i],
                         |r| {
@@ -1886,8 +1887,9 @@ fn handle_consumption(
                                 "unit": r.get::<_, Option<String>>(3)?,
                                 "consumed_at": r.get::<_, String>(4)?,
                                 "created_at": r.get::<_, String>(5)?,
-                                "deleted_at": r.get::<_, Option<String>>(6)?,
-                                "delete_reason": r.get::<_, Option<String>>(7)?,
+                                "supersedes_id": r.get::<_, Option<i64>>(6)?,
+                                "deleted_at": r.get::<_, Option<String>>(7)?,
+                                "delete_reason": r.get::<_, Option<String>>(8)?,
                             }))
                         },
                     )
@@ -1896,6 +1898,433 @@ fn handle_consumption(
                 },
             )?;
         }
+    }
+    Ok(())
+}
+
+/// Ref + classic six required for consumption logging.
+struct ProductNutritionGate {
+    ref_qty: f64,
+    ref_unit: String,
+    energy_kcal: Option<f64>,
+    protein_g: Option<f64>,
+    carbohydrates_g: Option<f64>,
+    fat_g: Option<f64>,
+    fiber_g: Option<f64>,
+    sugars_g: Option<f64>,
+}
+
+fn load_product_nutrition_gate(conn: &Connection, product: i64) -> Result<ProductNutritionGate> {
+    let nutrition: Option<ProductNutritionGate> = conn
+        .query_row(
+            "SELECT reference_quantity, reference_unit,
+                    energy_kcal, protein_g, carbohydrates_g, fat_g, fiber_g, sugars_g
+             FROM product_nutritions
+             WHERE product_id = ?1",
+            [product],
+            |r| {
+                Ok(ProductNutritionGate {
+                    ref_qty: r.get(0)?,
+                    ref_unit: r.get(1)?,
+                    energy_kcal: r.get(2)?,
+                    protein_g: r.get(3)?,
+                    carbohydrates_g: r.get(4)?,
+                    fat_g: r.get(5)?,
+                    fiber_g: r.get(6)?,
+                    sugars_g: r.get(7)?,
+                })
+            },
+        )
+        .optional()?;
+    let Some(nutrition) = nutrition else {
+        return Err(anyhow!(
+            "product {product} has no nutrition set; run \
+             `nutrition product nutrition set {product} --reference-quantity … \
+             --reference-unit g|ml|unit` first"
+        ));
+    };
+    if !classic_macros_complete_opts(
+        nutrition.energy_kcal,
+        nutrition.protein_g,
+        nutrition.carbohydrates_g,
+        nutrition.fat_g,
+        nutrition.fiber_g,
+        nutrition.sugars_g,
+    ) {
+        return Err(anyhow!(
+            "product {product} has incomplete classic macros \
+             (energy/protein/carbs/fat/fiber/sugars must all be set); run \
+             `nutrition product nutrition set {product} --energy-kcal … \
+             --protein-g … --carbohydrates-g … --fat-g … --fiber-g … --sugars-g …` \
+             (use explicit 0 when truly zero)"
+        ));
+    }
+    Ok(nutrition)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn correct_consumption(
+    conn: &Connection,
+    old_id: i64,
+    product: Option<i64>,
+    quantity: Option<f64>,
+    unit: Option<&str>,
+    consumed_at: Option<&str>,
+    allow_midnight: bool,
+    reason: &str,
+    dry_run: bool,
+    json: bool,
+    quiet: bool,
+) -> Result<()> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(anyhow!("consumption correct requires a non-empty --reason"));
+    }
+    let old: (
+        i64,
+        f64,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<i64>,
+    ) = conn
+        .query_row(
+            "SELECT product_id, quantity, unit, consumed_at, deleted_at, supersedes_id
+             FROM consumptions WHERE id = ?1",
+            [old_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("consumption {old_id} not found"))?;
+    let (old_product, old_qty, old_unit, old_when, deleted_at, _old_sup) = old;
+    if deleted_at.is_some() {
+        return Err(anyhow!(
+            "consumption {old_id} is already soft-deleted (cannot supersede)"
+        ));
+    }
+    let new_product = product.unwrap_or(old_product);
+    crate::product_resolve::require_active_product(conn, new_product)?;
+    let nutrition = load_product_nutrition_gate(conn, new_product)?;
+    let qty_in = quantity.unwrap_or(old_qty);
+    let unit_in = unit
+        .map(|s| s.to_string())
+        .or(old_unit.clone())
+        .unwrap_or_else(|| nutrition.ref_unit.clone());
+    let resolved = crate::nutrition_units::resolve_consumption(
+        qty_in,
+        Some(&unit_in),
+        nutrition.ref_qty,
+        &nutrition.ref_unit,
+    )?;
+    let when = if let Some(raw) = consumed_at {
+        let when_dt = parse_rfc3339_to_utc(raw)?;
+        refuse_consumption_midnight(when_dt, allow_midnight)?;
+        parse_rfc3339_instant_for_db(raw)?
+    } else {
+        old_when.clone()
+    };
+    let mut changes: Vec<entity_audit::FieldChange> = Vec::new();
+    if new_product != old_product {
+        changes.push(entity_audit::FieldChange::new(
+            "product_id",
+            serde_json::json!(old_product),
+            serde_json::json!(new_product),
+        ));
+    }
+    if (resolved.quantity - old_qty).abs() > f64::EPSILON {
+        changes.push(entity_audit::FieldChange::new(
+            "quantity",
+            serde_json::json!(old_qty),
+            serde_json::json!(resolved.quantity),
+        ));
+    }
+    let old_u = old_unit.as_deref().unwrap_or("");
+    if resolved.unit != old_u {
+        changes.push(entity_audit::FieldChange::new(
+            "unit",
+            serde_json::json!(old_unit),
+            serde_json::json!(resolved.unit),
+        ));
+    }
+    if when != old_when {
+        changes.push(entity_audit::FieldChange::new(
+            "consumed_at",
+            serde_json::json!(old_when),
+            serde_json::json!(when),
+        ));
+    }
+    if dry_run {
+        if json {
+            print_json(&serde_json::json!({
+                "success": true,
+                "dry_run": true,
+                "mode": "supersede",
+                "supersedes_id": old_id,
+                "product_id": new_product,
+                "quantity": resolved.quantity,
+                "unit": resolved.unit,
+                "consumed_at": when,
+                "reason": reason,
+                "fields": changes.iter().map(|f| serde_json::json!({
+                    "name": f.name, "old": f.old, "new": f.new
+                })).collect::<Vec<_>>(),
+            }));
+        } else {
+            quiet_print(
+                quiet,
+                format!("Dry-run: would supersede consumption {old_id} (reason: {reason})"),
+            );
+        }
+        return Ok(());
+    }
+    let now = db::now_utc();
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO consumptions (product_id, quantity, unit, consumed_at, created_at, supersedes_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            new_product,
+            resolved.quantity,
+            resolved.unit,
+            when,
+            now,
+            old_id
+        ],
+    )?;
+    let new_id = tx.last_insert_rowid();
+    entity_audit::append_supersede_create(
+        &tx,
+        entity_audit::entity::CONSUMPTION,
+        new_id,
+        old_id,
+        reason,
+        Some(&changes),
+    )?;
+    let deleted_at = entity_audit::supersede_retire(
+        &tx,
+        "consumptions",
+        entity_audit::entity::CONSUMPTION,
+        old_id,
+        new_id,
+        reason,
+        Some(&changes),
+    )?;
+    tx.commit()?;
+    if json {
+        print_json(&serde_json::json!({
+            "success": true,
+            "id": new_id,
+            "supersedes_id": old_id,
+            "mode": "supersede",
+            "message": "consumption corrected (supersede)",
+            "product_id": new_product,
+            "quantity": resolved.quantity,
+            "unit": resolved.unit,
+            "consumed_at": when,
+            "created_at": now,
+            "old_deleted_at": deleted_at,
+            "reason": reason,
+        }));
+    } else {
+        quiet_print(
+            quiet,
+            format!("Consumption {new_id} supersedes {old_id} (reason: {reason})"),
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn correct_purchase(
+    conn: &Connection,
+    old_id: i64,
+    product: Option<i64>,
+    quantity: Option<f64>,
+    price: Option<&str>,
+    clear_store: bool,
+    store: Option<i64>,
+    purchased_at: Option<&str>,
+    reason: &str,
+    dry_run: bool,
+    json: bool,
+    quiet: bool,
+) -> Result<()> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(anyhow!("purchase correct requires a non-empty --reason"));
+    }
+    let old: (i64, f64, Option<i64>, Option<i64>, String, Option<String>) = conn
+        .query_row(
+            "SELECT product_id, quantity, price_cents, store_id, purchased_at, deleted_at
+             FROM purchases WHERE id = ?1",
+            [old_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("purchase {old_id} not found"))?;
+    let (old_product, old_qty, old_price, old_store, old_when, deleted_at) = old;
+    if deleted_at.is_some() {
+        return Err(anyhow!(
+            "purchase {old_id} is already soft-deleted (cannot supersede)"
+        ));
+    }
+    let new_product = product.unwrap_or(old_product);
+    crate::product_resolve::require_active_product(conn, new_product)?;
+    let new_qty = quantity.unwrap_or(old_qty);
+    let new_price: Option<i64> = if let Some(p) = price {
+        Some(
+            p.replace(['$', ','], "")
+                .parse::<f64>()
+                .map(|v| (v * 100.0).round() as i64)
+                .map_err(|_| anyhow!("invalid --price: {p}"))?,
+        )
+    } else {
+        old_price
+    };
+    let new_store = if clear_store {
+        None
+    } else {
+        store.or(old_store)
+    };
+    let when = if let Some(raw) = purchased_at {
+        parse_rfc3339_instant_for_db(raw)?
+    } else {
+        old_when.clone()
+    };
+    let mut changes: Vec<entity_audit::FieldChange> = Vec::new();
+    if new_product != old_product {
+        changes.push(entity_audit::FieldChange::new(
+            "product_id",
+            serde_json::json!(old_product),
+            serde_json::json!(new_product),
+        ));
+    }
+    if (new_qty - old_qty).abs() > f64::EPSILON {
+        changes.push(entity_audit::FieldChange::new(
+            "quantity",
+            serde_json::json!(old_qty),
+            serde_json::json!(new_qty),
+        ));
+    }
+    if new_price != old_price {
+        changes.push(entity_audit::FieldChange::new(
+            "price_cents",
+            serde_json::json!(old_price),
+            serde_json::json!(new_price),
+        ));
+    }
+    if new_store != old_store {
+        changes.push(entity_audit::FieldChange::new(
+            "store_id",
+            serde_json::json!(old_store),
+            serde_json::json!(new_store),
+        ));
+    }
+    if when != old_when {
+        changes.push(entity_audit::FieldChange::new(
+            "purchased_at",
+            serde_json::json!(old_when),
+            serde_json::json!(when),
+        ));
+    }
+    if dry_run {
+        if json {
+            print_json(&serde_json::json!({
+                "success": true,
+                "dry_run": true,
+                "mode": "supersede",
+                "supersedes_id": old_id,
+                "product_id": new_product,
+                "quantity": new_qty,
+                "price_cents": new_price,
+                "store_id": new_store,
+                "purchased_at": when,
+                "reason": reason,
+                "fields": changes.iter().map(|f| serde_json::json!({
+                    "name": f.name, "old": f.old, "new": f.new
+                })).collect::<Vec<_>>(),
+            }));
+        } else {
+            quiet_print(
+                quiet,
+                format!("Dry-run: would supersede purchase {old_id} (reason: {reason})"),
+            );
+        }
+        return Ok(());
+    }
+    let now = db::now_utc();
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO purchases (product_id, quantity, price_cents, store_id, purchased_at, created_at, supersedes_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            new_product,
+            new_qty,
+            new_price,
+            new_store,
+            when,
+            now,
+            old_id
+        ],
+    )?;
+    let new_id = tx.last_insert_rowid();
+    entity_audit::append_supersede_create(
+        &tx,
+        entity_audit::entity::PURCHASE,
+        new_id,
+        old_id,
+        reason,
+        Some(&changes),
+    )?;
+    let deleted_at = entity_audit::supersede_retire(
+        &tx,
+        "purchases",
+        entity_audit::entity::PURCHASE,
+        old_id,
+        new_id,
+        reason,
+        Some(&changes),
+    )?;
+    tx.commit()?;
+    if json {
+        print_json(&serde_json::json!({
+            "success": true,
+            "id": new_id,
+            "supersedes_id": old_id,
+            "mode": "supersede",
+            "message": "purchase corrected (supersede)",
+            "product_id": new_product,
+            "quantity": new_qty,
+            "price_cents": new_price,
+            "store_id": new_store,
+            "purchased_at": when,
+            "created_at": now,
+            "old_deleted_at": deleted_at,
+            "reason": reason,
+        }));
+    } else {
+        quiet_print(
+            quiet,
+            format!("Purchase {new_id} supersedes {old_id} (reason: {reason})"),
+        );
     }
     Ok(())
 }

@@ -38,7 +38,10 @@ This document defines the coding standards for the unified `recomplog` project.
      new features on them; do not teach agents to upsert events.
    - Event `update` must classify lifecycle (null fills) vs correction (overwrites).
      Corrections require `--reason` and append audit `kind: correct` with field old/new
-     (`entity_audit::append_field_change`). Prefer soft-delete + create for large mistakes.
+     (`entity_audit::append_field_change`). Prefer **supersede** (`… correct` → new row with
+     `supersedes_id` + soft-delete old) for honest corrections when available (nutrition
+     consumption/purchase); soft-delete + create only when no supersede path exists.
+
    - **Consumption quantity/unit:** canonicalize at insert only. Do not re-run
      migration heuristics (`normalize_nutrition_units`, `promote_whole_package_products`)
      on open, import, or as a silent repair path. Those run once under `user_version`

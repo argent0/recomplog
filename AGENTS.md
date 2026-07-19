@@ -128,7 +128,11 @@ recomplog --json nutrition product nutrition set 3 --reference-quantity 1 --refe
 # Event time ≠ storage time (log meal that happened earlier today)
 recomplog --json nutrition consumption create --product 3 --quantity 1 --unit unit --consumed-at 2026-07-14T13:45:00-03:00
 recomplog --json nutrition consumption create --product 12 --quantity 80 --unit g --consumed-at 2026-07-14T08:30:00-03:00
+# Wrong meal: append-only correct (new row supersedes old; old soft-deleted)
+recomplog --json nutrition consumption correct 88 --quantity 90 --unit g --reason "weighed again"
 recomplog --json nutrition purchase create --product 3 --quantity 2 --purchased-at 2026-07-14T18:00:00-03:00
+recomplog --json nutrition purchase correct 12 --quantity 3 --reason "bought three"
+
 recomplog --json workout create --type Push --started-at 2026-07-14T17:00:00-03:00
 # Lifecycle fill (no --reason): first finished_at on an open session
 recomplog --json workout update 1 --finished-at 2026-07-14T18:30:00-03:00

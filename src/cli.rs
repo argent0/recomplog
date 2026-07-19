@@ -1204,6 +1204,34 @@ pub enum PurchaseAction {
         #[arg(long = "purchased-at", visible_alias = "date")]
         purchased_at: String,
     },
+    /// Append a correcting purchase that supersedes an existing row (append-only).
+    ///
+    /// Inserts a new row with `supersedes_id` pointing at the old head and
+    /// soft-deletes the old head. Omitted fields copy from the superseded row.
+    /// Requires `--reason`. Prefer this over delete+create for wrong purchases.
+    Correct {
+        /// Purchase id to supersede.
+        id: i64,
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_product))]
+        product: Option<i64>,
+        #[arg(long)]
+        quantity: Option<f64>,
+        #[arg(long)]
+        price: Option<String>,
+        /// Clear store (use with no `--store`).
+        #[arg(long = "clear-store")]
+        clear_store: bool,
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_store))]
+        store: Option<i64>,
+        #[arg(long = "purchased-at", visible_alias = "date")]
+        purchased_at: Option<String>,
+        /// Required non-empty reason (stored on audit + delete_reason).
+        #[arg(long)]
+        reason: String,
+        /// Validate and show planned supersede without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     List {
         /// Flexible calendar day: today, yesterday, YYYY-MM-DD, …
         #[arg(long)]
@@ -1256,6 +1284,31 @@ pub enum ConsumptionAction {
         /// Allow logging at local midnight (discouraged; usually a missing time-of-day).
         #[arg(long = "allow-midnight")]
         allow_midnight: bool,
+    },
+    /// Append a correcting consumption that supersedes an existing row (append-only).
+    ///
+    /// Inserts a new row with `supersedes_id` pointing at the old head and
+    /// soft-deletes the old head. Omitted fields copy from the superseded row.
+    /// Requires `--reason`. Prefer this over delete+create for wrong meals.
+    Correct {
+        /// Consumption id to supersede.
+        id: i64,
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_product))]
+        product: Option<i64>,
+        #[arg(long)]
+        quantity: Option<f64>,
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_nutrition_unit))]
+        unit: Option<String>,
+        #[arg(long = "consumed-at", visible_alias = "date")]
+        consumed_at: Option<String>,
+        #[arg(long = "allow-midnight")]
+        allow_midnight: bool,
+        /// Required non-empty reason (stored on audit + delete_reason).
+        #[arg(long)]
+        reason: String,
+        /// Validate and show planned supersede without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
     List {
         /// Flexible calendar day: today, yesterday, YYYY-MM-DD, …

@@ -27,6 +27,8 @@ pub mod kind {
     pub const IMPORT: &str = "import";
     /// Catalog mutation: rename, nutrition set, tag change, etc.
     pub const CATALOG: &str = "catalog";
+    /// Prior head retired because a new row supersedes it (F1).
+    pub const SUPERSEDE: &str = "supersede";
 }
 
 /// Classification of an in-place event field update (S5).
@@ -368,6 +370,163 @@ pub fn append(
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Soft-delete `old_id` as superseded by `new_id` and write a single
+/// `kind: supersede` audit row (not a bare soft_delete).
+///
+/// Does not insert the new row — caller inserts first, then calls this.
+/// Optional field diffs describe old → new for agents.
+pub fn supersede_retire(
+    conn: &Connection,
+    table: &str,
+    entity_type: &str,
+    old_id: i64,
+    new_id: i64,
+    reason: &str,
+    fields: Option<&[FieldChange]>,
+) -> Result<String> {
+    validate_event_table(table)?;
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(anyhow!("supersede requires a non-empty --reason"));
+    }
+    let existing: Option<(Option<String>,)> = conn
+        .query_row(
+            &format!("SELECT deleted_at FROM {table} WHERE id = ?1"),
+            [old_id],
+            |r| Ok((r.get(0)?,)),
+        )
+        .optional()?;
+    match existing {
+        None => return Err(anyhow!("{entity_type} {old_id} not found")),
+        Some((Some(_),)) => {
+            return Err(anyhow!(
+                "{entity_type} {old_id} is already soft-deleted (cannot supersede)"
+            ));
+        }
+        Some((None,)) => {}
+    }
+    // Refuse if another live row already supersedes this head.
+    let other: Option<i64> = conn
+        .query_row(
+            &format!(
+                "SELECT id FROM {table} WHERE supersedes_id = ?1 AND deleted_at IS NULL LIMIT 1"
+            ),
+            [old_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(oid) = other {
+        if oid != new_id {
+            return Err(anyhow!(
+                "{entity_type} {old_id} is already superseded by live {entity_type} {oid}"
+            ));
+        }
+    }
+    let deleted_at = db::now_utc();
+    let n = conn.execute(
+        &format!(
+            "UPDATE {table} SET deleted_at = ?1, delete_reason = ?2 \
+             WHERE id = ?3 AND deleted_at IS NULL"
+        ),
+        params![deleted_at, reason, old_id],
+    )?;
+    if n == 0 {
+        return Err(anyhow!(
+            "{entity_type} {old_id} not found or already soft-deleted"
+        ));
+    }
+    let fields_json = fields.and_then(|fs| {
+        let changed: Vec<&FieldChange> = fs.iter().filter(|f| !f.is_noop()).collect();
+        if changed.is_empty() {
+            None
+        } else {
+            Some(
+                JsonValue::Array(
+                    changed
+                        .iter()
+                        .map(|f| {
+                            serde_json::json!({
+                                "name": f.name,
+                                "old": f.old,
+                                "new": f.new,
+                            })
+                        })
+                        .collect(),
+                )
+                .to_string(),
+            )
+        }
+    });
+    let meta = serde_json::json!({
+        "reason": reason,
+        "superseded_by": new_id,
+    })
+    .to_string();
+    append(
+        conn,
+        entity_type,
+        old_id,
+        kind::SUPERSEDE,
+        Some("cli"),
+        Some(&format!("superseded by {new_id}")),
+        fields_json.as_deref(),
+        Some(&meta),
+    )?;
+    Ok(deleted_at)
+}
+
+/// Append create audit for a row that supersedes another (meta.supersedes).
+pub fn append_supersede_create(
+    conn: &Connection,
+    entity_type: &str,
+    new_id: i64,
+    supersedes_id: i64,
+    reason: &str,
+    fields: Option<&[FieldChange]>,
+) -> Result<i64> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(anyhow!("supersede requires a non-empty --reason"));
+    }
+    let fields_json = fields.and_then(|fs| {
+        let changed: Vec<&FieldChange> = fs.iter().filter(|f| !f.is_noop()).collect();
+        if changed.is_empty() {
+            None
+        } else {
+            Some(
+                JsonValue::Array(
+                    changed
+                        .iter()
+                        .map(|f| {
+                            serde_json::json!({
+                                "name": f.name,
+                                "old": f.old,
+                                "new": f.new,
+                            })
+                        })
+                        .collect(),
+                )
+                .to_string(),
+            )
+        }
+    });
+    let meta = serde_json::json!({
+        "reason": reason,
+        "supersedes": supersedes_id,
+    })
+    .to_string();
+    append(
+        conn,
+        entity_type,
+        new_id,
+        kind::CREATE,
+        Some("cli"),
+        Some(&format!("created (supersedes {supersedes_id})")),
+        fields_json.as_deref(),
+        Some(&meta),
+    )
 }
 
 /// Soft-delete a single event row. Errors if missing or already soft-deleted.

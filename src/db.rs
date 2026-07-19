@@ -61,7 +61,7 @@ pub fn open_db_readonly_for_completion(override_path: Option<&str>) -> Option<Co
 }
 
 /// Current schema version. Bump when adding a new migration block.
-const CURRENT_VERSION: i32 = 10;
+const CURRENT_VERSION: i32 = 11;
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i32 = conn
@@ -119,6 +119,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     if current < 10 {
         apply_v10_event_soft_delete_and_audit(conn)?;
         conn.execute("PRAGMA user_version = 10", [])?;
+    }
+    if current < 11 {
+        apply_v11_event_supersedes(conn)?;
+        conn.execute("PRAGMA user_version = 11", [])?;
     }
 
     Ok(())
@@ -795,6 +799,39 @@ fn apply_v9_product_merge_alias(conn: &Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_products_merged_into ON products(merged_into_id)",
         [],
     )?;
+    Ok(())
+}
+
+/// Event supersedes_id chains (schema v11). See migrations/011_*.sql and
+/// reports/append/F1-no-supersede-correction-model.md.
+fn apply_v11_event_supersedes(conn: &Connection) -> Result<()> {
+    const EVENT_TABLES: &[&str] = &[
+        "workouts",
+        "exercise_sets",
+        "measurements",
+        "sleep",
+        "consumptions",
+        "purchases",
+    ];
+    for table in EVENT_TABLES {
+        if !table_exists(conn, table)? {
+            continue;
+        }
+        if !column_exists(conn, table, "supersedes_id")? {
+            // Self-FK with ON DELETE SET NULL: purge of an ancestor clears the pointer.
+            conn.execute(
+                &format!(
+                    "ALTER TABLE {table} ADD COLUMN supersedes_id INTEGER \
+                     REFERENCES {table}(id) ON DELETE SET NULL"
+                ),
+                [],
+            )?;
+        }
+        conn.execute(
+            &format!("CREATE INDEX IF NOT EXISTS idx_{table}_supersedes ON {table}(supersedes_id)"),
+            [],
+        )?;
+    }
     Ok(())
 }
 
