@@ -134,10 +134,11 @@ pub enum DbAction {
         #[arg(short, long)]
         force: bool,
     },
-    /// Audit database contents (sanity limits) or detect missing daily logs.
+    /// Audit database contents (sanity limits), missing daily logs, or append-only integrity.
     ///
     ///   recomplog db check --variations --days 90
     ///   recomplog db check missing --days 7 --workout-days 3
+    ///   recomplog db check append
     Check(CheckCommand),
 }
 
@@ -1872,6 +1873,12 @@ pub struct CheckCommand {
 pub enum CheckAction {
     /// Detect missing daily logs (measurement, sleep, nutrition) and workout inactivity.
     Missing(CheckMissingArgs),
+    /// Append-only integrity: schema columns and orphan mutations without `entity_audit`.
+    ///
+    /// Fails (exit 1) when event tables lack expected soft-delete/supersede columns, or when
+    /// soft-deleted / in-place-updated rows have no matching audit trail (possible raw SQL).
+    /// See reports/append/F3-event-tables-not-append-constrained.md.
+    Append,
 }
 
 /// Args for `recomplog db check missing`.

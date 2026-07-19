@@ -98,6 +98,9 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 Some(crate::cli::CheckAction::Missing(args)) => {
                     check::handle_check_missing(args, db_override, json, quiet)
                 }
+                Some(crate::cli::CheckAction::Append) => {
+                    check::handle_check_append(db_override, json, quiet)
+                }
                 None => {
                     let conn = db::open_db(db_override)?;
                     let mut repo = BodyRepository::new(conn);

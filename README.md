@@ -13,6 +13,8 @@ Successor to `repslog`, `bodylog`, `nutlog`, and `bodydashboard`.
 
 **Append only — no exceptions. Never, nowhere.** Event history (workouts, sets, meals, purchases, measurements, sleep, …) grows only by insertion. Catalog data (products, exercises, profile) may be edited; that is not event history. Do not rewrite settled event rows.
 
+**No snapshots — no exceptions. Never, nowhere.** Do not freeze catalog, config, or derived facts onto event rows “as of log time.” Events store what the user asserted (identity, amounts, times); reports resolve the rest from **live** sources. Correct the source of truth and historical reports recompute — by design. (Example: meals join current product macros; never copy macros onto consumptions.)
+
 **Quality data produces quality reports. Quality reports are actionable reports.** The tool favors trustworthy logging (sanity checks, event-vs-storage time, gap detection) so reports can drive decisions, not just display numbers.
 
 ## Status

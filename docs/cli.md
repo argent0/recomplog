@@ -11,6 +11,17 @@ This document describes the unified command structure.
   (`nutrient` remains a visible alias of `micronutrient`.)
 - `report` stays top-level for easy cross-domain use (as requested).
 
+### Philosophy (append-only + no snapshots)
+
+- **Append only — no exceptions. Never, nowhere.** Event history grows by insert; do not rewrite
+  settled event rows.
+- **No snapshots — no exceptions. Never, nowhere.** Do not freeze catalog/config/derived facts onto
+  events “as of log time.” Events store what the user asserted; reports resolve the rest **live**.
+  Correct the source of truth → historical reports recompute (by design).
+- **Nutrition example:** consumptions have product + quantity/unit only; macros always come from
+  current `product_nutritions`. Use `nutrition product audit` for catalog change history — never
+  per-meal macro columns.
+
 ## Recommended Usage
 
 ### Training / Workouts
@@ -75,6 +86,8 @@ recomplog nutrition purchase create --product 12 --quantity 1 --price 4.99
 # - unit: discrete whole items only (protein bar, capsule, one prepared drink)
 # Classic six macros all required (energy/protein/carbs/fat/fiber/sugars). Explicit 0 is ok (warns).
 # Inspect rare zeros later: recomplog db check --zero-macros
+# No snapshots (never): fix macros here → all past meals of this product recompute in reports.
+# When did macros change? recomplog --json nutrition product audit 12
 recomplog nutrition product nutrition set 12 --reference-quantity 100 --reference-unit g \
   --energy-kcal 389 --protein-g 17 --carbohydrates-g 66 --fat-g 7 --fiber-g 11 --sugars-g 1
 recomplog nutrition product nutrition set 3 --reference-quantity 1 --reference-unit unit \
@@ -101,7 +114,7 @@ recomplog report brief --date yesterday --days 7
 recomplog --json report brief --days 7
 recomplog --json report brief --date 2020-06-15 --days 3
 
-# Nutrition: period totals (macros + micronutrients)
+# Nutrition: period totals (macros + micronutrients; live catalog — no snapshots, never)
 recomplog --json report nutrition summary --days 7
 recomplog --json report nutrition summary --since 2026-05-01 --until 2026-05-31
 
@@ -167,6 +180,10 @@ recomplog db check missing --days 7 --workout-days 3
 recomplog --json db check missing --days 7 --workout-days 3
 # End window at yesterday (do not require today's logs yet):
 recomplog --json db check missing --days 7 --workout-days 3 --skip-today
+
+# Append-only integrity: schema columns, soft-deletes/updates without audit trail
+recomplog --json db check append
+recomplog db check append
 
 recomplog config generate
 recomplog init

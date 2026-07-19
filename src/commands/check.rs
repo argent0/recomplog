@@ -1,9 +1,11 @@
 //! Completeness checks: missing daily logs and workout inactivity.
+//! Append-only integrity: `db check append` (F3a).
 //!
 //! Sanity-limit audit remains in `body::handle_check`.
 
 use crate::cli::CheckMissingArgs;
 use crate::db;
+use crate::entity_audit;
 use crate::models::Period;
 use crate::utils::print_json;
 use anyhow::{anyhow, Result};
@@ -11,6 +13,9 @@ use chrono::{Duration, Local, NaiveDate};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::HashSet;
+
+/// Cap samples in JSON/human output (full count still reported).
+const APPEND_FINDINGS_LIMIT: usize = 50;
 
 /// One domain's presence summary over the daily window.
 #[derive(Debug, Serialize)]
@@ -318,5 +323,419 @@ fn print_missing_human(report: &MissingReport) {
         println!("OK — no missing entries.");
     } else {
         println!("INCOMPLETE");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// db check append (F3a)
+// ---------------------------------------------------------------------------
+
+/// One orphan row sample for append-only checks.
+#[derive(Debug, Serialize)]
+pub struct AppendFinding {
+    pub entity: String,
+    pub id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppendFindingGroup {
+    pub ok: bool,
+    pub count: usize,
+    pub findings: Vec<AppendFinding>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppendSchemaReport {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_tables: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_columns: Vec<String>,
+}
+
+/// Full report from `recomplog db check append`.
+#[derive(Debug, Serialize)]
+pub struct AppendReport {
+    pub ok: bool,
+    pub schema: AppendSchemaReport,
+    pub orphan_soft_deletes: AppendFindingGroup,
+    pub orphan_updates: AppendFindingGroup,
+    /// Documented allowlist (informational; does not fail the check).
+    pub policy: AppendPolicyNotes,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppendPolicyNotes {
+    /// Columns/paths that may still UPDATE event rows under append-only policy.
+    pub allowed_event_updates: Vec<&'static str>,
+    /// Patterns that must not be reintroduced.
+    pub forbidden: Vec<&'static str>,
+    /// Legacy debt still present in the CLI (informational).
+    pub legacy_debt: Vec<&'static str>,
+}
+
+fn append_policy_notes() -> AppendPolicyNotes {
+    AppendPolicyNotes {
+        allowed_event_updates: vec![
+            "soft-delete: deleted_at / delete_reason via entity_audit::soft_delete",
+            "supersede: tombstone old head + INSERT new row (supersedes_id)",
+            "lifecycle: null→value fills (e.g. first finished_at) with audit kind update",
+            "legacy in-place correct: settled field overwrite with --reason + audit kind correct",
+            "body measurement/sleep: updated_at refresh only through repository update helpers",
+        ],
+        forbidden: vec![
+            "bulk UPDATE of consumptions/purchases/exercise_sets/measurements/sleep/workouts payload outside helpers",
+            "silent re-run of unit normalizers on open/import (I2/I3)",
+            "INSERT OR REPLACE of event rows (I1)",
+            "set_number sibling renumber on move (use set_order_revisions / F4)",
+        ],
+        legacy_debt: vec![
+            "event update still overwrites some settled fields (prefer supersede correct; S5)",
+            "hard purge CASCADE erases trees (soft-delete is default; S3)",
+        ],
+    }
+}
+
+/// Tables that must exist for append-only tooling.
+const REQUIRED_TABLES: &[&str] = &["entity_audit", "set_order_revisions"];
+
+/// (table, required columns) for soft-delete / supersede event model.
+const EVENT_SCHEMA: &[(&str, &[&str])] = &[
+    (
+        "workouts",
+        &["deleted_at", "delete_reason", "supersedes_id"],
+    ),
+    (
+        "exercise_sets",
+        &["deleted_at", "delete_reason", "supersedes_id"],
+    ),
+    (
+        "measurements",
+        &[
+            "deleted_at",
+            "delete_reason",
+            "supersedes_id",
+            "updated_at",
+            "created_at",
+        ],
+    ),
+    (
+        "sleep",
+        &[
+            "deleted_at",
+            "delete_reason",
+            "supersedes_id",
+            "updated_at",
+            "created_at",
+        ],
+    ),
+    (
+        "consumptions",
+        &["deleted_at", "delete_reason", "supersedes_id"],
+    ),
+    (
+        "purchases",
+        &["deleted_at", "delete_reason", "supersedes_id"],
+    ),
+];
+
+/// (SQL table, entity_audit.entity_type) for soft-delete orphan scan.
+const SOFT_DELETE_ENTITIES: &[(&str, &str)] = &[
+    ("workouts", entity_audit::entity::WORKOUT),
+    ("exercise_sets", entity_audit::entity::EXERCISE_SET),
+    ("measurements", entity_audit::entity::MEASUREMENT),
+    ("sleep", entity_audit::entity::SLEEP),
+    ("consumptions", entity_audit::entity::CONSUMPTION),
+    ("purchases", entity_audit::entity::PURCHASE),
+];
+
+/// Body tables with updated_at that signal in-place mutation when ≠ created_at.
+const UPDATE_TRACKED: &[(&str, &str)] = &[
+    ("measurements", entity_audit::entity::MEASUREMENT),
+    ("sleep", entity_audit::entity::SLEEP),
+];
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+fn table_columns(conn: &Connection, table: &str) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<std::result::Result<HashSet<_>, _>>()?;
+    Ok(cols)
+}
+
+fn check_append_schema(conn: &Connection) -> Result<AppendSchemaReport> {
+    let mut missing_tables = Vec::new();
+    let mut missing_columns = Vec::new();
+
+    for t in REQUIRED_TABLES {
+        if !table_exists(conn, t)? {
+            missing_tables.push((*t).to_string());
+        }
+    }
+
+    for (table, cols) in EVENT_SCHEMA {
+        if !table_exists(conn, table)? {
+            missing_tables.push((*table).to_string());
+            continue;
+        }
+        let present = table_columns(conn, table)?;
+        for col in *cols {
+            if !present.contains(*col) {
+                missing_columns.push(format!("{table}.{col}"));
+            }
+        }
+    }
+
+    Ok(AppendSchemaReport {
+        ok: missing_tables.is_empty() && missing_columns.is_empty(),
+        missing_tables,
+        missing_columns,
+    })
+}
+
+fn find_orphan_soft_deletes(conn: &Connection) -> Result<AppendFindingGroup> {
+    let mut findings = Vec::new();
+    let mut count = 0usize;
+
+    // soft_delete and supersede are the legitimate tombstone audit kinds.
+    let kinds = format!(
+        "'{}', '{}'",
+        entity_audit::kind::SOFT_DELETE,
+        entity_audit::kind::SUPERSEDE
+    );
+
+    for (table, entity_type) in SOFT_DELETE_ENTITIES {
+        let sql = format!(
+            "SELECT t.id FROM {table} t
+             WHERE t.deleted_at IS NOT NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM entity_audit a
+                 WHERE a.entity_type = ?1
+                   AND a.entity_id = t.id
+                   AND a.kind IN ({kinds})
+               )
+             ORDER BY t.id
+             LIMIT ?"
+        );
+        // Full count first.
+        let full_count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {table} t
+                 WHERE t.deleted_at IS NOT NULL
+                   AND NOT EXISTS (
+                     SELECT 1 FROM entity_audit a
+                     WHERE a.entity_type = ?1
+                       AND a.entity_id = t.id
+                       AND a.kind IN ({kinds})
+                   )"
+            ),
+            params![entity_type],
+            |r| r.get(0),
+        )?;
+        count += full_count as usize;
+
+        let remaining = APPEND_FINDINGS_LIMIT.saturating_sub(findings.len());
+        if remaining == 0 {
+            continue;
+        }
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![entity_type, remaining as i64], |r| {
+            r.get::<_, i64>(0)
+        })?;
+        for row in rows {
+            let id = row?;
+            findings.push(AppendFinding {
+                entity: (*entity_type).to_string(),
+                id,
+                detail: Some("deleted_at set without soft_delete/supersede audit".into()),
+            });
+        }
+    }
+
+    Ok(AppendFindingGroup {
+        ok: count == 0,
+        count,
+        findings,
+    })
+}
+
+fn find_orphan_updates(conn: &Connection) -> Result<AppendFindingGroup> {
+    let mut findings = Vec::new();
+    let mut count = 0usize;
+
+    let kinds = format!(
+        "'{}', '{}'",
+        entity_audit::kind::UPDATE,
+        entity_audit::kind::CORRECT
+    );
+
+    for (table, entity_type) in UPDATE_TRACKED {
+        let full_count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {table} t
+                 WHERE t.updated_at IS NOT NULL
+                   AND t.updated_at != t.created_at
+                   AND NOT EXISTS (
+                     SELECT 1 FROM entity_audit a
+                     WHERE a.entity_type = ?1
+                       AND a.entity_id = t.id
+                       AND a.kind IN ({kinds})
+                   )"
+            ),
+            params![entity_type],
+            |r| r.get(0),
+        )?;
+        count += full_count as usize;
+
+        let remaining = APPEND_FINDINGS_LIMIT.saturating_sub(findings.len());
+        if remaining == 0 {
+            continue;
+        }
+        let sql = format!(
+            "SELECT t.id, t.created_at, t.updated_at FROM {table} t
+             WHERE t.updated_at IS NOT NULL
+               AND t.updated_at != t.created_at
+               AND NOT EXISTS (
+                 SELECT 1 FROM entity_audit a
+                 WHERE a.entity_type = ?1
+                   AND a.entity_id = t.id
+                   AND a.kind IN ({kinds})
+               )
+             ORDER BY t.id
+             LIMIT ?"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![entity_type, remaining as i64], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, created_at, updated_at) = row?;
+            findings.push(AppendFinding {
+                entity: (*entity_type).to_string(),
+                id,
+                detail: Some(format!(
+                    "updated_at ({updated_at}) != created_at ({created_at}) without update/correct audit"
+                )),
+            });
+        }
+    }
+
+    Ok(AppendFindingGroup {
+        ok: count == 0,
+        count,
+        findings,
+    })
+}
+
+/// Run append-only integrity checks (F3a). Exit 1 when `ok` is false.
+pub fn handle_check_append(db_override: Option<&str>, json: bool, quiet: bool) -> Result<()> {
+    let conn = db::open_db(db_override)?;
+    let schema = check_append_schema(&conn)?;
+    // Orphan scans require entity_audit; if missing, schema already fails.
+    let (orphan_soft_deletes, orphan_updates) =
+        if schema.missing_tables.iter().any(|t| t == "entity_audit") {
+            (
+                AppendFindingGroup {
+                    ok: true,
+                    count: 0,
+                    findings: vec![],
+                },
+                AppendFindingGroup {
+                    ok: true,
+                    count: 0,
+                    findings: vec![],
+                },
+            )
+        } else {
+            (
+                find_orphan_soft_deletes(&conn)?,
+                find_orphan_updates(&conn)?,
+            )
+        };
+
+    let ok = schema.ok && orphan_soft_deletes.ok && orphan_updates.ok;
+    let report = AppendReport {
+        ok,
+        schema,
+        orphan_soft_deletes,
+        orphan_updates,
+        policy: append_policy_notes(),
+    };
+
+    if json {
+        print_json(&report);
+    } else if quiet {
+        if report.ok {
+            println!("ok");
+        } else {
+            println!("append-only issues");
+        }
+    } else {
+        print_append_human(&report);
+    }
+
+    if !report.ok {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn print_append_human(report: &AppendReport) {
+    println!("Append-only integrity check");
+    if report.schema.ok {
+        println!("  schema: OK");
+    } else {
+        println!("  schema: FAIL");
+        for t in &report.schema.missing_tables {
+            println!("    missing table: {t}");
+        }
+        for c in &report.schema.missing_columns {
+            println!("    missing column: {c}");
+        }
+    }
+
+    print_finding_group("orphan soft-deletes", &report.orphan_soft_deletes);
+    print_finding_group("orphan updates", &report.orphan_updates);
+
+    if report.ok {
+        println!("OK — append-only integrity holds.");
+    } else {
+        println!("FAIL — see findings (inspect via … audit <id>).");
+    }
+}
+
+fn print_finding_group(name: &str, g: &AppendFindingGroup) {
+    if g.ok {
+        println!("  {name}: OK (0)");
+    } else {
+        println!("  {name}: {} issue(s)", g.count);
+        for f in &g.findings {
+            match &f.detail {
+                Some(d) => println!("    {} {} — {d}", f.entity, f.id),
+                None => println!("    {} {}", f.entity, f.id),
+            }
+        }
+        if g.count > g.findings.len() {
+            println!(
+                "    … and {} more (use --json for count; cap {})",
+                g.count - g.findings.len(),
+                APPEND_FINDINGS_LIMIT
+            );
+        }
     }
 }

@@ -9,6 +9,7 @@ This document defines the coding standards for the unified `recomplog` project.
 - High-quality Rust without over-engineering.
 - Quality data → quality reports → actionable reports (see `AGENTS.md` philosophy).
 - **Append only — no exceptions. Never, nowhere.** (see `AGENTS.md` philosophy).
+- **No snapshots — no exceptions. Never, nowhere.** (see `AGENTS.md` philosophy).
 
 ## Core Principles
 
@@ -30,6 +31,10 @@ This document defines the coding standards for the unified `recomplog` project.
      event rows. If you need a different past, append a new fact (or supersede/void
      when that model exists) — do not UPDATE/DELETE history as the product path.
    - Catalog/config may update or merge; that is not event history.
+   - **No new bulk `UPDATE` of event payload columns** on
+     `consumptions` / `purchases` / `exercise_sets` / `measurements` / `sleep` /
+     `workouts` outside supersede soft-delete, soft-delete helpers, lifecycle fills,
+     and documented migration one-shots. Prefer `db check append` as a machine check.
    - Imports append and stay idempotent; never replace a domain’s history as a side effect.
    - Keep event time vs storage time distinct when appending late entries.
    - No day-level uniqueness on event logs (measurements/sleep multi-sample; same for
@@ -53,25 +58,41 @@ This document defines the coding standards for the unified `recomplog` project.
      `UPDATE` sibling `set_number`. Readers use `effective_set_order` (display `set_number`
      is derived 1..n). See `src/set_order.rs` and reports/append/F4.
 
-4. **Data quality and actionable reports**
+4. **No snapshots — no exceptions. Never, nowhere.**
+   - Do **not** denormalize mutable catalog/config/profile/derived state onto event
+     rows for “report integrity” or “facts at log time.” No domain is exempt.
+   - **Do not implement:** side tables or columns that freeze reference data at write;
+     versioned as-of catalogs (`effective_from` for historical report joins); report
+     flags that prefer stale copies over live resolution.
+   - **Do implement:** live joins at report time; correct the source of truth when facts
+     were wrong; use `… audit` / `entity_audit` when agents need *when something changed*.
+   - **Nutrition (worked example):** meal totals always join current `product_nutritions`
+     (+ micros). Correcting macros **must** recompute historical totals. See
+     `reports/append/F2-no-nutrition-snapshot-on-consumption.md` (closed by design).
+   - **Not snapshots:** user-asserted event fields; append-only trails (`entity_audit`,
+     `set_order_revisions`, supersede chains); raw device/import event payloads.
+
+5. **Data quality and actionable reports**
    - Protect event-time integrity and refuse garbage on write when possible.
    - Reports should surface what to do next (gaps, trends, summaries), not only raw dumps.
    - Prefer decision-ready output over decorative metrics.
+   - Report integrity means **correct sources of truth**, not frozen denormalized copies.
+     Fix catalog/config; historical aggregates should move with them.
 
-5. **Formatting & Style**
+6. **Formatting & Style**
    - `cargo fmt` before every commit (respects `rustfmt.toml`).
    - Max width 100.
    - 4-space indent.
 
-6. **Linting**
+7. **Linting**
    - `cargo clippy -- -D warnings` before committing.
    - See `clippy.toml`.
 
-7. **Error Handling**
+8. **Error Handling**
    - No `unwrap()`, `expect()`, or `panic!` in production paths.
    - Never silently drop errors.
 
-8. **Database**
+9. **Database**
    - All changes via migrations in `migrations/`.
    - Foreign keys on.
    - **Two clocks:** event time (when the user says it happened) vs storage time
@@ -85,13 +106,14 @@ This document defines the coding standards for the unified `recomplog` project.
    - Never rely on SQLite `datetime('now')` for new rows; always set timestamps from Rust.
    - Event tables must be append-friendly: no uniqueness that forces rewrite of
      history (e.g. no `UNIQUE` on event calendar day).
+   - No snapshot columns for live catalog/config on event rows (see principle 4).
 
-9. **Testing**
+10. **Testing**
    - Unit tests for logic.
    - Integration tests via `assert_cmd`.
    - Fast tests.
 
-10. **Documentation**
+11. **Documentation**
    - Public items get doc comments.
    - CLI help is primary docs.
    - Detailed guides live in `docs/`.

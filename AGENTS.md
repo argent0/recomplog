@@ -19,6 +19,12 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
   - Existing `update` / `delete` on log rows are **legacy correction debt**, not a model for new work. New features must not depend on them. Prefer append (or future supersede/tombstone) over rewrite.
   - Prefer **`… correct`** (supersede chain: new row + soft-delete old + `kind: supersede`) for honest event corrections. Available: consumption, purchase, measurement, sleep, set; empty workouts. Inspect via `… audit <id>` (`current.supersedes_id`) and `report brief` → `corrections`.
   - Event `update` is classified: **lifecycle** (fill nulls, e.g. first `finished_at`) vs **correction** (overwrite settled values). Corrections require `--reason` and write audit `kind: correct`. Prefer supersede `correct` over in-place correction when available.
+- **No snapshots — no exceptions. Never, nowhere.**
+  - Do **not** freeze catalog, config, profile, or other mutable reference data onto event rows “as of log time” (no denormalized side columns, side tables, JSON blobs, or versioned as-of catalogs for report integrity).
+  - Events store **what the user asserted** (product id, quantity/unit, reps/weight, calendar day, instants, …). Everything else reports need is **resolved live** at read time from current catalog/config/related events.
+  - Correcting the source of truth **must** recompute historical reports that depend on it. That is intentional, not a bug to paper over with snapshots.
+  - **Nutrition (canonical example):** consumptions have no macro/micro/ref snapshot; reports join live `product_nutritions`. `nutrition product nutrition set` updates every past meal total for that product. Inspect catalog change history via `product audit` (`kind: catalog`), never by freezing meal labels.
+  - **Not** “snapshots” (these are allowed and different): the event row itself; append-only trails (`entity_audit`, `set_order_revisions`, supersede chains); device/import payloads logged as events (e.g. trackpoints). Those are facts or append-only history — not frozen copies of mutable catalog.
 - **Quality data produces quality reports. Quality reports are actionable reports.**
   - Logging, imports, sanity checks, and `db check` exist so the data is trustworthy.
   - Reports (`report brief`, domain summaries, HTML) exist so the user (or agent) can act — not just stare at numbers.
@@ -31,7 +37,7 @@ It is a **single-user, local-first, LLM-agent-first** CLI tool for body recompos
    - Training: `workout create|list|show|delete`, `workout exercise ...`, `workout set add|add-cardio|delete`
    - Body: `body measurement ...`, `body sleep ...`, `body profile ...`
    - Nutrition: `nutrition product|purchase|consumption|micronutrient|infoods ...`
-   - Cross-cutting: `report` (including `report brief`), `import`, `config`, `db` (`backup`, `migrate`, `check` / `check missing`)
+   - Cross-cutting: `report` (including `report brief`), `import`, `config`, `db` (`backup`, `migrate`, `check` / `check missing` / `check append`)
 3. **Always** support `--json` for data-returning commands.
 4. Run `cargo fmt && cargo clippy -- -D warnings && cargo test` before finishing changes.
 5. Use the provided `clippy.toml` and `rustfmt.toml`.
@@ -106,6 +112,7 @@ When adding or improving import:
 - Using `unwrap()` / `expect()` / `panic!` on normal paths.
 - Silent data loss during legacy imports.
 - Features that treat bulk rewrite of historical event rows as the normal path (violates append-only).
+- **Snapshots of any kind** — freezing catalog/config/derived facts onto events “as of log time,” versioned as-of catalogs for reports, or modes that prefer stale denormalized copies over live joins. Correct the source of truth; reports recompute. (Applies everywhere, not only nutrition.)
 
 ## Quick Commands
 
@@ -173,6 +180,7 @@ recomplog db backup
 recomplog --json db backup --to ~/backups/
 recomplog --json db check missing --days 7 --workout-days 3
 recomplog --json db check missing --days 7 --workout-days 3 --skip-today
+recomplog --json db check append   # orphan soft-deletes/updates without entity_audit
 # Micronutrients: prefer INFOODS tags for classics; product set auto-links exact INFOODS names
 recomplog --json nutrition infoods search "iron"
 recomplog --json nutrition micronutrient create Iron --unit mg --infoods FE
