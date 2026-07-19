@@ -205,6 +205,33 @@ pub enum WorkoutAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Append a correcting workout session that supersedes an existing one.
+    ///
+    /// Inserts a new workout with `supersedes_id` and soft-deletes the old head.
+    /// Refused when the old session still has live sets (those would vanish from
+    /// reports). Use `workout set correct` for set-level mistakes; lifecycle fills
+    /// (e.g. first finished_at) may still use `workout update`.
+    Correct {
+        #[arg(add = ArgValueCompleter::new(completion::complete_workout))]
+        id: i64,
+        #[arg(long = "type")]
+        workout_type: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long)]
+        duration: Option<i32>,
+        #[arg(long)]
+        feeling: Option<i32>,
+        #[arg(long)]
+        started_at: Option<String>,
+        #[arg(long = "finished-at")]
+        finished_at: Option<String>,
+        /// Required non-empty reason.
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Soft-delete a workout (default) or hard-purge with --purge.
     ///
     /// Soft-delete sets `deleted_at` and keeps the session tree for audit.
@@ -661,6 +688,64 @@ pub enum SetAction {
         #[arg(long)]
         reason: Option<String>,
         /// Validate and show resolved payload without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Append a correcting set that supersedes an existing set (append-only).
+    ///
+    /// Inserts a new set on the same workout-exercise with `supersedes_id` and
+    /// soft-deletes the old head. Omitted fields copy from the old set. Requires
+    /// `--reason`. Prefer this over in-place `update` for honest corrections.
+    Correct {
+        id: i64,
+        #[arg(long)]
+        reps: Option<i32>,
+        #[arg(long)]
+        weight: Option<f64>,
+        #[arg(long = "external-load")]
+        external_load: Option<f64>,
+        #[arg(long)]
+        duration: Option<i32>,
+        #[arg(long)]
+        distance: Option<f64>,
+        #[arg(long)]
+        rpe: Option<f64>,
+        #[arg(long)]
+        rir: Option<f64>,
+        #[arg(long = "effective-reps")]
+        effective_reps: Option<i32>,
+        #[arg(long = "rest")]
+        rest_seconds: Option<i32>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(
+            long,
+            value_parser = ["left", "right", "both"],
+            add = ArgValueCompleter::new(completion::complete_side)
+        )]
+        side: Option<String>,
+        #[arg(long, add = ArgValueCompleter::new(completion::complete_phase))]
+        phase: Option<String>,
+        #[arg(long = "avg-heart-rate")]
+        avg_heart_rate: Option<f64>,
+        #[arg(long = "max-heart-rate")]
+        max_heart_rate: Option<f64>,
+        #[arg(long)]
+        pace: Option<f64>,
+        #[arg(long)]
+        calories: Option<i32>,
+        #[arg(long)]
+        cadence: Option<f64>,
+        #[arg(long)]
+        ascent: Option<f64>,
+        #[arg(long)]
+        descent: Option<f64>,
+        #[arg(long = "hr-zones")]
+        hr_zones: Option<String>,
+        #[arg(long)]
+        laps: Option<String>,
+        #[arg(long)]
+        reason: String,
         #[arg(long)]
         dry_run: bool,
     },

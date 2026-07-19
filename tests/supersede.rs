@@ -451,6 +451,177 @@ fn sleep_correct_supersedes() {
 }
 
 #[test]
+fn workout_correct_empty_session() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    let created = json_stdout(
+        bin()
+            .args(["--db", &db, "--json", "workout", "create", "--type", "Push"])
+            .assert()
+            .success(),
+    );
+    let old_id = created["id"].as_i64().unwrap();
+
+    let corrected = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "workout",
+                "correct",
+                &old_id.to_string(),
+                "--type",
+                "Pull",
+                "--reason",
+                "wrong template",
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(corrected["mode"], "supersede");
+    assert_eq!(corrected["supersedes_id"], old_id);
+}
+
+#[test]
+fn workout_correct_refuses_when_live_sets() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args(["--db", &db, "--json", "workout", "create", "--type", "Push"])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "exercise",
+            "create",
+            "bench press",
+            "--category",
+            "strength",
+        ])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "set",
+            "add",
+            "--workout",
+            "1",
+            "--exercise",
+            "bench press",
+            "--reps",
+            "5",
+            "--weight",
+            "100",
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .args([
+            "--db", &db, "--json", "workout", "correct", "1", "--type", "Pull", "--reason", "nope",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("live set"));
+}
+
+#[test]
+fn set_correct_supersedes() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("t.db").display().to_string();
+
+    bin()
+        .args(["--db", &db, "--json", "workout", "create", "--type", "Push"])
+        .assert()
+        .success();
+    bin()
+        .args([
+            "--db",
+            &db,
+            "--json",
+            "workout",
+            "exercise",
+            "create",
+            "squat",
+            "--category",
+            "strength",
+        ])
+        .assert()
+        .success();
+    let added = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "workout",
+                "set",
+                "add",
+                "--workout",
+                "1",
+                "--exercise",
+                "squat",
+                "--reps",
+                "5",
+                "--weight",
+                "100",
+            ])
+            .assert()
+            .success(),
+    );
+    let old_id = added["id"].as_i64().unwrap();
+
+    let corrected = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "workout",
+                "set",
+                "correct",
+                &old_id.to_string(),
+                "--reps",
+                "6",
+                "--reason",
+                "miscount",
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(corrected["mode"], "supersede");
+    assert_eq!(corrected["supersedes_id"], old_id);
+    assert_eq!(corrected["reps"], 6);
+
+    let audit = json_stdout(
+        bin()
+            .args([
+                "--db",
+                &db,
+                "--json",
+                "workout",
+                "set",
+                "audit",
+                &corrected["id"].as_i64().unwrap().to_string(),
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(audit["current"]["supersedes_id"], old_id);
+}
+
+#[test]
 fn purchase_correct_supersedes() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("t.db").display().to_string();

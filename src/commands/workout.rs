@@ -329,6 +329,30 @@ pub fn handle(
             }
             Ok(())
         }
+        WorkoutAction::Correct {
+            id,
+            workout_type,
+            notes,
+            duration,
+            feeling,
+            started_at,
+            finished_at,
+            reason,
+            dry_run,
+        } => handle_workout_correct(
+            db_override,
+            id,
+            workout_type,
+            notes,
+            duration,
+            feeling,
+            started_at,
+            finished_at,
+            reason,
+            dry_run,
+            json,
+            quiet,
+        ),
         WorkoutAction::Delete {
             id,
             reason,
@@ -2973,6 +2997,61 @@ fn handle_set(
             }
             Ok(())
         }
+        SetAction::Correct {
+            id,
+            reps,
+            weight,
+            external_load,
+            duration,
+            distance,
+            rpe,
+            rir,
+            effective_reps,
+            rest_seconds,
+            notes,
+            side,
+            phase,
+            avg_heart_rate,
+            max_heart_rate,
+            pace,
+            calories,
+            cadence,
+            ascent,
+            descent,
+            hr_zones,
+            laps,
+            reason,
+            dry_run,
+        } => handle_set_correct(
+            db_override,
+            limits,
+            id,
+            reps,
+            weight,
+            external_load,
+            duration,
+            distance,
+            rpe,
+            rir,
+            effective_reps,
+            rest_seconds,
+            notes,
+            side,
+            phase,
+            avg_heart_rate,
+            max_heart_rate,
+            pace,
+            calories,
+            cadence,
+            ascent,
+            descent,
+            hr_zones,
+            laps,
+            reason,
+            dry_run,
+            json,
+            quiet,
+        ),
         SetAction::Move { id, to, dry_run } => {
             if to < 1 {
                 return Err(anyhow!("--to must be >= 1"));
@@ -3257,12 +3336,634 @@ fn emit_delete_result(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn handle_workout_correct(
+    db_override: Option<&str>,
+    old_id: i64,
+    workout_type: Option<String>,
+    notes: Option<String>,
+    duration: Option<i32>,
+    feeling: Option<i32>,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    reason: String,
+    dry_run: bool,
+    json: bool,
+    quiet: bool,
+) -> Result<()> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(anyhow!("workout correct requires a non-empty --reason"));
+    }
+    let conn = db::open_db(db_override)?;
+    type WorkoutRow = (
+        Option<String>, // deleted_at
+        Option<String>, // workout_type
+        Option<String>, // notes
+        Option<i64>,    // duration_minutes
+        Option<i64>,    // overall_feeling
+        String,         // started_at
+        Option<String>, // finished_at
+    );
+    let before: Option<WorkoutRow> = conn
+        .query_row(
+            "SELECT deleted_at, workout_type, notes, duration_minutes, overall_feeling, \
+             started_at, finished_at FROM workouts WHERE id=?1",
+            [old_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (old_type, old_notes, old_duration, old_feeling, old_started, old_finished) = match before {
+        None => return Err(anyhow!("workout {old_id} not found")),
+        Some((Some(_), ..)) => {
+            return Err(anyhow!(
+                "workout {old_id} is already soft-deleted (cannot supersede)"
+            ));
+        }
+        Some((None, t, n, d, f, s, fin)) => (t, n, d, f, s, fin),
+    };
+    let live_sets: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM exercise_sets s
+         JOIN workout_exercises we ON we.id = s.workout_exercise_id
+         WHERE we.workout_id = ?1 AND s.deleted_at IS NULL",
+        [old_id],
+        |r| r.get(0),
+    )?;
+    if live_sets > 0 {
+        return Err(anyhow!(
+            "workout {old_id} has {live_sets} live set(s); superseding the session would hide them \
+             from reports. Use `workout set correct` for set mistakes, or `workout update` for \
+             lifecycle fills (e.g. finished_at) without moving the tree"
+        ));
+    }
+    if let Some(f) = feeling {
+        if !(1..=5).contains(&f) {
+            return Err(anyhow!("feeling must be 1-5"));
+        }
+    }
+    let new_type = workout_type.or(old_type.clone());
+    let new_notes = notes.or(old_notes.clone());
+    let new_duration = duration.map(|d| d as i64).or(old_duration);
+    let new_feeling = feeling.map(|f| f as i64).or(old_feeling);
+    let new_started = if let Some(s) = started_at {
+        parse_rfc3339_instant_for_db(&s)?
+    } else {
+        old_started.clone()
+    };
+    let new_finished = if let Some(s) = finished_at {
+        Some(parse_rfc3339_instant_for_db(&s)?)
+    } else {
+        old_finished.clone()
+    };
+    let mut changes: Vec<entity_audit::FieldChange> = Vec::new();
+    if new_type != old_type {
+        changes.push(entity_audit::FieldChange::new(
+            "workout_type",
+            opt_str_json(old_type.as_deref()),
+            opt_str_json(new_type.as_deref()),
+        ));
+    }
+    if new_notes != old_notes {
+        changes.push(entity_audit::FieldChange::new(
+            "notes",
+            opt_str_json(old_notes.as_deref()),
+            opt_str_json(new_notes.as_deref()),
+        ));
+    }
+    if new_duration != old_duration {
+        changes.push(entity_audit::FieldChange::new(
+            "duration_minutes",
+            opt_i64_json(old_duration),
+            opt_i64_json(new_duration),
+        ));
+    }
+    if new_feeling != old_feeling {
+        changes.push(entity_audit::FieldChange::new(
+            "overall_feeling",
+            opt_i64_json(old_feeling),
+            opt_i64_json(new_feeling),
+        ));
+    }
+    if new_started != old_started {
+        changes.push(entity_audit::FieldChange::new(
+            "started_at",
+            serde_json::json!(old_started),
+            serde_json::json!(new_started),
+        ));
+    }
+    if new_finished != old_finished {
+        changes.push(entity_audit::FieldChange::new(
+            "finished_at",
+            opt_str_json(old_finished.as_deref()),
+            opt_str_json(new_finished.as_deref()),
+        ));
+    }
+    if dry_run {
+        return emit_dry_run(
+            json,
+            quiet,
+            serde_json::json!({
+                "action": "workout correct",
+                "mode": "supersede",
+                "supersedes_id": old_id,
+                "reason": reason,
+                "fields": changes.iter().map(|f| serde_json::json!({
+                    "name": f.name, "old": f.old, "new": f.new
+                })).collect::<Vec<_>>(),
+            }),
+        );
+    }
+    let created = db::now_utc();
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO workouts (started_at, finished_at, workout_type, notes, duration_minutes, \
+         overall_feeling, created_at, supersedes_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            new_started,
+            new_finished,
+            new_type,
+            new_notes,
+            new_duration,
+            new_feeling,
+            created,
+            old_id
+        ],
+    )?;
+    let new_id = tx.last_insert_rowid();
+    entity_audit::append_supersede_create(
+        &tx,
+        entity_audit::entity::WORKOUT,
+        new_id,
+        old_id,
+        reason,
+        Some(&changes),
+    )?;
+    let deleted_at = entity_audit::supersede_retire(
+        &tx,
+        "workouts",
+        entity_audit::entity::WORKOUT,
+        old_id,
+        new_id,
+        reason,
+        Some(&changes),
+    )?;
+    tx.commit()?;
+    if json {
+        print_json(&serde_json::json!({
+            "success": true,
+            "id": new_id,
+            "supersedes_id": old_id,
+            "mode": "supersede",
+            "started_at": new_started,
+            "finished_at": new_finished,
+            "created_at": created,
+            "old_deleted_at": deleted_at,
+            "reason": reason,
+            "message": "workout corrected (supersede)",
+        }));
+    } else {
+        quiet_print(
+            quiet,
+            format!("Workout {new_id} supersedes {old_id} (reason: {reason})"),
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_set_correct(
+    db_override: Option<&str>,
+    limits: &crate::config::WorkoutSanityLimits,
+    old_id: i64,
+    reps: Option<i32>,
+    weight: Option<f64>,
+    external_load: Option<f64>,
+    duration: Option<i32>,
+    distance: Option<f64>,
+    rpe: Option<f64>,
+    rir: Option<f64>,
+    effective_reps: Option<i32>,
+    rest_seconds: Option<i32>,
+    notes: Option<String>,
+    side: Option<String>,
+    phase: Option<String>,
+    avg_heart_rate: Option<f64>,
+    max_heart_rate: Option<f64>,
+    pace: Option<f64>,
+    calories: Option<i32>,
+    cadence: Option<f64>,
+    ascent: Option<f64>,
+    descent: Option<f64>,
+    hr_zones: Option<String>,
+    laps: Option<String>,
+    reason: String,
+    dry_run: bool,
+    json: bool,
+    quiet: bool,
+) -> Result<()> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(anyhow!("set correct requires a non-empty --reason"));
+    }
+    let conn = db::open_db(db_override)?;
+    let before = conn
+        .query_row(
+            "SELECT workout_exercise_id, set_number, reps, weight_kg, external_load_kg,
+                    duration_seconds, distance_km, rpe, rir, effective_reps, rest_seconds,
+                    notes, side, phase, avg_heart_rate_bpm, max_heart_rate_bpm,
+                    avg_pace_min_per_km, calories_burned, avg_cadence_spm, total_ascent_m,
+                    total_descent_m, heart_rate_zones, laps, cluster_id, deleted_at
+             FROM exercise_sets WHERE id=?1",
+            [old_id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<i32>>(2)?,
+                    r.get::<_, Option<f64>>(3)?,
+                    r.get::<_, Option<f64>>(4)?,
+                    r.get::<_, Option<i32>>(5)?,
+                    r.get::<_, Option<f64>>(6)?,
+                    r.get::<_, Option<f64>>(7)?,
+                    r.get::<_, Option<f64>>(8)?,
+                    r.get::<_, Option<i32>>(9)?,
+                    r.get::<_, Option<i32>>(10)?,
+                    r.get::<_, Option<String>>(11)?,
+                    r.get::<_, Option<String>>(12)?,
+                    r.get::<_, String>(13)?,
+                    r.get::<_, Option<f64>>(14)?,
+                    r.get::<_, Option<f64>>(15)?,
+                    r.get::<_, Option<f64>>(16)?,
+                    r.get::<_, Option<i32>>(17)?,
+                    r.get::<_, Option<f64>>(18)?,
+                    r.get::<_, Option<f64>>(19)?,
+                    r.get::<_, Option<f64>>(20)?,
+                    r.get::<_, Option<String>>(21)?,
+                    r.get::<_, Option<String>>(22)?,
+                    r.get::<_, Option<i64>>(23)?,
+                    r.get::<_, Option<String>>(24)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        we_id,
+        set_number,
+        old_reps,
+        old_weight,
+        old_external,
+        old_duration,
+        old_distance,
+        old_rpe,
+        old_rir,
+        old_effective,
+        old_rest,
+        old_notes,
+        old_side,
+        old_phase,
+        old_avg_hr,
+        old_max_hr,
+        old_pace,
+        old_calories,
+        old_cadence,
+        old_ascent,
+        old_descent,
+        old_zones,
+        old_laps,
+        cluster_id,
+        deleted_at,
+    )) = before
+    else {
+        return Err(anyhow!("set {old_id} not found"));
+    };
+    if deleted_at.is_some() {
+        return Err(anyhow!(
+            "set {old_id} is already soft-deleted (cannot supersede)"
+        ));
+    }
+    let new_reps = reps.or(old_reps);
+    let new_weight = weight.or(old_weight);
+    let new_external = external_load.or(old_external);
+    let new_duration = duration.or(old_duration);
+    let new_distance = distance.or(old_distance);
+    let new_rpe = rpe.or(old_rpe);
+    let new_rir = rir.or(old_rir);
+    let new_effective = effective_reps.or(old_effective);
+    let new_rest = rest_seconds.or(old_rest);
+    let new_notes = notes.or(old_notes.clone());
+    let new_side = side.or(old_side.clone());
+    let new_phase = if let Some(p) = phase {
+        phase::normalize_phase(&p)
+            .map(|v| v.to_string())
+            .map_err(|e| anyhow!("{e}"))?
+    } else {
+        old_phase.clone()
+    };
+    let new_avg_hr = avg_heart_rate.or(old_avg_hr);
+    let new_max_hr = max_heart_rate.or(old_max_hr);
+    let new_pace = pace.or(old_pace);
+    let new_calories = calories.or(old_calories);
+    let new_cadence = cadence.or(old_cadence);
+    let new_ascent = ascent.or(old_ascent);
+    let new_descent = descent.or(old_descent);
+    let zones = parse_hr_zones(hr_zones.as_deref())?;
+    let laps_v = parse_laps(laps.as_deref())?;
+    let new_zones_json = if let Some(z) = zones {
+        Some(serde_json::to_string(&z).map_err(|e| anyhow!("{e}"))?)
+    } else {
+        old_zones.clone()
+    };
+    let new_laps_json = if let Some(l) = laps_v {
+        Some(serde_json::to_string(&l.0).map_err(|e| anyhow!("{e}"))?)
+    } else {
+        old_laps.clone()
+    };
+    let proposed = ProposedSetMetrics {
+        reps: new_reps,
+        weight_kg: new_weight,
+        external_load_kg: new_external,
+        distance_km: new_distance,
+        duration_seconds: new_duration,
+        rpe: new_rpe,
+        rir: new_rir,
+        effective_reps: new_effective,
+        rest_seconds: new_rest,
+        avg_heart_rate_bpm: new_avg_hr,
+        max_heart_rate_bpm: new_max_hr,
+        avg_pace_min_per_km: new_pace,
+        calories_burned: new_calories,
+        avg_cadence_spm: new_cadence,
+        total_ascent_m: new_ascent,
+        total_descent_m: new_descent,
+        heart_rate_zones: new_zones_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok()),
+        laps: new_laps_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok()),
+    };
+    sanity::validate_set_metrics(&proposed, limits).map_err(|e| anyhow!("{e}"))?;
+
+    let mut changes: Vec<entity_audit::FieldChange> = Vec::new();
+    if new_reps != old_reps {
+        changes.push(entity_audit::FieldChange::new(
+            "reps",
+            opt_i32_json(old_reps),
+            opt_i32_json(new_reps),
+        ));
+    }
+    if new_weight != old_weight {
+        changes.push(entity_audit::FieldChange::new(
+            "weight_kg",
+            opt_f64_json(old_weight),
+            opt_f64_json(new_weight),
+        ));
+    }
+    if new_external != old_external {
+        changes.push(entity_audit::FieldChange::new(
+            "external_load_kg",
+            opt_f64_json(old_external),
+            opt_f64_json(new_external),
+        ));
+    }
+    if new_duration != old_duration {
+        changes.push(entity_audit::FieldChange::new(
+            "duration_seconds",
+            opt_i32_json(old_duration),
+            opt_i32_json(new_duration),
+        ));
+    }
+    if new_distance != old_distance {
+        changes.push(entity_audit::FieldChange::new(
+            "distance_km",
+            opt_f64_json(old_distance),
+            opt_f64_json(new_distance),
+        ));
+    }
+    if new_rpe != old_rpe {
+        changes.push(entity_audit::FieldChange::new(
+            "rpe",
+            opt_f64_json(old_rpe),
+            opt_f64_json(new_rpe),
+        ));
+    }
+    if new_rir != old_rir {
+        changes.push(entity_audit::FieldChange::new(
+            "rir",
+            opt_f64_json(old_rir),
+            opt_f64_json(new_rir),
+        ));
+    }
+    if new_effective != old_effective {
+        changes.push(entity_audit::FieldChange::new(
+            "effective_reps",
+            opt_i32_json(old_effective),
+            opt_i32_json(new_effective),
+        ));
+    }
+    if new_rest != old_rest {
+        changes.push(entity_audit::FieldChange::new(
+            "rest_seconds",
+            opt_i32_json(old_rest),
+            opt_i32_json(new_rest),
+        ));
+    }
+    if new_notes != old_notes {
+        changes.push(entity_audit::FieldChange::new(
+            "notes",
+            opt_str_json(old_notes.as_deref()),
+            opt_str_json(new_notes.as_deref()),
+        ));
+    }
+    if new_side != old_side {
+        changes.push(entity_audit::FieldChange::new(
+            "side",
+            opt_str_json(old_side.as_deref()),
+            opt_str_json(new_side.as_deref()),
+        ));
+    }
+    if new_phase != old_phase {
+        changes.push(entity_audit::FieldChange::new(
+            "phase",
+            serde_json::json!(old_phase),
+            serde_json::json!(new_phase),
+        ));
+    }
+    if new_avg_hr != old_avg_hr {
+        changes.push(entity_audit::FieldChange::new(
+            "avg_heart_rate_bpm",
+            opt_f64_json(old_avg_hr),
+            opt_f64_json(new_avg_hr),
+        ));
+    }
+    if new_max_hr != old_max_hr {
+        changes.push(entity_audit::FieldChange::new(
+            "max_heart_rate_bpm",
+            opt_f64_json(old_max_hr),
+            opt_f64_json(new_max_hr),
+        ));
+    }
+    if new_pace != old_pace {
+        changes.push(entity_audit::FieldChange::new(
+            "avg_pace_min_per_km",
+            opt_f64_json(old_pace),
+            opt_f64_json(new_pace),
+        ));
+    }
+    if new_calories != old_calories {
+        changes.push(entity_audit::FieldChange::new(
+            "calories_burned",
+            opt_i32_json(old_calories),
+            opt_i32_json(new_calories),
+        ));
+    }
+    if new_cadence != old_cadence {
+        changes.push(entity_audit::FieldChange::new(
+            "avg_cadence_spm",
+            opt_f64_json(old_cadence),
+            opt_f64_json(new_cadence),
+        ));
+    }
+    if new_ascent != old_ascent {
+        changes.push(entity_audit::FieldChange::new(
+            "total_ascent_m",
+            opt_f64_json(old_ascent),
+            opt_f64_json(new_ascent),
+        ));
+    }
+    if new_descent != old_descent {
+        changes.push(entity_audit::FieldChange::new(
+            "total_descent_m",
+            opt_f64_json(old_descent),
+            opt_f64_json(new_descent),
+        ));
+    }
+    if new_zones_json != old_zones {
+        changes.push(entity_audit::FieldChange::new(
+            "heart_rate_zones",
+            opt_str_json(old_zones.as_deref()),
+            opt_str_json(new_zones_json.as_deref()),
+        ));
+    }
+    if new_laps_json != old_laps {
+        changes.push(entity_audit::FieldChange::new(
+            "laps",
+            opt_str_json(old_laps.as_deref()),
+            opt_str_json(new_laps_json.as_deref()),
+        ));
+    }
+    if dry_run {
+        return emit_dry_run(
+            json,
+            quiet,
+            serde_json::json!({
+                "action": "set correct",
+                "mode": "supersede",
+                "supersedes_id": old_id,
+                "reason": reason,
+                "fields": changes.iter().map(|f| serde_json::json!({
+                    "name": f.name, "old": f.old, "new": f.new
+                })).collect::<Vec<_>>(),
+            }),
+        );
+    }
+    let created = db::now_utc();
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO exercise_sets
+         (workout_exercise_id, set_number, reps, weight_kg, external_load_kg,
+          distance_km, duration_seconds, rpe, rir, effective_reps, cluster_id, rest_seconds,
+          notes, side, phase, avg_heart_rate_bpm, max_heart_rate_bpm, avg_pace_min_per_km,
+          calories_burned, avg_cadence_spm, total_ascent_m, total_descent_m,
+          heart_rate_zones, laps, created_at, supersedes_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)",
+        params![
+            we_id,
+            set_number,
+            new_reps,
+            new_weight,
+            new_external,
+            new_distance,
+            new_duration,
+            new_rpe,
+            new_rir,
+            new_effective,
+            cluster_id,
+            new_rest,
+            new_notes,
+            new_side,
+            new_phase,
+            new_avg_hr,
+            new_max_hr,
+            new_pace,
+            new_calories,
+            new_cadence,
+            new_ascent,
+            new_descent,
+            new_zones_json,
+            new_laps_json,
+            created,
+            old_id
+        ],
+    )?;
+    let new_id = tx.last_insert_rowid();
+    entity_audit::append_supersede_create(
+        &tx,
+        entity_audit::entity::EXERCISE_SET,
+        new_id,
+        old_id,
+        reason,
+        Some(&changes),
+    )?;
+    let deleted_at = entity_audit::supersede_retire(
+        &tx,
+        "exercise_sets",
+        entity_audit::entity::EXERCISE_SET,
+        old_id,
+        new_id,
+        reason,
+        Some(&changes),
+    )?;
+    tx.commit()?;
+    if json {
+        print_json(&serde_json::json!({
+            "success": true,
+            "id": new_id,
+            "supersedes_id": old_id,
+            "mode": "supersede",
+            "reps": new_reps,
+            "weight_kg": new_weight,
+            "created_at": created,
+            "old_deleted_at": deleted_at,
+            "reason": reason,
+            "message": "set corrected (supersede)",
+        }));
+    } else {
+        quiet_print(
+            quiet,
+            format!("Set {new_id} supersedes {old_id} (reason: {reason})"),
+        );
+    }
+    Ok(())
+}
+
 fn handle_workout_audit(db_override: Option<&str>, id: i64, limit: i64, json: bool) -> Result<()> {
     let conn = db::open_db(db_override)?;
     let current = conn
         .query_row(
             "SELECT id, started_at, finished_at, workout_type, notes, overall_feeling, \
-             duration_minutes, created_at, deleted_at, delete_reason
+             duration_minutes, created_at, supersedes_id, deleted_at, delete_reason
              FROM workouts WHERE id = ?1",
             [id],
             |r| {
@@ -3275,8 +3976,9 @@ fn handle_workout_audit(db_override: Option<&str>, id: i64, limit: i64, json: bo
                     "overall_feeling": r.get::<_, Option<i64>>(5)?,
                     "duration_minutes": r.get::<_, Option<i64>>(6)?,
                     "created_at": r.get::<_, String>(7)?,
-                    "deleted_at": r.get::<_, Option<String>>(8)?,
-                    "delete_reason": r.get::<_, Option<String>>(9)?,
+                    "supersedes_id": r.get::<_, Option<i64>>(8)?,
+                    "deleted_at": r.get::<_, Option<String>>(9)?,
+                    "delete_reason": r.get::<_, Option<String>>(10)?,
                 }))
             },
         )
@@ -3300,7 +4002,7 @@ fn handle_set_audit(db_override: Option<&str>, id: i64, limit: i64, json: bool) 
     let current = conn
         .query_row(
             "SELECT id, workout_exercise_id, set_number, reps, weight_kg, created_at, \
-             deleted_at, delete_reason
+             supersedes_id, deleted_at, delete_reason
              FROM exercise_sets WHERE id = ?1",
             [id],
             |r| {
@@ -3311,8 +4013,9 @@ fn handle_set_audit(db_override: Option<&str>, id: i64, limit: i64, json: bool) 
                     "reps": r.get::<_, Option<i32>>(3)?,
                     "weight_kg": r.get::<_, Option<f64>>(4)?,
                     "created_at": r.get::<_, Option<String>>(5)?,
-                    "deleted_at": r.get::<_, Option<String>>(6)?,
-                    "delete_reason": r.get::<_, Option<String>>(7)?,
+                    "supersedes_id": r.get::<_, Option<i64>>(6)?,
+                    "deleted_at": r.get::<_, Option<String>>(7)?,
+                    "delete_reason": r.get::<_, Option<String>>(8)?,
                 }))
             },
         )

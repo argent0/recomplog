@@ -139,6 +139,9 @@ recomplog --json workout create --type Push --started-at 2026-07-14T17:00:00-03:
 # Lifecycle fill (no --reason): first finished_at on an open session
 recomplog --json workout update 1 --finished-at 2026-07-14T18:30:00-03:00
 # Correction overwrites need --reason; audit shows kind correct + fields
+# Prefer supersede correct when possible (empty session or set-level):
+recomplog --json workout correct 1 --type Pull --reason "wrong template"
+recomplog --json workout set correct 1 --reps 6 --reason "miscount"
 recomplog --json workout update 1 --finished-at 2026-07-14T19:00:00-03:00 --reason "clock typo"
 recomplog --json workout list --days 14
 # Soft-delete keeps history; --purge --force hard-removes CASCADE trees
