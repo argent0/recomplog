@@ -1,9 +1,10 @@
 use crate::cli::{
-    BodyReportAction, CheckArgs, CreateMeasurementArgs, DeleteArgs, ListArgs, MediansArgs,
-    ProfileAction, ProfileSetArgs, ReportRangeArgs, ShowArgs, SleepAction, SleepCreateArgs,
-    SleepUpdateArgs, SummaryArgs, UpdateMeasurementArgs,
+    AuditBodyArgs, BodyReportAction, CheckArgs, CreateMeasurementArgs, DeleteArgs, ListArgs,
+    MediansArgs, ProfileAction, ProfileSetArgs, ReportRangeArgs, ShowArgs, SleepAction,
+    SleepCreateArgs, SleepUpdateArgs, SummaryArgs, UpdateMeasurementArgs,
 };
 use crate::config::SanityLimits;
+use crate::entity_audit;
 use crate::error::{RecomplogError, Result};
 use crate::hr_zones::median_f64;
 use crate::models::{
@@ -86,6 +87,7 @@ pub fn handle_measurement(
             handle_update(repo, args, limits, json, quiet)
         }
         crate::cli::MeasurementAction::Delete(args) => handle_delete(repo, args, json, quiet),
+        crate::cli::MeasurementAction::Audit(args) => handle_measurement_audit(repo, args, json),
     }
 }
 
@@ -1479,6 +1481,181 @@ fn handle_update(
     Ok(())
 }
 
+fn handle_measurement_audit(repo: &mut Repository, args: AuditBodyArgs, json: bool) -> Result<()> {
+    let (id, date) = resolve_identifier(args.id, args.date)?;
+    let limit = args.limit;
+    let conn = repo.conn();
+
+    let ids: Vec<i64> = if let Some(i) = id {
+        vec![i]
+    } else if let Some(d) = date {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM measurements WHERE date = ?1 ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows: Vec<i64> = stmt
+            .query_map([&d], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if rows.is_empty() {
+            return Err(RecomplogError::MeasurementNotFoundForDate(d));
+        }
+        rows
+    } else {
+        unreachable!()
+    };
+
+    let mut envelopes = Vec::with_capacity(ids.len());
+    for sample_id in ids {
+        let current = fetch_measurement_audit_current(conn, sample_id)?;
+        let history =
+            entity_audit::list_history(conn, entity_audit::entity::MEASUREMENT, sample_id, limit)
+                .map_err(|e| RecomplogError::Other(e.to_string()))?;
+        if current.is_none() && history.is_empty() {
+            return Err(RecomplogError::MeasurementNotFound(sample_id));
+        }
+        envelopes.push(entity_audit::audit_response(
+            entity_audit::entity::MEASUREMENT,
+            sample_id,
+            current,
+            history,
+        ));
+    }
+
+    emit_body_audit_envelopes(envelopes, json)
+}
+
+fn fetch_measurement_audit_current(
+    conn: &rusqlite::Connection,
+    id: i64,
+) -> Result<Option<serde_json::Value>> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "SELECT id, date, weight_kg, body_fat_pct, skeletal_muscle_pct, visceral_fat_level,
+                bmi, resting_metabolism_kcal, created_at, updated_at, deleted_at, delete_reason
+         FROM measurements WHERE id = ?1",
+        [id],
+        |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "date": r.get::<_, String>(1)?,
+                "weight_kg": r.get::<_, Option<f64>>(2)?,
+                "body_fat_pct": r.get::<_, Option<f64>>(3)?,
+                "skeletal_muscle_pct": r.get::<_, Option<f64>>(4)?,
+                "visceral_fat_level": r.get::<_, Option<i64>>(5)?,
+                "bmi": r.get::<_, Option<f64>>(6)?,
+                "resting_metabolism_kcal": r.get::<_, Option<i64>>(7)?,
+                "created_at": r.get::<_, String>(8)?,
+                "updated_at": r.get::<_, String>(9)?,
+                "deleted_at": r.get::<_, Option<String>>(10)?,
+                "delete_reason": r.get::<_, Option<String>>(11)?,
+            }))
+        },
+    )
+    .optional()
+    .map_err(|e| RecomplogError::Other(e.to_string()))
+}
+
+fn handle_sleep_audit(repo: &mut Repository, args: AuditBodyArgs, json: bool) -> Result<()> {
+    let (id, date) = resolve_identifier(args.id, args.date)?;
+    let limit = args.limit;
+    let conn = repo.conn();
+
+    let ids: Vec<i64> = if let Some(i) = id {
+        vec![i]
+    } else if let Some(d) = date {
+        let mut stmt =
+            conn.prepare("SELECT id FROM sleep WHERE date = ?1 ORDER BY created_at ASC, id ASC")?;
+        let rows: Vec<i64> = stmt
+            .query_map([&d], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if rows.is_empty() {
+            return Err(RecomplogError::SleepNotFoundForDate(d));
+        }
+        rows
+    } else {
+        unreachable!()
+    };
+
+    let mut envelopes = Vec::with_capacity(ids.len());
+    for sample_id in ids {
+        let current = fetch_sleep_audit_current(conn, sample_id)?;
+        let history =
+            entity_audit::list_history(conn, entity_audit::entity::SLEEP, sample_id, limit)
+                .map_err(|e| RecomplogError::Other(e.to_string()))?;
+        if current.is_none() && history.is_empty() {
+            return Err(RecomplogError::SleepNotFound(sample_id));
+        }
+        envelopes.push(entity_audit::audit_response(
+            entity_audit::entity::SLEEP,
+            sample_id,
+            current,
+            history,
+        ));
+    }
+
+    emit_body_audit_envelopes(envelopes, json)
+}
+
+fn fetch_sleep_audit_current(
+    conn: &rusqlite::Connection,
+    id: i64,
+) -> Result<Option<serde_json::Value>> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "SELECT id, date, total_sleep_minutes, time_in_bed_minutes, created_at, updated_at,
+                deleted_at, delete_reason
+         FROM sleep WHERE id = ?1",
+        [id],
+        |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "date": r.get::<_, String>(1)?,
+                "total_sleep_minutes": r.get::<_, Option<i64>>(2)?,
+                "time_in_bed_minutes": r.get::<_, Option<i64>>(3)?,
+                "created_at": r.get::<_, String>(4)?,
+                "updated_at": r.get::<_, String>(5)?,
+                "deleted_at": r.get::<_, Option<String>>(6)?,
+                "delete_reason": r.get::<_, Option<String>>(7)?,
+            }))
+        },
+    )
+    .optional()
+    .map_err(|e| RecomplogError::Other(e.to_string()))
+}
+
+/// Single sample → one envelope; multi-sample day → `{ date, samples: [...] }`.
+fn emit_body_audit_envelopes(envelopes: Vec<serde_json::Value>, json: bool) -> Result<()> {
+    if envelopes.is_empty() {
+        return Err(RecomplogError::Other("no samples to audit".into()));
+    }
+    if envelopes.len() == 1 {
+        let resp = &envelopes[0];
+        if json {
+            print_json(resp);
+        } else {
+            entity_audit::print_audit_human(resp);
+        }
+        return Ok(());
+    }
+    let date = envelopes[0]["current"]["date"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    if json {
+        print_json(&serde_json::json!({
+            "success": true,
+            "date": date,
+            "count": envelopes.len(),
+            "samples": envelopes,
+        }));
+    } else {
+        println!("audit for date {date} ({} samples)", envelopes.len());
+        for resp in &envelopes {
+            entity_audit::print_audit_human(resp);
+        }
+    }
+    Ok(())
+}
+
 fn handle_delete(repo: &mut Repository, args: DeleteArgs, json: bool, quiet: bool) -> Result<()> {
     let (id, date) = resolve_identifier(args.id, args.date)?;
     let reason = args.reason.as_deref();
@@ -1972,6 +2149,7 @@ pub fn handle_sleep(
         SleepAction::Show(args) => handle_sleep_show(repo, args, json),
         SleepAction::Update(args) => handle_sleep_update(repo, args, limits, json, quiet),
         SleepAction::Delete(args) => handle_sleep_delete(repo, args, json, quiet),
+        SleepAction::Audit(args) => handle_sleep_audit(repo, args, json),
     }
 }
 

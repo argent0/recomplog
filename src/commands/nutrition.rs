@@ -687,6 +687,35 @@ fn handle_product(
         }
         ProductAction::TagAdd { id, tag } => tag_add_product(&conn, id, &tag, json, quiet)?,
         ProductAction::TagRemove { id, tag } => tag_remove_product(&conn, id, &tag, json, quiet)?,
+        ProductAction::Audit { id, limit } => {
+            handle_event_audit(
+                &conn,
+                "products",
+                entity_audit::entity::PRODUCT,
+                id,
+                limit,
+                json,
+                |c, i| {
+                    c.query_row(
+                        "SELECT id, name, created_at, updated_at, merged_into_id, retired_at
+                         FROM products WHERE id=?1",
+                        [i],
+                        |r| {
+                            Ok(serde_json::json!({
+                                "id": r.get::<_, i64>(0)?,
+                                "name": r.get::<_, String>(1)?,
+                                "created_at": r.get::<_, String>(2)?,
+                                "updated_at": r.get::<_, String>(3)?,
+                                "merged_into_id": r.get::<_, Option<i64>>(4)?,
+                                "retired_at": r.get::<_, Option<String>>(5)?,
+                            }))
+                        },
+                    )
+                    .optional()
+                    .map_err(Into::into)
+                },
+            )?;
+        }
     }
     Ok(())
 }
@@ -1856,23 +1885,7 @@ where
     if json {
         print_json(&resp);
     } else {
-        println!("{entity_type} {id} audit");
-        if resp["current"].is_null() {
-            println!("  current: (purged / missing)");
-        } else if let Some(del) = resp["current"]["deleted_at"].as_str() {
-            println!("  current: soft-deleted at {del}");
-        } else {
-            println!("  current: present");
-        }
-        if let Some(hist) = resp["history"].as_array() {
-            for h in hist {
-                let seq = h["seq"].as_i64().unwrap_or(0);
-                let at = h["at"].as_str().unwrap_or("?");
-                let kind = h["kind"].as_str().unwrap_or("?");
-                let summary = h["summary"].as_str().unwrap_or("");
-                println!("  {seq}. [{at}] {kind} {summary}");
-            }
-        }
+        entity_audit::print_audit_human(&resp);
     }
     Ok(())
 }
@@ -2003,6 +2016,35 @@ fn handle_micronutrient(
             } else {
                 quiet_print(quiet, format!("Deleted micronutrient {id}"));
             }
+        }
+        MicronutrientAction::Audit { id, limit } => {
+            handle_event_audit(
+                &conn,
+                "micronutrients",
+                entity_audit::entity::MICRONUTRIENT,
+                id,
+                limit,
+                json,
+                |c, i| {
+                    c.query_row(
+                        "SELECT id, name, unit, recommended_intake, created_at, infoods_tag
+                         FROM micronutrients WHERE id=?1",
+                        [i],
+                        |r| {
+                            Ok(serde_json::json!({
+                                "id": r.get::<_, i64>(0)?,
+                                "name": r.get::<_, String>(1)?,
+                                "unit": r.get::<_, String>(2)?,
+                                "recommended_intake": r.get::<_, Option<f64>>(3)?,
+                                "created_at": r.get::<_, String>(4)?,
+                                "infoods_tag": r.get::<_, Option<String>>(5)?,
+                            }))
+                        },
+                    )
+                    .optional()
+                    .map_err(Into::into)
+                },
+            )?;
         }
     }
     Ok(())
@@ -2512,6 +2554,31 @@ fn handle_store(
                 }
             }
         },
+        StoreAction::Audit { id, limit } => {
+            handle_event_audit(
+                &conn,
+                "stores",
+                entity_audit::entity::STORE,
+                id,
+                limit,
+                json,
+                |c, i| {
+                    c.query_row(
+                        "SELECT id, name, created_at FROM stores WHERE id=?1",
+                        [i],
+                        |r| {
+                            Ok(serde_json::json!({
+                                "id": r.get::<_, i64>(0)?,
+                                "name": r.get::<_, String>(1)?,
+                                "created_at": r.get::<_, String>(2)?,
+                            }))
+                        },
+                    )
+                    .optional()
+                    .map_err(Into::into)
+                },
+            )?;
+        }
     }
     Ok(())
 }

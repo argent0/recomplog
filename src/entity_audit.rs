@@ -16,7 +16,6 @@ pub mod kind {
     pub const PURGE: &str = "purge";
     #[allow(dead_code)]
     pub const RESTORE: &str = "restore";
-    #[allow(dead_code)]
     pub const CREATE: &str = "create";
 }
 
@@ -24,10 +23,14 @@ pub mod kind {
 pub mod entity {
     pub const WORKOUT: &str = "workout";
     pub const EXERCISE_SET: &str = "exercise_set";
+    pub const EXERCISE: &str = "exercise";
     pub const MEASUREMENT: &str = "measurement";
     pub const SLEEP: &str = "sleep";
     pub const CONSUMPTION: &str = "consumption";
     pub const PURCHASE: &str = "purchase";
+    pub const PRODUCT: &str = "product";
+    pub const STORE: &str = "store";
+    pub const MICRONUTRIENT: &str = "micronutrient";
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -301,13 +304,42 @@ pub fn list_history(
     Ok(out)
 }
 
+/// If no stored audit rows exist, synthesize a single `create` from `current.created_at`
+/// (S7a v0: inspectable history before writers cover every create path).
+pub fn enrich_history(current: &Option<JsonValue>, history: Vec<JsonValue>) -> Vec<JsonValue> {
+    if !history.is_empty() {
+        return history;
+    }
+    let Some(cur) = current else {
+        return history;
+    };
+    let Some(at) = cur.get("created_at").and_then(|v| v.as_str()) else {
+        return history;
+    };
+    if at.is_empty() {
+        return history;
+    }
+    vec![serde_json::json!({
+        "seq": 1,
+        "id": null,
+        "at": at,
+        "kind": kind::CREATE,
+        "actor": null,
+        "summary": "created (inferred from created_at)",
+        "fields": null,
+        "meta": { "synthetic": true },
+    })]
+}
+
 /// Build a standard audit response envelope.
+/// Applies synthetic create when history is empty and current has `created_at`.
 pub fn audit_response(
     entity: &str,
     id: i64,
     current: Option<JsonValue>,
     history: Vec<JsonValue>,
 ) -> JsonValue {
+    let history = enrich_history(&current, history);
     serde_json::json!({
         "success": true,
         "entity": entity,
@@ -316,6 +348,32 @@ pub fn audit_response(
         "history": history,
         "related": [],
     })
+}
+
+/// Human-readable audit dump (shared by command handlers).
+pub fn print_audit_human(resp: &JsonValue) {
+    let entity = resp["entity"].as_str().unwrap_or("?");
+    let id = resp["id"].as_i64().unwrap_or(0);
+    println!("{entity} {id} audit");
+    if resp["current"].is_null() {
+        println!("  current: (purged / missing)");
+    } else if let Some(del) = resp["current"]["deleted_at"].as_str() {
+        println!("  current: soft-deleted at {del}");
+    } else {
+        println!("  current: present");
+    }
+    if let Some(hist) = resp["history"].as_array() {
+        if hist.is_empty() {
+            println!("  history: (none)");
+        }
+        for h in hist {
+            let seq = h["seq"].as_i64().unwrap_or(0);
+            let at = h["at"].as_str().unwrap_or("?");
+            let kind = h["kind"].as_str().unwrap_or("?");
+            let summary = h["summary"].as_str().unwrap_or("");
+            println!("  {seq}. [{at}] {kind} {summary}");
+        }
+    }
 }
 
 /// Serialize cascade counts into a human multi-line summary.

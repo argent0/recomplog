@@ -28,12 +28,14 @@ recomplog workout show 42
 
 recomplog workout exercise list --search bench
 recomplog workout exercise create "incline dumbbell press" --category strength --equipment dumbbell
+recomplog --json workout exercise audit 3
 
 recomplog workout set add --workout 42 --exercise "bench press" --reps 5 --weight 100
 # body_mass exercises: --weight is optional when a body measurement exists
 recomplog workout set add --workout 42 --exercise "pull up" --reps 8
 # Preview without writing (also on set/workout/exercise mutators)
 recomplog --json workout set add --workout 42 --exercise "bench press" --reps 5 --weight 100 --dry-run
+recomplog --json workout set audit 1001
 ```
 
 ### Body Composition + Sleep
@@ -43,9 +45,12 @@ recomplog body measurement create --date today --weight-kg 80.5 --body-fat-pct 1
 recomplog body measurement list --days 30 --json
 recomplog body measurement medians --window 7 --days 7 --json
 recomplog body measurement show --date yesterday
+recomplog --json body measurement audit --id 3
+recomplog --json body measurement audit --date 2026-07-10
 
 recomplog body sleep create --date today --total-sleep "7h 45m"
 recomplog body sleep list --days 14
+recomplog --json body sleep audit --id 5
 ```
 
 ### Nutrition
@@ -54,6 +59,7 @@ recomplog body sleep list --days 14
 recomplog nutrition product create "Rolled Oats 1kg" --tags bulk,breakfast --json
 recomplog nutrition product list --json
 recomplog nutrition product search --name oats
+recomplog --json nutrition product audit 14
 
 # Merge duplicate products as catalog aliases (sources soft-retired; event product_ids unchanged)
 # Tags + nutrition gaps copy onto --into; list/search hide retired sources; show still works.

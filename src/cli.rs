@@ -339,6 +339,15 @@ pub enum ExerciseAction {
     Search {
         term: String,
     },
+    /// Inspect create/update history for an exercise (catalog).
+    Audit {
+        /// Exercise id or name.
+        #[arg(add = ArgValueCompleter::new(completion::complete_exercise))]
+        exercise: String,
+        /// Max history entries (default 50).
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
 }
 
 /// Set actions: `recomplog workout set <action>`
@@ -725,6 +734,8 @@ pub enum MeasurementAction {
     Update(UpdateMeasurementArgs),
     /// Delete a measurement.
     Delete(DeleteArgs),
+    /// Inspect create/soft-delete/purge history for a measurement.
+    Audit(AuditBodyArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -837,6 +848,20 @@ pub enum SleepAction {
     Update(SleepUpdateArgs),
     /// Delete a sleep entry.
     Delete(DeleteArgs),
+    /// Inspect create/soft-delete/purge history for a sleep entry.
+    Audit(AuditBodyArgs),
+}
+
+/// Args for `body measurement|sleep audit` (id or --date).
+#[derive(Args, Debug, Clone)]
+pub struct AuditBodyArgs {
+    #[arg(long)]
+    pub id: Option<i64>,
+    #[arg(long, add = ArgValueCompleter::new(completion::complete_date_shortcut))]
+    pub date: Option<String>,
+    /// Max history entries per sample (default 50).
+    #[arg(long, default_value_t = 50)]
+    pub limit: i64,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1068,6 +1093,14 @@ pub enum ProductAction {
         id: i64,
         tag: String,
     },
+    /// Inspect create/merge/rename history for a product (catalog).
+    Audit {
+        #[arg(add = ArgValueCompleter::new(completion::complete_product))]
+        id: i64,
+        /// Max history entries (default 50).
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -1257,6 +1290,13 @@ pub enum MicronutrientAction {
         #[arg(long)]
         force: bool,
     },
+    /// Inspect create/delete history for a micronutrient (catalog).
+    Audit {
+        id: i64,
+        /// Max history entries (default 50).
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
 }
 
 /// Read-only INFOODS reference catalog (`nutrition infoods …`).
@@ -1305,6 +1345,14 @@ pub enum StoreAction {
     Tag {
         #[command(subcommand)]
         action: TagModifyAction,
+    },
+    /// Inspect create/rename history for a store (catalog).
+    Audit {
+        #[arg(add = ArgValueCompleter::new(completion::complete_store))]
+        id: i64,
+        /// Max history entries (default 50).
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
     },
 }
 

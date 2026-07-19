@@ -1358,6 +1358,46 @@ fn handle_exercise(
                 }
             }
         }
+        ExerciseAction::Audit { exercise, limit } => {
+            let ex = resolve_exercise(&conn, &exercise)?;
+            let current = conn
+                .query_row(
+                    "SELECT id, name, category, equipment, load_type, muscle_groups, description,
+                            is_custom, created_at
+                     FROM exercises WHERE id = ?1",
+                    [ex.id],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "id": r.get::<_, i64>(0)?,
+                            "name": r.get::<_, String>(1)?,
+                            "category": r.get::<_, String>(2)?,
+                            "equipment": r.get::<_, Option<String>>(3)?,
+                            "load_type": r.get::<_, String>(4)?,
+                            "muscle_groups": r.get::<_, Option<String>>(5)?,
+                            "description": r.get::<_, Option<String>>(6)?,
+                            "is_custom": r.get::<_, Option<i64>>(7)?,
+                            "created_at": r.get::<_, String>(8)?,
+                        }))
+                    },
+                )
+                .optional()?;
+            let history =
+                entity_audit::list_history(&conn, entity_audit::entity::EXERCISE, ex.id, limit)?;
+            if current.is_none() && history.is_empty() {
+                return Err(anyhow!("exercise {} not found", ex.id));
+            }
+            let resp = entity_audit::audit_response(
+                entity_audit::entity::EXERCISE,
+                ex.id,
+                current,
+                history,
+            );
+            if json {
+                print_json(&resp);
+            } else {
+                entity_audit::print_audit_human(&resp);
+            }
+        }
     }
     Ok(())
 }
@@ -3020,7 +3060,7 @@ fn handle_workout_audit(db_override: Option<&str>, id: i64, limit: i64, json: bo
     if json {
         print_json(&resp);
     } else {
-        print_audit_human(&resp);
+        entity_audit::print_audit_human(&resp);
     }
     Ok(())
 }
@@ -3056,34 +3096,9 @@ fn handle_set_audit(db_override: Option<&str>, id: i64, limit: i64, json: bool) 
     if json {
         print_json(&resp);
     } else {
-        print_audit_human(&resp);
+        entity_audit::print_audit_human(&resp);
     }
     Ok(())
-}
-
-fn print_audit_human(resp: &serde_json::Value) {
-    let entity = resp["entity"].as_str().unwrap_or("?");
-    let id = resp["id"].as_i64().unwrap_or(0);
-    println!("{entity} {id} audit");
-    if resp["current"].is_null() {
-        println!("  current: (purged / missing)");
-    } else if let Some(del) = resp["current"]["deleted_at"].as_str() {
-        println!("  current: soft-deleted at {del}");
-    } else {
-        println!("  current: present");
-    }
-    if let Some(hist) = resp["history"].as_array() {
-        if hist.is_empty() {
-            println!("  history: (none)");
-        }
-        for h in hist {
-            let seq = h["seq"].as_i64().unwrap_or(0);
-            let at = h["at"].as_str().unwrap_or("?");
-            let kind = h["kind"].as_str().unwrap_or("?");
-            let summary = h["summary"].as_str().unwrap_or("");
-            println!("  {seq}. [{at}] {kind} {summary}");
-        }
-    }
 }
 
 /// Seed default exercises (idempotent).

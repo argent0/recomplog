@@ -133,8 +133,13 @@ recomplog --json workout list --days 14
 # Soft-delete keeps history; --purge --force hard-removes CASCADE trees
 recomplog --json workout delete 1 --reason "abandoned"
 recomplog --json workout audit 1
+recomplog --json workout exercise audit 3
+recomplog --json workout set audit 1
 recomplog --json nutrition consumption delete 88 --reason "duplicate"
 recomplog --json nutrition consumption audit 88
+recomplog --json nutrition product audit 14
+recomplog --json body measurement audit --id 3
+recomplog --json body sleep audit --date yesterday
 recomplog --json workout set add --workout 1 --exercise "bench press" --reps 5 --weight 100 --phase full
 # body_mass: --weight optional when a body measurement exists
 recomplog --json workout set add --workout 1 --exercise "pull up" --reps 8
