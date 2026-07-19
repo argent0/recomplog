@@ -35,6 +35,11 @@ This document defines the coding standards for the unified `recomplog` project.
      `consumptions` / `purchases` / `exercise_sets` / `measurements` / `sleep` /
      `workouts` outside supersede soft-delete, soft-delete helpers, lifecycle fills,
      and documented migration one-shots. Prefer `db check append` as a machine check.
+   - **DB-enforced write allow (F3b):** event row `UPDATE`/`DELETE` must run inside
+     `append_guard::with_write_allow` (ops: `soft_delete`, `supersede`, `lifecycle`,
+     `correct`, `purge`, `migrate`). SQLite triggers abort unguarded mutations.
+     INSERT stays open. Do not UPDATE/DELETE `entity_audit` (insert-only).
+     `set_order_revisions` is insert-only except CASCADE purge / migrate.
    - Imports append and stay idempotent; never replace a domain’s history as a side effect.
    - Keep event time vs storage time distinct when appending late entries.
    - No day-level uniqueness on event logs (measurements/sleep multi-sample; same for

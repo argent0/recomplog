@@ -338,7 +338,12 @@ impl Repository {
 
         // rusqlite wants &[&dyn ToSql] for execute. We convert.
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-        let affected = self.conn.execute(&sql, &param_refs[..])?;
+        let write_op = crate::append_guard::op_for_update_class(class);
+        let affected = crate::append_guard::with_write_allow(&self.conn, write_op, |conn| {
+            let n = conn.execute(&sql, &param_refs[..])?;
+            Ok(n)
+        })
+        .map_err(|e| RecomplogError::Other(e.to_string()))?;
         if affected == 0 {
             return Err(RecomplogError::MeasurementNotFound(id));
         }
@@ -963,7 +968,12 @@ impl Repository {
         params.push(Box::new(id));
 
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-        let affected = self.conn.execute(&sql, &param_refs[..])?;
+        let write_op = crate::append_guard::op_for_update_class(class);
+        let affected = crate::append_guard::with_write_allow(&self.conn, write_op, |conn| {
+            let n = conn.execute(&sql, &param_refs[..])?;
+            Ok(n)
+        })
+        .map_err(|e| RecomplogError::Other(e.to_string()))?;
         if affected == 0 {
             return Err(RecomplogError::SleepNotFound(id));
         }

@@ -1,3 +1,4 @@
+mod append_guard;
 mod bodyweight;
 mod cli;
 mod commands;

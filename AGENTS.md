@@ -180,7 +180,7 @@ recomplog db backup
 recomplog --json db backup --to ~/backups/
 recomplog --json db check missing --days 7 --workout-days 3
 recomplog --json db check missing --days 7 --workout-days 3 --skip-today
-recomplog --json db check append   # orphan soft-deletes/updates without entity_audit
+recomplog --json db check append   # schema + write-allow triggers + orphan soft-deletes/updates
 # Micronutrients: prefer INFOODS tags for classics; product set auto-links exact INFOODS names
 recomplog --json nutrition infoods search "iron"
 recomplog --json nutrition micronutrient create Iron --unit mg --infoods FE

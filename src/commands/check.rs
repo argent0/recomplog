@@ -1,5 +1,5 @@
 //! Completeness checks: missing daily logs and workout inactivity.
-//! Append-only integrity: `db check append` (F3a).
+//! Append-only integrity: `db check append` (F3a schema/orphans + F3b triggers).
 //!
 //! Sanity-limit audit remains in `body::handle_check`.
 
@@ -353,6 +353,8 @@ pub struct AppendSchemaReport {
     pub missing_tables: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub missing_columns: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_triggers: Vec<String>,
 }
 
 /// Full report from `recomplog db check append`.
@@ -379,17 +381,21 @@ pub struct AppendPolicyNotes {
 fn append_policy_notes() -> AppendPolicyNotes {
     AppendPolicyNotes {
         allowed_event_updates: vec![
-            "soft-delete: deleted_at / delete_reason via entity_audit::soft_delete",
-            "supersede: tombstone old head + INSERT new row (supersedes_id)",
-            "lifecycle: null→value fills (e.g. first finished_at) with audit kind update",
-            "legacy in-place correct: settled field overwrite with --reason + audit kind correct",
-            "body measurement/sleep: updated_at refresh only through repository update helpers",
+            "soft-delete: deleted_at / delete_reason via entity_audit::soft_delete (write allow soft_delete)",
+            "supersede: tombstone old head + INSERT new row (write allow supersede)",
+            "lifecycle: null→value fills (e.g. first finished_at) with audit kind update (write allow lifecycle)",
+            "legacy in-place correct: settled field overwrite with --reason + audit kind correct (write allow correct)",
+            "purge: hard DELETE under write allow purge (CASCADE children need same connection allow)",
+            "body measurement/sleep: updated_at only through repository update helpers",
+            "DB triggers (v13/F3b): event UPDATE/DELETE denied unless _recomplog_write_allow has op",
         ],
         forbidden: vec![
             "bulk UPDATE of consumptions/purchases/exercise_sets/measurements/sleep/workouts payload outside helpers",
             "silent re-run of unit normalizers on open/import (I2/I3)",
             "INSERT OR REPLACE of event rows (I1)",
             "set_number sibling renumber on move (use set_order_revisions / F4)",
+            "UPDATE/DELETE entity_audit or set_order_revisions outside migrate (and purge CASCADE for revisions)",
+            "raw event UPDATE/DELETE without append_guard::with_write_allow",
         ],
         legacy_debt: vec![
             "event update still overwrites some settled fields (prefer supersede correct; S5)",
@@ -399,7 +405,11 @@ fn append_policy_notes() -> AppendPolicyNotes {
 }
 
 /// Tables that must exist for append-only tooling.
-const REQUIRED_TABLES: &[&str] = &["entity_audit", "set_order_revisions"];
+const REQUIRED_TABLES: &[&str] = &[
+    "entity_audit",
+    "set_order_revisions",
+    crate::append_guard::WRITE_ALLOW_TABLE,
+];
 
 /// (table, required columns) for soft-delete / supersede event model.
 const EVENT_SCHEMA: &[(&str, &[&str])] = &[
@@ -477,6 +487,7 @@ fn table_columns(conn: &Connection, table: &str) -> Result<HashSet<String>> {
 fn check_append_schema(conn: &Connection) -> Result<AppendSchemaReport> {
     let mut missing_tables = Vec::new();
     let mut missing_columns = Vec::new();
+    let mut missing_triggers = Vec::new();
 
     for t in REQUIRED_TABLES {
         if !table_exists(conn, t)? {
@@ -497,11 +508,27 @@ fn check_append_schema(conn: &Connection) -> Result<AppendSchemaReport> {
         }
     }
 
+    let present_triggers = list_triggers(conn)?;
+    for name in crate::append_guard::required_triggers_for_conn(conn)? {
+        if !present_triggers.contains(&name) {
+            missing_triggers.push(name);
+        }
+    }
+
     Ok(AppendSchemaReport {
-        ok: missing_tables.is_empty() && missing_columns.is_empty(),
+        ok: missing_tables.is_empty() && missing_columns.is_empty() && missing_triggers.is_empty(),
         missing_tables,
         missing_columns,
+        missing_triggers,
     })
+}
+
+fn list_triggers(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'")?;
+    let names = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<HashSet<_>, _>>()?;
+    Ok(names)
 }
 
 fn find_orphan_soft_deletes(conn: &Connection) -> Result<AppendFindingGroup> {
@@ -706,6 +733,9 @@ fn print_append_human(report: &AppendReport) {
         }
         for c in &report.schema.missing_columns {
             println!("    missing column: {c}");
+        }
+        for tr in &report.schema.missing_triggers {
+            println!("    missing trigger: {tr}");
         }
     }
 

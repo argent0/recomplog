@@ -8,6 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
+use crate::append_guard::{self, op as write_op};
 use crate::db;
 
 /// Well-known audit kinds (extensible; see reports/append/S7).
@@ -446,13 +447,16 @@ pub fn supersede_retire(
         }
     }
     let deleted_at = db::now_utc();
-    let n = conn.execute(
-        &format!(
-            "UPDATE {table} SET deleted_at = ?1, delete_reason = ?2 \
-             WHERE id = ?3 AND deleted_at IS NULL"
-        ),
-        params![deleted_at, reason, old_id],
-    )?;
+    let n = append_guard::with_write_allow(conn, write_op::SUPERSEDE, |conn| {
+        let n = conn.execute(
+            &format!(
+                "UPDATE {table} SET deleted_at = ?1, delete_reason = ?2 \
+                 WHERE id = ?3 AND deleted_at IS NULL"
+            ),
+            params![deleted_at, reason, old_id],
+        )?;
+        Ok(n)
+    })?;
     if n == 0 {
         return Err(anyhow!(
             "{entity_type} {old_id} not found or already soft-deleted"
@@ -578,12 +582,15 @@ pub fn soft_delete(
         Some((None,)) => {}
     }
     let deleted_at = db::now_utc();
-    let n = conn.execute(
-        &format!(
-            "UPDATE {table} SET deleted_at = ?1, delete_reason = ?2 WHERE id = ?3 AND deleted_at IS NULL"
-        ),
-        params![deleted_at, reason, id],
-    )?;
+    let n = append_guard::with_write_allow(conn, write_op::SOFT_DELETE, |conn| {
+        let n = conn.execute(
+            &format!(
+                "UPDATE {table} SET deleted_at = ?1, delete_reason = ?2 WHERE id = ?3 AND deleted_at IS NULL"
+            ),
+            params![deleted_at, reason, id],
+        )?;
+        Ok(n)
+    })?;
     if n == 0 {
         return Err(anyhow!(
             "{entity_type} {id} not found or already soft-deleted"
@@ -655,7 +662,12 @@ pub fn purge(
         None,
         meta_s.as_deref(),
     )?;
-    let n = conn.execute(&format!("DELETE FROM {table} WHERE id = ?1"), [id])?;
+    // CASCADE child DELETEs (sets, trackpoints, imports, set_order_revisions) need
+    // the same connection-local purge allow.
+    let n = append_guard::with_write_allow(conn, write_op::PURGE, |conn| {
+        let n = conn.execute(&format!("DELETE FROM {table} WHERE id = ?1"), [id])?;
+        Ok(n)
+    })?;
     if n == 0 {
         return Err(anyhow!("{entity_type} {id} not found during purge"));
     }

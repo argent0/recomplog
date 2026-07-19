@@ -40,6 +40,8 @@ pub fn open_db(override_path: Option<&str>) -> Result<Connection> {
         .with_context(|| format!("failed to open database at {}", path.display()))?;
     conn.execute("PRAGMA foreign_keys = ON", [])?;
     run_migrations(&conn)?;
+    // F3b: write-allow table must exist (empty = deny). Created in v13; ensure for safety.
+    crate::append_guard::ensure_write_allow_table(&conn)?;
     Ok(conn)
 }
 
@@ -61,7 +63,7 @@ pub fn open_db_readonly_for_completion(override_path: Option<&str>) -> Option<Co
 }
 
 /// Current schema version. Bump when adding a new migration block.
-const CURRENT_VERSION: i32 = 12;
+const CURRENT_VERSION: i32 = 13;
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i32 = conn
@@ -86,6 +88,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     // v3/v4 bulk-mutate historical consumptions.quantity/unit. One-shot only:
     // never re-export these helpers for import or "fix on open". After v4,
     // event units are immutable except explicit user/agent corrections.
+    // These run *before* v13 append triggers exist on fresh DBs.
     if current < 3 {
         normalize_nutrition_units(conn)?;
         conn.execute("PRAGMA user_version = 3", [])?;
@@ -127,6 +130,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     if current < 12 {
         apply_v12_set_order_revisions(conn)?;
         conn.execute("PRAGMA user_version = 12", [])?;
+    }
+    if current < 13 {
+        apply_v13_append_only_triggers(conn)?;
+        conn.execute("PRAGMA user_version = 13", [])?;
     }
 
     Ok(())
@@ -824,6 +831,17 @@ CREATE INDEX IF NOT EXISTS idx_set_order_revisions_we
     ON set_order_revisions(workout_exercise_id, at, id);
 "#,
     )?;
+    Ok(())
+}
+
+/// Append-only SQLite triggers (schema v13 / F3b). See migrations/013_*.sql and
+/// reports/append/F3-event-tables-not-append-constrained.md.
+///
+/// Installs permanent `_recomplog_write_allow` + event UPDATE/DELETE guards.
+/// Historical bulk UPDATEs (v3–v5) run before this migration on fresh DBs.
+fn apply_v13_append_only_triggers(conn: &Connection) -> Result<()> {
+    crate::append_guard::install_append_only_triggers(conn)
+        .context("failed to install append-only triggers (v13)")?;
     Ok(())
 }
 

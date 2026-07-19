@@ -1,0 +1,20 @@
+-- Append-only guardrails at the DB layer (schema v13 / F3b).
+-- Applied in Rust: apply_v13_append_only_triggers via append_guard::append_only_triggers_sql.
+--
+-- Event tables deny UPDATE/DELETE unless `_recomplog_write_allow` (main schema)
+-- has a row (ops: soft_delete, supersede, lifecycle, correct, purge, migrate).
+-- Helpers insert a row for the duration of the mutation only. entity_audit is
+-- insert-only (migrate exception). set_order_revisions forbids UPDATE (migrate)
+-- and allows DELETE under purge (CASCADE from workout purge) or migrate.
+--
+-- See reports/append/F3-event-tables-not-append-constrained.md.
+--
+-- Trigger list (see append_guard::required_triggers_for_conn):
+--   ao_entity_audit_no_update / ao_entity_audit_no_delete
+--   ao_set_order_revisions_no_update / ao_set_order_revisions_delete_guard
+--   ao_{workouts,exercise_sets,measurements,sleep,consumptions,purchases}_update_guard
+--   ao_{...}_delete_guard
+--   ao_activity_imports_{update,delete}_guard
+--   ao_activity_trackpoints_{update,delete}_guard
+--
+-- Installed by src/append_guard.rs::install_append_only_triggers (skips missing tables).

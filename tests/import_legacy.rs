@@ -518,8 +518,14 @@ fn legacy_import_body_idempotent_preserves_corrections() {
         .assert()
         .success();
 
-    // Local correction after first import.
+    // Local correction after first import (raw SQL needs F3b write allow).
     let target = Connection::open(&dst).unwrap();
+    target
+        .execute(
+            "INSERT INTO _recomplog_write_allow (op) VALUES ('correct')",
+            [],
+        )
+        .unwrap();
     target
         .execute(
             "UPDATE measurements SET weight_kg = 81.2, body_fat_pct = 15.0 WHERE date = '2026-07-01'",
@@ -532,6 +538,7 @@ fn legacy_import_body_idempotent_preserves_corrections() {
             [],
         )
         .unwrap();
+    let _ = target.execute("DELETE FROM _recomplog_write_allow", []);
 
     let out = bin()
         .args([

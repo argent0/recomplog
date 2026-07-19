@@ -181,7 +181,7 @@ recomplog --json db check missing --days 7 --workout-days 3
 # End window at yesterday (do not require today's logs yet):
 recomplog --json db check missing --days 7 --workout-days 3 --skip-today
 
-# Append-only integrity: schema columns, soft-deletes/updates without audit trail
+# Append-only integrity: schema columns, F3b write-allow triggers, orphan soft-deletes/updates
 recomplog --json db check append
 recomplog db check append
 

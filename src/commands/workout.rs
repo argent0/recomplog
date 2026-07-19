@@ -308,7 +308,11 @@ pub fn handle(
             let sql = format!("UPDATE workouts SET {} WHERE id = ?", sets.join(", "));
             vals.push(Box::new(id));
             let refs: Vec<&dyn rusqlite::ToSql> = vals.iter().map(|b| b.as_ref()).collect();
-            conn.execute(&sql, refs.as_slice())?;
+            let write_op = crate::append_guard::op_for_update_class(class);
+            crate::append_guard::with_write_allow(&conn, write_op, |conn| {
+                conn.execute(&sql, refs.as_slice())?;
+                Ok(())
+            })?;
             entity_audit::append_field_change(
                 &conn,
                 entity_audit::entity::WORKOUT,
@@ -2992,7 +2996,11 @@ fn handle_set(
             let sql = format!("UPDATE exercise_sets SET {} WHERE id = ?", sets.join(", "));
             vals.push(Box::new(id));
             let refs: Vec<&dyn rusqlite::ToSql> = vals.iter().map(|b| b.as_ref()).collect();
-            conn.execute(&sql, refs.as_slice())?;
+            let write_op = crate::append_guard::op_for_update_class(class);
+            crate::append_guard::with_write_allow(&conn, write_op, |conn| {
+                conn.execute(&sql, refs.as_slice())?;
+                Ok(())
+            })?;
             entity_audit::append_field_change(
                 &conn,
                 entity_audit::entity::EXERCISE_SET,
