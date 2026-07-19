@@ -172,12 +172,15 @@ fn set_update_and_move() {
         .success()
         .stdout(predicate::str::contains("set updated"))
         .stdout(predicate::str::contains("\"kind\": \"correction\""));
+    // F4: move appends revision; response includes revision_id
     bin()
         .args([
             "--db", &db, "--json", "workout", "set", "move", "2", "--to", "1",
         ])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("\"revision_id\""))
+        .stdout(predicate::str::contains("set moved"));
 }
 
 #[test]

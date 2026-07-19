@@ -3,10 +3,12 @@
 use crate::bodyweight;
 use crate::commands::workout::resolve_exercise;
 use crate::phase;
+use crate::set_order;
 use crate::utils::{format_datetime, print_json, print_table};
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
+use std::collections::HashMap;
 
 /// Inclusive calendar window bind for `date(started_at, 'localtime') >= date('now', 'localtime', ?)`.
 fn since_bind(days: i64) -> String {
@@ -300,40 +302,103 @@ pub fn handle_history(conn: &Connection, exercise: &str, days: i64, json: bool) 
     let mut stmt = conn.prepare(
         "SELECT w.id AS workout_id, w.started_at, w.workout_type,
                 e.name AS exercise_name, e.load_type AS exercise_load_type,
-                s.set_number, s.reps, s.weight_kg, s.external_load_kg, s.duration_seconds,
-                s.side, s.phase, s.rir, s.effective_reps, s.notes
+                s.id, s.workout_exercise_id, s.set_number, s.reps, s.weight_kg, s.external_load_kg,
+                s.duration_seconds, s.side, s.phase, s.rir, s.effective_reps, s.notes
          FROM exercise_sets s
          JOIN workout_exercises we ON s.workout_exercise_id = we.id
          JOIN exercises e ON we.exercise_id = e.id
          JOIN workouts w ON we.workout_id = w.id
          WHERE s.deleted_at IS NULL AND w.deleted_at IS NULL
            AND e.name = ?1 AND date(w.started_at, 'localtime') >= date('now', 'localtime', ?2)
-         ORDER BY w.started_at ASC, s.set_number ASC",
+         ORDER BY w.started_at ASC, s.set_number ASC, s.id ASC",
     )?;
 
-    let entries: Vec<HistoryEntry> = stmt
+    struct RawHist {
+        workout_id: i64,
+        started_at: String,
+        workout_type: Option<String>,
+        exercise: String,
+        exercise_load_type: String,
+        set_id: i64,
+        we_id: i64,
+        frozen_sn: i32,
+        reps: Option<i32>,
+        weight_kg: Option<f64>,
+        external_load_kg: Option<f64>,
+        duration_seconds: Option<i32>,
+        side: Option<String>,
+        phase: String,
+        rir: Option<f64>,
+        effective_reps: Option<i32>,
+        notes: Option<String>,
+    }
+
+    let raw: Vec<RawHist> = stmt
         .query_map(params![exercise_name, since], |r| {
-            let started_at: String = r.get(1)?;
-            Ok(HistoryEntry {
+            Ok(RawHist {
                 workout_id: r.get(0)?,
-                date: format_datetime(&started_at),
+                started_at: r.get(1)?,
                 workout_type: r.get(2)?,
                 exercise: r.get(3)?,
                 exercise_load_type: r.get(4)?,
-                set_number: r.get(5)?,
-                reps: r.get(6)?,
-                weight_kg: r.get(7)?,
-                external_load_kg: r.get(8)?,
-                duration_seconds: r.get(9)?,
-                side: r.get(10)?,
-                phase: r.get(11)?,
-                rir: r.get(12)?,
-                effective_reps: r.get(13)?,
-                notes: r.get(14)?,
+                set_id: r.get(5)?,
+                we_id: r.get(6)?,
+                frozen_sn: r.get(7)?,
+                reps: r.get(8)?,
+                weight_kg: r.get(9)?,
+                external_load_kg: r.get(10)?,
+                duration_seconds: r.get(11)?,
+                side: r.get(12)?,
+                phase: r.get(13)?,
+                rir: r.get(14)?,
+                effective_reps: r.get(15)?,
+                notes: r.get(16)?,
             })
         })?
         .filter_map(|r| r.ok())
         .collect();
+
+    // Display set_number from effective order per workout_exercise (F4).
+    let mut display_cache: HashMap<i64, HashMap<i64, i64>> = HashMap::new();
+    for row in &raw {
+        if let std::collections::hash_map::Entry::Vacant(e) = display_cache.entry(row.we_id) {
+            let order = set_order::effective_set_order(conn, row.we_id)?;
+            e.insert(set_order::set_display_numbers(&order));
+        }
+    }
+
+    let mut entries: Vec<HistoryEntry> = raw
+        .into_iter()
+        .map(|r| {
+            let display_sn = display_cache
+                .get(&r.we_id)
+                .and_then(|m| m.get(&r.set_id).copied())
+                .unwrap_or(r.frozen_sn as i64) as i32;
+            HistoryEntry {
+                workout_id: r.workout_id,
+                date: format_datetime(&r.started_at),
+                workout_type: r.workout_type,
+                exercise: r.exercise,
+                exercise_load_type: r.exercise_load_type,
+                set_number: display_sn,
+                reps: r.reps,
+                weight_kg: r.weight_kg,
+                external_load_kg: r.external_load_kg,
+                duration_seconds: r.duration_seconds,
+                side: r.side,
+                phase: r.phase,
+                rir: r.rir,
+                effective_reps: r.effective_reps,
+                notes: r.notes,
+                _started_at: r.started_at,
+            }
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        a._started_at
+            .cmp(&b._started_at)
+            .then_with(|| a.set_number.cmp(&b.set_number))
+    });
 
     if json {
         print_json(&entries);
@@ -401,6 +466,9 @@ struct HistoryEntry {
     rir: Option<f64>,
     effective_reps: Option<i32>,
     notes: Option<String>,
+    /// Sort key only; not part of JSON/agent contract.
+    #[serde(skip)]
+    _started_at: String,
 }
 
 pub fn handle_weight(conn: &Connection, exercise: &str, json: bool) -> Result<()> {

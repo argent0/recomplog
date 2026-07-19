@@ -17,6 +17,7 @@ mod phase;
 mod product_resolve;
 mod repository;
 mod sanity;
+mod set_order;
 mod stats;
 mod track_metrics;
 mod utils;

@@ -29,6 +29,8 @@ pub mod kind {
     pub const CATALOG: &str = "catalog";
     /// Prior head retired because a new row supersedes it (F1).
     pub const SUPERSEDE: &str = "supersede";
+    /// Session set reorder via append-only order revision (F4); does not rewrite set_number.
+    pub const MOVE: &str = "move";
 }
 
 /// Classification of an in-place event field update (S5).
@@ -165,6 +167,25 @@ pub fn append_import(
         Some(summary),
         None,
         meta_s.as_deref(),
+    )
+}
+
+/// Append a `move` audit row for set reordering (F4). Meta includes revision id and id lists.
+pub fn append_set_move(
+    conn: &Connection,
+    set_id: i64,
+    summary: &str,
+    meta: &JsonValue,
+) -> Result<i64> {
+    append(
+        conn,
+        entity::EXERCISE_SET,
+        set_id,
+        kind::MOVE,
+        Some("cli"),
+        Some(summary),
+        None,
+        Some(&meta.to_string()),
     )
 }
 

@@ -143,6 +143,9 @@ recomplog --json workout update 1 --finished-at 2026-07-14T18:30:00-03:00
 # Prefer supersede correct when possible (empty session or set-level):
 recomplog --json workout correct 1 --type Pull --reason "wrong template"
 recomplog --json workout set correct 1 --reps 6 --reason "miscount"
+# Set order is append-only: move inserts set_order_revisions; never rewrites sibling set_number
+recomplog --json workout set move 2 --to 1
+recomplog --json workout set audit 2
 recomplog --json workout update 1 --finished-at 2026-07-14T19:00:00-03:00 --reason "clock typo"
 recomplog --json workout list --days 14
 # Soft-delete keeps history; --purge --force hard-removes CASCADE trees

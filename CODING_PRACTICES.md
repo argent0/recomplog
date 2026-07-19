@@ -48,6 +48,10 @@ This document defines the coding standards for the unified `recomplog` project.
      migration heuristics (`normalize_nutrition_units`, `promote_whole_package_products`)
      on open, import, or as a silent repair path. Those run once under `user_version`
      gates; further unit fixes are explicit user/agent corrections, not migrate-on-open.
+   - **Session set order:** `exercise_sets.set_number` is frozen at insert. Reorder via
+     `workout set move` appends a `set_order_revisions` row (full ordered id list); never
+     `UPDATE` sibling `set_number`. Readers use `effective_set_order` (display `set_number`
+     is derived 1..n). See `src/set_order.rs` and reports/append/F4.
 
 4. **Data quality and actionable reports**
    - Protect event-time integrity and refuse garbage on write when possible.

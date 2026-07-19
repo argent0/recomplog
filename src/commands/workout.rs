@@ -10,6 +10,7 @@ use crate::load_type;
 use crate::models::{Exercise, HeartRateZones, Laps, Success, Trackpoint};
 use crate::phase;
 use crate::sanity::{self, ProposedSetMetrics};
+use crate::set_order;
 use crate::track_metrics::{
     compute, compute_with_zones, RouteKind, TrackMetrics, ZoneRecomputeContext,
 };
@@ -1210,27 +1211,33 @@ fn list_sets_json(
     we_id: i64,
     activity_date: &str,
 ) -> Result<Vec<serde_json::Value>> {
+    // Display order from set_order_revisions (F4); set_number in JSON is derived 1..n.
+    let order = set_order::effective_set_order(conn, we_id)?;
+    let display = set_order::set_display_numbers(&order);
+
     let mut sstmt = conn.prepare(
         "SELECT id, set_number, reps, weight_kg, external_load_kg, distance_km, duration_seconds,
                 rpe, rir, effective_reps, cluster_id, rest_seconds, notes, side, phase,
                 avg_heart_rate_bpm, max_heart_rate_bpm, avg_pace_min_per_km, calories_burned,
                 avg_cadence_spm, total_ascent_m, total_descent_m,
                 heart_rate_zones, laps, date_of_birth, resting_hr_bpm
-         FROM exercise_sets WHERE workout_exercise_id = ?1 AND deleted_at IS NULL
-         ORDER BY set_number",
+         FROM exercise_sets WHERE workout_exercise_id = ?1 AND deleted_at IS NULL",
     )?;
-    let mut sets = Vec::new();
+    let mut by_id: std::collections::HashMap<i64, serde_json::Value> =
+        std::collections::HashMap::new();
     let mut rows = sstmt.query([we_id])?;
     while let Some(r) = rows.next()? {
         let set_id: i64 = r.get(0)?;
+        let frozen_sn: i64 = r.get(1)?;
         let distance_km: Option<f64> = r.get(5)?;
         let zones: Option<String> = r.get(22)?;
         let laps: Option<String> = r.get(23)?;
         let date_of_birth: Option<String> = r.get(24)?;
         let resting_hr_bpm: Option<f64> = r.get(25)?;
+        let display_n = display.get(&set_id).copied().unwrap_or(frozen_sn);
         let mut set_json = serde_json::json!({
             "id": set_id,
-            "set_number": r.get::<_, i64>(1)?,
+            "set_number": display_n,
             "reps": r.get::<_, Option<i32>>(2)?,
             "weight_kg": r.get::<_, Option<f64>>(3)?,
             "external_load_kg": r.get::<_, Option<f64>>(4)?,
@@ -1266,7 +1273,17 @@ fn list_sets_json(
                 obj.insert("track_metrics".to_string(), serde_json::to_value(&tm)?);
             }
         }
-        sets.push(set_json);
+        by_id.insert(set_id, set_json);
+    }
+    let mut sets = Vec::with_capacity(order.len());
+    for id in order {
+        if let Some(s) = by_id.remove(&id) {
+            sets.push(s);
+        }
+    }
+    // Any active set missing from order (should not happen) appends last.
+    for (_, s) in by_id {
+        sets.push(s);
     }
     Ok(sets)
 }
@@ -3052,25 +3069,33 @@ fn handle_set(
             json,
             quiet,
         ),
-        SetAction::Move { id, to, dry_run } => {
+        SetAction::Move {
+            id,
+            to,
+            reason,
+            dry_run,
+        } => {
             if to < 1 {
                 return Err(anyhow!("--to must be >= 1"));
             }
             let conn = db::open_db(db_override)?;
-            let (we_id, old_num): (i64, i64) = conn
+            let (we_id, deleted_at): (i64, Option<String>) = conn
                 .query_row(
-                    "SELECT workout_exercise_id, set_number FROM exercise_sets WHERE id = ?1",
+                    "SELECT workout_exercise_id, deleted_at FROM exercise_sets WHERE id = ?1",
                     [id],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .map_err(|_| anyhow!("set {id} not found"))?;
-            let max_n: i64 = conn.query_row(
-                "SELECT COALESCE(MAX(set_number), 0) FROM exercise_sets WHERE workout_exercise_id = ?1",
-                [we_id],
-                |r| r.get(0),
-            )?;
-            let target = to.min(max_n as i32) as i64;
-            if target == old_num {
+            if deleted_at.is_some() {
+                return Err(anyhow!(
+                    "set {id} is soft-deleted; restore or use an active set id"
+                ));
+            }
+
+            let order_before = set_order::effective_set_order(&conn, we_id)?;
+            let (order_after, from_pos, to_pos) = set_order::splice_move(&order_before, id, to)?;
+
+            if from_pos == to_pos {
                 if dry_run {
                     return emit_dry_run(
                         json,
@@ -3078,17 +3103,22 @@ fn handle_set(
                         serde_json::json!({
                             "action": "set move",
                             "id": id,
-                            "from": old_num,
-                            "to": target,
+                            "from": from_pos,
+                            "to": to_pos,
+                            "order_before": order_before,
+                            "order_after": order_after,
                             "noop": true,
                         }),
                     );
                 }
                 if json {
                     print_json(&Success::ok("already at position"));
+                } else {
+                    quiet_print(quiet, format!("Set {id} already at position {from_pos}"));
                 }
                 return Ok(());
             }
+
             if dry_run {
                 return emit_dry_run(
                     json,
@@ -3096,40 +3126,54 @@ fn handle_set(
                     serde_json::json!({
                         "action": "set move",
                         "id": id,
-                        "from": old_num,
-                        "to": target,
+                        "from": from_pos,
+                        "to": to_pos,
+                        "order_before": order_before,
+                        "order_after": order_after,
                     }),
                 );
             }
-            // Temporary set_number swap using negative range
-            conn.execute(
-                "UPDATE exercise_sets SET set_number = -set_number WHERE workout_exercise_id = ?1",
-                [we_id],
+
+            // Append-only: insert order revision; never UPDATE exercise_sets.set_number.
+            let revision_id = set_order::insert_revision(
+                &conn,
+                we_id,
+                &order_after,
+                Some("cli"),
+                reason.as_deref(),
             )?;
-            // Remap in order
-            let mut stmt = conn.prepare(
-                "SELECT id, -set_number as sn FROM exercise_sets WHERE workout_exercise_id = ?1 ORDER BY sn",
+            let meta = serde_json::json!({
+                "revision_id": revision_id,
+                "workout_exercise_id": we_id,
+                "order_before": order_before,
+                "order_after": order_after,
+                "from": from_pos,
+                "to": to_pos,
+                "reason": reason,
+            });
+            entity_audit::append_set_move(
+                &conn,
+                id,
+                &format!("moved set to position {to_pos}"),
+                &meta,
             )?;
-            let mut order: Vec<(i64, i64)> = stmt
-                .query_map([we_id], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .filter_map(|r| r.ok())
-                .collect();
-            // remove moving id and reinsert at target-1
-            if let Some(pos) = order.iter().position(|(sid, _)| *sid == id) {
-                let item = order.remove(pos);
-                let insert_at = (target as usize - 1).min(order.len());
-                order.insert(insert_at, item);
-            }
-            for (i, (sid, _)) in order.iter().enumerate() {
-                conn.execute(
-                    "UPDATE exercise_sets SET set_number = ?1 WHERE id = ?2",
-                    params![(i as i64) + 1, sid],
-                )?;
-            }
+
             if json {
-                print_json(&Success::created(id, format!("pos {target}"), "set moved"));
+                print_json(&serde_json::json!({
+                    "success": true,
+                    "id": id,
+                    "revision_id": revision_id,
+                    "from": from_pos,
+                    "to": to_pos,
+                    "order_before": order_before,
+                    "order_after": order_after,
+                    "message": "set moved",
+                }));
             } else {
-                quiet_print(quiet, format!("Moved set {id} to position {target}"));
+                quiet_print(
+                    quiet,
+                    format!("Moved set {id} to position {to_pos} (revision {revision_id})"),
+                );
             }
             Ok(())
         }

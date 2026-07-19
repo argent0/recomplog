@@ -749,12 +749,15 @@ pub enum SetAction {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Reorder a set within its workout-exercise.
+    /// Reorder a set within its workout-exercise (append-only order revision; never rewrites sibling set_number).
     Move {
         id: i64,
         /// Target 1-based position
         #[arg(long)]
         to: i32,
+        /// Optional note stored on the order revision and audit meta.
+        #[arg(long)]
+        reason: Option<String>,
         /// Show what would be moved without writing.
         #[arg(long)]
         dry_run: bool,

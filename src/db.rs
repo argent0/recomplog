@@ -61,7 +61,7 @@ pub fn open_db_readonly_for_completion(override_path: Option<&str>) -> Option<Co
 }
 
 /// Current schema version. Bump when adding a new migration block.
-const CURRENT_VERSION: i32 = 11;
+const CURRENT_VERSION: i32 = 12;
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     let current: i32 = conn
@@ -123,6 +123,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     if current < 11 {
         apply_v11_event_supersedes(conn)?;
         conn.execute("PRAGMA user_version = 11", [])?;
+    }
+    if current < 12 {
+        apply_v12_set_order_revisions(conn)?;
+        conn.execute("PRAGMA user_version = 12", [])?;
     }
 
     Ok(())
@@ -798,6 +802,27 @@ fn apply_v9_product_merge_alias(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_products_merged_into ON products(merged_into_id)",
         [],
+    )?;
+    Ok(())
+}
+
+/// Append-only set order revisions (schema v12). See migrations/012_*.sql and
+/// reports/append/F4-append-only-set-order.md.
+fn apply_v12_set_order_revisions(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS set_order_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workout_exercise_id INTEGER NOT NULL
+        REFERENCES workout_exercises(id) ON DELETE CASCADE,
+    at TEXT NOT NULL,
+    actor TEXT,
+    reason TEXT,
+    order_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_set_order_revisions_we
+    ON set_order_revisions(workout_exercise_id, at, id);
+"#,
     )?;
     Ok(())
 }
